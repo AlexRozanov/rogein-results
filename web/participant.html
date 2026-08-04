@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Участник - Rogein MVP</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; color: #1a1a1a; }
+    h1, h2 { margin: 0 0 10px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+    th { background: #f7f7f7; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .small { font-size: 12px; color: #555; }
+    .ok { color: #1a7f37; }
+    .dq { color: #b54708; }
+    .err { color: #b42318; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <p><a href="/">← Назад к результатам</a></p>
+  <h1>Карточка участника</h1>
+  <p id="statusLine" class="small mono"></p>
+
+  <section class="card">
+    <h2>Сводка</h2>
+    <pre id="summary" class="mono"></pre>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Использованные отметки (после корректировок)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>КП</th>
+            <th>Время отметки</th>
+            <th>Перегон</th>
+          </tr>
+        </thead>
+        <tbody id="correctedMarksBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Сырые отметки из CSV</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>seq</th>
+            <th>КП</th>
+            <th>Время</th>
+          </tr>
+        </thead>
+        <tbody id="rawMarksBody"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Корректировки</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Тип</th>
+          <th>Параметры</th>
+          <th>Создано</th>
+        </tr>
+      </thead>
+      <tbody id="correctionsBody"></tbody>
+    </table>
+  </section>
+
+  <script>
+    function setStatus(text) {
+      document.getElementById("statusLine").textContent = text;
+    }
+
+    function fmtHms(totalSeconds) {
+      const s = Math.max(0, Number(totalSeconds || 0));
+      const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
+    function parseIso(v) {
+      return new Date(v.replace(" ", "T"));
+    }
+
+    function diffSeconds(a, b) {
+      return Math.max(0, Math.round((b.getTime() - a.getTime()) / 1000));
+    }
+
+    async function loadDetails() {
+      const participantId = decodeURIComponent(location.pathname.split("/").pop() || "");
+      if (!participantId) throw new Error("Не указан ID участника");
+      const res = await fetch(`/api/participant/${encodeURIComponent(participantId)}`);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "API error");
+
+      const d = data.details;
+      const p = d.participant;
+      const r = d.result;
+      document.title = `Участник ${p.participant_id} - Rogein MVP`;
+
+      const summary = {
+        participant_id: p.participant_id,
+        name: p.name,
+        start_station_id: p.start_station_id,
+        start_time: p.start_time,
+        status: r ? r.status : null,
+        points_raw: r ? r.points_raw : null,
+        penalty_points: r ? r.penalty_points : null,
+        points_final: r ? r.points_final : null,
+        elapsed_hms: r ? fmtHms(r.elapsed_seconds) : null,
+        delay_seconds: r ? r.delay_seconds : null,
+        penalty_minutes: r ? r.penalty_minutes : null,
+        diagnostics: r ? JSON.parse(r.diagnostics_json) : null
+      };
+      document.getElementById("summary").textContent = JSON.stringify(summary, null, 2);
+
+      const correctedBody = document.getElementById("correctedMarksBody");
+      correctedBody.innerHTML = "";
+      d.corrected_marks.forEach((m, idx) => {
+        const tr = document.createElement("tr");
+        let leg = "-";
+        if (idx > 0) {
+          const prev = parseIso(d.corrected_marks[idx - 1].mark_time);
+          const cur = parseIso(m.mark_time);
+          leg = fmtHms(diffSeconds(prev, cur));
+        }
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td>${m.cp_number}</td>
+          <td class="mono">${m.mark_time}</td>
+          <td class="mono">${leg}</td>
+        `;
+        correctedBody.appendChild(tr);
+      });
+
+      const rawBody = document.getElementById("rawMarksBody");
+      rawBody.innerHTML = "";
+      d.raw_marks.forEach((m) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${m.seq}</td>
+          <td>${m.cp_number}</td>
+          <td class="mono">${m.mark_time}</td>
+        `;
+        rawBody.appendChild(tr);
+      });
+
+      const corrBody = document.getElementById("correctionsBody");
+      corrBody.innerHTML = "";
+      if (!d.corrections.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="4" class="small">Корректировок нет</td>`;
+        corrBody.appendChild(tr);
+      } else {
+        d.corrections.forEach((c) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${c.id}</td>
+            <td>${c.correction_type}</td>
+            <td class="mono">${JSON.stringify(c.payload)}</td>
+            <td class="mono">${c.created_at}</td>
+          `;
+          corrBody.appendChild(tr);
+        });
+      }
+
+      setStatus(`Загружен участник ${p.participant_id}: ${p.name}`);
+    }
+
+    loadDetails().catch((err) => setStatus(`Ошибка: ${err.message}`));
+  </script>
+</body>
+</html>

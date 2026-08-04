@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rogein MVP</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; color: #1a1a1a; }
+    h1, h2 { margin: 0 0 10px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    label { display: block; font-size: 13px; margin: 8px 0 4px; }
+    input, select, button { width: 100%; padding: 8px; box-sizing: border-box; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+    th { background: #f7f7f7; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .small { font-size: 12px; color: #555; }
+    .ok { color: #1a7f37; }
+    .dq { color: #b54708; }
+    .err { color: #b42318; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Rogein MVP</h1>
+  <p class="small">SQLite + ручные корректировки + пересчет</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Настройки</h2>
+      <div class="row">
+        <div>
+          <label>Контрольное время (мин)</label>
+          <input id="controlMinutes" type="number" min="0">
+        </div>
+        <div>
+          <label>Штраф за минуту</label>
+          <input id="penaltyPerMinute" type="number" min="0">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>DQ после КВ (мин)</label>
+          <input id="dqMinutes" type="number" min="0">
+        </div>
+        <div>
+          <label>Финишный КП</label>
+          <input id="finishCp" type="number" min="0">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="saveSettingsBtn">Сохранить настройки</button>
+        <button id="recalcBtn">Пересчитать</button>
+      </div>
+      <p id="counts" class="small mono"></p>
+    </section>
+
+    <section class="card">
+      <h2>Загрузка CSV</h2>
+      <label>Файл результатов (.csv)</label>
+      <input id="csvFileInput" type="file" accept=".csv,text/csv">
+      <label><input id="csvResetInput" type="checkbox" style="width:auto;" checked> Очистить старые данные перед импортом</label>
+      <button id="uploadCsvBtn" style="margin-top:10px;">Загрузить CSV в базу</button>
+    </section>
+  </div>
+
+  <div class="grid" style="margin-top:16px;">
+    <section class="card">
+      <h2>Фильтр результатов</h2>
+      <div class="row">
+        <div>
+          <label>Поиск (id/имя)</label>
+          <input id="searchText" type="text" placeholder="например 130 или Иванов">
+        </div>
+        <div>
+          <label>Статус</label>
+          <select id="statusFilter">
+            <option value="">Все</option>
+            <option value="OK">OK</option>
+            <option value="DQ">DQ</option>
+            <option value="ERR">ERR</option>
+          </select>
+        </div>
+        <div>
+          <label>Лимит</label>
+          <input id="limitRows" type="number" min="1" max="2000" value="200">
+        </div>
+      </div>
+      <button id="refreshResultsBtn" style="margin-top:10px;">Обновить таблицу</button>
+    </section>
+    <section class="card">
+      <h2>Подсказка</h2>
+      <p class="small">
+        После загрузки CSV нажмите "Пересчитать", чтобы обновить итоговые результаты
+        с учетом текущих настроек и правил корректировки.
+      </p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px;">
+    <h2>Результаты</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Имя</th>
+          <th>Статус</th>
+          <th>Сырые очки</th>
+          <th>Штраф</th>
+          <th>Итог</th>
+          <th>Время</th>
+          <th>Диагностика</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </section>
+
+  <section class="card" style="margin-top:16px;">
+    <h2>Карточка участника</h2>
+    <div class="row">
+      <div>
+        <label>ID участника</label>
+        <input id="participantId" type="text" placeholder="например 130">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <button id="loadParticipantBtn">Открыть карточку</button>
+      </div>
+    </div>
+    <pre id="participantInfo" class="small mono"></pre>
+  </section>
+
+  <div class="grid" style="margin-top:16px;">
+    <section class="card">
+      <h2>Добавить КП</h2>
+      <div class="row">
+        <div>
+          <label>Номер КП</label>
+          <input id="addCpNum" type="number">
+        </div>
+        <div>
+          <label>Время (YYYY-MM-DD HH:MM:SS)</label>
+          <input id="addCpTime" type="text" placeholder="2026-08-02 15:10:00">
+        </div>
+      </div>
+      <button id="addCpBtn" style="margin-top:10px;">Добавить корректировку</button>
+    </section>
+
+    <section class="card">
+      <h2>Удалить КП</h2>
+      <div class="row">
+        <div>
+          <label>Номер КП</label>
+          <input id="removeCpNum" type="number">
+        </div>
+        <div>
+          <label>Точное время (необязательно)</label>
+          <input id="removeCpTime" type="text" placeholder="2026-08-02 15:10:00">
+        </div>
+      </div>
+      <label><input id="removeCpAll" type="checkbox" style="width:auto;"> Удалить все совпадения</label>
+      <button id="removeCpBtn" style="margin-top:10px;">Добавить корректировку</button>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px;">
+    <h2>Исключить перегон</h2>
+    <input id="excludeEditRuleId" type="hidden">
+    <div class="row">
+      <div>
+        <label>От КП</label>
+        <input id="fromCp" type="number">
+      </div>
+      <div>
+        <label>До КП</label>
+        <input id="toCp" type="number">
+      </div>
+      <div>
+        <label>Для кого</label>
+        <select id="excludeScope">
+          <option value="one">Только для участника</option>
+          <option value="all">Для всех участников</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <div>
+        <label>Направление</label>
+        <select id="excludeDirection">
+          <option value="forward">Прямое (from -> to)</option>
+          <option value="reverse">Обратное (to -> from)</option>
+          <option value="both">Оба направления</option>
+        </select>
+      </div>
+      <div>
+        <label>Режим</label>
+        <select id="excludeApplyMode">
+          <option value="once">Исключить 1 раз</option>
+          <option value="always">Исключать всегда</option>
+        </select>
+      </div>
+      <div>
+        <label>Макс. время перегона (сек, пусто = без лимита)</label>
+        <input id="excludeMaxSeconds" type="number" min="0" placeholder="например 600">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <button id="excludeLegBtn">Добавить правило</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <div style="display:flex;align-items:flex-end;">
+        <button id="excludeResetBtn" type="button">Сбросить форму</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" style="margin-top:16px;">
+    <h2>Существующие правила исключения</h2>
+    <button id="refreshRulesBtn">Обновить список правил</button>
+    <table style="margin-top:10px;">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Область</th>
+          <th>От</th>
+          <th>До</th>
+          <th>Направление</th>
+          <th>Режим</th>
+          <th>Макс (сек)</th>
+          <th>Действие</th>
+        </tr>
+      </thead>
+      <tbody id="excludeRulesBody"></tbody>
+    </table>
+  </section>
+
+  <p id="statusLine" class="small mono"></p>
+
+  <script>
+    const state = {
+      selectedParticipantId: null
+    };
+
+    async function apiGet(url) {
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "API error");
+      return data;
+    }
+
+    async function apiPost(url, payload) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {})
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "API error");
+      return data;
+    }
+
+    function setStatus(text) {
+      document.getElementById("statusLine").textContent = text;
+    }
+
+    function fmtHms(totalSeconds) {
+      const s = Math.max(0, Number(totalSeconds || 0));
+      const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
+    function statusClass(status) {
+      if (status === "OK") return "ok";
+      if (status === "DQ") return "dq";
+      return "err";
+    }
+
+    async function loadSettings() {
+      const data = await apiGet("/api/settings");
+      const s = data.settings;
+      document.getElementById("controlMinutes").value = s.control_minutes;
+      document.getElementById("penaltyPerMinute").value = s.penalty_per_minute;
+      document.getElementById("dqMinutes").value = s.dq_minutes;
+      document.getElementById("finishCp").value = s.finish_cp;
+    }
+
+    function renderCounts(counts) {
+      document.getElementById("counts").textContent =
+        `OK=${counts.OK || 0} DQ=${counts.DQ || 0} ERR=${counts.ERR || 0}`;
+    }
+
+    async function loadResults() {
+      const limit = document.getElementById("limitRows").value || "200";
+      const status = document.getElementById("statusFilter").value;
+      const search = document.getElementById("searchText").value;
+      const query = new URLSearchParams({ limit });
+      if (status) query.set("status", status);
+      if (search) query.set("search", search);
+
+      const data = await apiGet(`/api/results?${query.toString()}`);
+      renderCounts(data.counts);
+      const tbody = document.getElementById("resultsBody");
+      tbody.innerHTML = "";
+
+      for (const row of data.rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><a href="/participant/${encodeURIComponent(row.participant_id)}">${row.participant_id}</a></td>
+          <td>${row.name}</td>
+          <td class="${statusClass(row.status)}">${row.status}</td>
+          <td>${row.points_raw}</td>
+          <td>${row.penalty_points}</td>
+          <td>${row.points_final}</td>
+          <td>${fmtHms(row.elapsed_seconds)}</td>
+          <td class="mono">${row.diagnostics_json}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function loadParticipant(pid) {
+      if (!pid) throw new Error("participant_id is empty");
+      const data = await apiGet(`/api/participant/${encodeURIComponent(pid)}`);
+      state.selectedParticipantId = pid;
+      const d = data.details;
+      const info = {
+        participant: d.participant,
+        result: d.result,
+        corrections: d.corrections,
+        excluded_legs: d.excluded_legs,
+        corrected_marks_count: d.corrected_marks.length
+      };
+      document.getElementById("participantInfo").textContent = JSON.stringify(info, null, 2);
+      setStatus(`Карточка загружена: ${pid}`);
+    }
+
+    function activeParticipantId() {
+      const pid = document.getElementById("participantId").value.trim();
+      if (!pid) throw new Error("Введите ID участника");
+      return pid;
+    }
+
+    async function saveSettings() {
+      const payload = {
+        control_minutes: Number(document.getElementById("controlMinutes").value),
+        penalty_per_minute: Number(document.getElementById("penaltyPerMinute").value),
+        dq_minutes: Number(document.getElementById("dqMinutes").value),
+        finish_cp: Number(document.getElementById("finishCp").value)
+      };
+      await apiPost("/api/settings", payload);
+      setStatus("Настройки сохранены");
+    }
+
+    async function uploadCsv() {
+      const fileInput = document.getElementById("csvFileInput");
+      const reset = document.getElementById("csvResetInput").checked;
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) throw new Error("Выберите CSV файл");
+      const csv_content = await file.text();
+      const data = await apiPost("/api/import-csv", { csv_content, reset });
+      await loadResults();
+      await loadExcludeRules();
+      setStatus(`CSV загружен. Участников в базе: ${data.participants_count}`);
+    }
+
+    async function recalc() {
+      const data = await apiPost("/api/recalculate", {});
+      renderCounts(data.counts);
+      await loadResults();
+      setStatus("Пересчет завершен");
+    }
+
+    async function addCpCorrection() {
+      const participant_id = activeParticipantId();
+      const cp_number = Number(document.getElementById("addCpNum").value);
+      const mark_time = document.getElementById("addCpTime").value.trim();
+      await apiPost("/api/corrections/add-cp", { participant_id, cp_number, mark_time });
+      setStatus("Корректировка add-cp добавлена. Нажмите Пересчитать.");
+      await loadParticipant(participant_id);
+    }
+
+    async function removeCpCorrection() {
+      const participant_id = activeParticipantId();
+      const cp_number = Number(document.getElementById("removeCpNum").value);
+      const mark_time = document.getElementById("removeCpTime").value.trim() || null;
+      const remove_all = document.getElementById("removeCpAll").checked;
+      await apiPost("/api/corrections/remove-cp", { participant_id, cp_number, mark_time, remove_all });
+      setStatus("Корректировка remove-cp добавлена. Нажмите Пересчитать.");
+      await loadParticipant(participant_id);
+    }
+
+    async function excludeLegCorrection() {
+      const editRuleId = document.getElementById("excludeEditRuleId").value.trim();
+      const participant_scope = document.getElementById("excludeScope").value;
+      const participant_id = participant_scope === "one" ? activeParticipantId() : null;
+      const from_cp = Number(document.getElementById("fromCp").value);
+      const to_cp = Number(document.getElementById("toCp").value);
+      const direction = document.getElementById("excludeDirection").value;
+      const apply_mode = document.getElementById("excludeApplyMode").value;
+      const maxRaw = document.getElementById("excludeMaxSeconds").value.trim();
+      const max_leg_seconds = maxRaw ? Number(maxRaw) : null;
+      const payload = {
+        participant_scope,
+        participant_id,
+        from_cp,
+        to_cp,
+        direction,
+        apply_mode,
+        max_leg_seconds
+      };
+      if (editRuleId) {
+        payload.rule_id = Number(editRuleId);
+        await apiPost("/api/exclusion-rules/update", payload);
+        setStatus("Правило исключения перегона обновлено. Нажмите Пересчитать.");
+      } else {
+        await apiPost("/api/corrections/exclude-leg", payload);
+        setStatus("Правило исключения перегона добавлено. Нажмите Пересчитать.");
+      }
+      resetExcludeForm();
+      await loadExcludeRules();
+      if (participant_id) {
+        await loadParticipant(participant_id);
+      }
+    }
+
+    function resetExcludeForm() {
+      document.getElementById("excludeEditRuleId").value = "";
+      document.getElementById("excludeScope").value = "one";
+      document.getElementById("excludeDirection").value = "forward";
+      document.getElementById("excludeApplyMode").value = "once";
+      document.getElementById("excludeMaxSeconds").value = "";
+      document.getElementById("excludeLegBtn").textContent = "Добавить правило";
+    }
+
+    function beginEditExcludeRule(rule) {
+      document.getElementById("excludeEditRuleId").value = String(rule.id);
+      document.getElementById("excludeScope").value = rule.participant_id ? "one" : "all";
+      if (rule.participant_id) {
+        document.getElementById("participantId").value = rule.participant_id;
+      }
+      document.getElementById("fromCp").value = rule.from_cp;
+      document.getElementById("toCp").value = rule.to_cp;
+      document.getElementById("excludeDirection").value = rule.direction;
+      document.getElementById("excludeApplyMode").value = rule.apply_mode;
+      document.getElementById("excludeMaxSeconds").value = rule.max_leg_seconds ?? "";
+      document.getElementById("excludeLegBtn").textContent = `Сохранить правило #${rule.id}`;
+      setStatus(`Редактирование правила #${rule.id}`);
+    }
+
+    async function deleteExcludeRule(ruleId) {
+      await apiPost("/api/exclusion-rules/delete", { rule_id: ruleId });
+      setStatus(`Правило #${ruleId} удалено. Нажмите Пересчитать.`);
+      await loadExcludeRules();
+    }
+
+    async function loadExcludeRules() {
+      const participant = document.getElementById("participantId").value.trim();
+      const query = participant ? `?participant_id=${encodeURIComponent(participant)}` : "";
+      const data = await apiGet(`/api/exclusion-rules${query}`);
+      const tbody = document.getElementById("excludeRulesBody");
+      tbody.innerHTML = "";
+      if (!data.rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="8" class="small">Правил нет</td>`;
+        tbody.appendChild(tr);
+        return;
+      }
+      for (const rule of data.rows) {
+        const tr = document.createElement("tr");
+        const scope = rule.participant_id ? `участник ${rule.participant_id}` : "все";
+        tr.innerHTML = `
+          <td>${rule.id}</td>
+          <td>${scope}</td>
+          <td>${rule.from_cp}</td>
+          <td>${rule.to_cp}</td>
+          <td>${rule.direction}</td>
+          <td>${rule.apply_mode}</td>
+          <td>${rule.max_leg_seconds ?? ""}</td>
+          <td>
+            <button data-edit-rule="${rule.id}">Изменить</button>
+            <button data-delete-rule="${rule.id}">Удалить</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+      for (const btn of tbody.querySelectorAll("[data-edit-rule]")) {
+        btn.addEventListener("click", () => {
+          const id = Number(btn.getAttribute("data-edit-rule"));
+          const rule = data.rows.find((x) => x.id === id);
+          if (rule) beginEditExcludeRule(rule);
+        });
+      }
+      for (const btn of tbody.querySelectorAll("[data-delete-rule]")) {
+        btn.addEventListener("click", async () => {
+          const id = Number(btn.getAttribute("data-delete-rule"));
+          try {
+            await deleteExcludeRule(id);
+          } catch (err) {
+            setStatus(`Ошибка: ${err.message}`);
+          }
+        });
+      }
+    }
+
+    async function init() {
+      try {
+        await loadSettings();
+        await loadResults();
+        await loadExcludeRules();
+        setStatus("Готово");
+      } catch (err) {
+        setStatus(`Ошибка: ${err.message}`);
+      }
+    }
+
+    document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
+      try { await saveSettings(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("recalcBtn").addEventListener("click", async () => {
+      try { await recalc(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("uploadCsvBtn").addEventListener("click", async () => {
+      try { await uploadCsv(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("refreshResultsBtn").addEventListener("click", async () => {
+      try { await loadResults(); setStatus("Таблица обновлена"); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("loadParticipantBtn").addEventListener("click", async () => {
+      try { await loadParticipant(activeParticipantId()); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("addCpBtn").addEventListener("click", async () => {
+      try { await addCpCorrection(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("removeCpBtn").addEventListener("click", async () => {
+      try { await removeCpCorrection(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("excludeLegBtn").addEventListener("click", async () => {
+      try { await excludeLegCorrection(); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+    document.getElementById("excludeResetBtn").addEventListener("click", () => {
+      resetExcludeForm();
+      setStatus("Форма правила сброшена");
+    });
+    document.getElementById("refreshRulesBtn").addEventListener("click", async () => {
+      try { await loadExcludeRules(); setStatus("Список правил обновлен"); } catch (err) { setStatus(`Ошибка: ${err.message}`); }
+    });
+
+    init();
+  </script>
+</body>
+</html>

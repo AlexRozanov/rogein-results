@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+*.pid
+.rogein_web_127_0_0_1_8787.pid
+
+*.sqlite3
+*.sqlite
+*.db

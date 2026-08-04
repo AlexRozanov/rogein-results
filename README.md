@@ -1,93 +1,162 @@
-# rogein results
+# Rogein MVP (SQLite + CSV)
 
+MVP-утилита для обработки результатов рогейна:
 
+- импортирует CSV в SQLite;
+- хранит настройки соревнования;
+- применяет ручные корректировки;
+- пересчитывает и выводит результаты;
+- экспортирует итог в CSV.
+- валидирует формат CSV и при ошибке не меняет текущие результаты.
 
-## Getting started
+## Требования
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- Python 3.10+
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Быстрый старт
 
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 init-db
+python3 rogein_mvp.py --db rogein.sqlite3 import-csv --csv csv/results-190-teams.csv
+python3 rogein_mvp.py --db rogein.sqlite3 set-settings --control-minutes 240 --penalty-per-minute 3 --dq-minutes 60 --finish-cp 240
+python3 rogein_mvp.py --db rogein.sqlite3 recalculate
+python3 rogein_mvp.py --db rogein.sqlite3 show-results --limit 20
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/alex-rozanov/rogein-results.git
-git branch -M main
-git push -uf origin main
+
+## Логика расчета (в MVP)
+
+- Очки КП: из номера КП убирается последняя цифра (`cp // 10`), затем суммируются только уникальные значения.
+- `start_station_id` и `finish_cp` не учитываются в очках.
+- Штраф за опоздание:
+  - `delay_seconds = max(0, elapsed - control_time)`
+  - `penalty_minutes = ceil(delay_seconds / 60)`
+  - `penalty_points = penalty_minutes * penalty_per_minute`
+- Дисквалификация: если время больше `control_minutes + dq_minutes`, статус `DQ`.
+- `dq_minutes` — это запас времени после КВ (например, `control=240`, `dq=60` => DQ после 300 минут).
+- Исключение перегона работает по правилам:
+  - область: участник или все участники;
+  - направление: прямое, обратное, оба;
+  - режим: 1 раз или всегда;
+  - вычет времени: `min(реальное время перегона, max_leg_seconds)` (если максимум задан).
+- Проверка финиша:
+  - финишный КП (из `finish_cp`) должен быть у участника;
+  - финишный КП должен быть последним по времени.
+  - если не выполнено — статус `ERR`.
+
+## Ручные корректировки
+
+### 1) Добавить взятие КП
+
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 add-cp --participant-id 130 --cp 77 --time "2026-08-02 15:10:00"
 ```
 
-## Integrate with your tools
+### 2) Удалить взятие КП
 
-* [Set up project integrations](https://gitlab.com/alex-rozanov/rogein-results/-/settings/integrations)
+Удалить первое совпадение:
 
-## Collaborate with your team
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 remove-cp --participant-id 130 --cp 77
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Удалить все совпадения:
 
-## Test and Deploy
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 remove-cp --participant-id 130 --cp 77 --all
+```
 
-Use the built-in continuous integration in GitLab.
+Удалить конкретную отметку по времени:
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 remove-cp --participant-id 130 --cp 77 --time "2026-08-02 15:10:00"
+```
 
-***
+### 3) Исключить время перегона между КП
 
-# Editing this README
+Только для одного участника, прямое направление, 1 раз:
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 exclude-leg --participant-id 130 --from-cp 77 --to-cp 92 --direction forward --mode once
+```
 
-## Suggestions for a good README
+Для всех участников, в обоих направлениях, всегда:
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 exclude-leg --all-participants --from-cp 77 --to-cp 92 --direction both --mode always
+```
 
-## Name
-Choose a self-explaining name for your project.
+С ограничением максимального вычета на перегон:
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 exclude-leg --participant-id 130 --from-cp 77 --to-cp 92 --direction forward --mode always --max-leg-seconds 600
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Просмотр существующих правил:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 list-exclude-leg
+python3 rogein_mvp.py --db rogein.sqlite3 list-exclude-leg --participant-id 130
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Изменение существующего правила:
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 update-exclude-leg --rule-id 5 --participant-id 130 --from-cp 77 --to-cp 92 --direction both --mode always --max-leg-seconds 600
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Удаление правила:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 delete-exclude-leg --rule-id 5
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+После любой корректировки нужно запустить пересчет:
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 recalculate
+```
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Экспорт результатов
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 export-results --csv out/results.csv
+```
 
-## License
-For open source projects, say how it is licensed.
+## Веб-интерфейс (локально)
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 serve-web --host 127.0.0.1 --port 8787
+```
+
+Перезапуск на том же порту без ручного поиска процесса:
+
+```bash
+python3 rogein_mvp.py --db rogein.sqlite3 serve-web --host 127.0.0.1 --port 8787 --restart
+```
+
+После запуска откройте:
+
+- [http://127.0.0.1:8787](http://127.0.0.1:8787)
+
+В интерфейсе доступны:
+
+- загрузка CSV файла с результатами прямо из браузера;
+- настройка `control_minutes`, `penalty_per_minute`, `dq_minutes` (после КВ), `finish_cp`;
+- пересчет;
+- таблица результатов с фильтром;
+- переход по `ID` на отдельную страницу участника (`/participant/<id>`);
+- карточка участника;
+- добавление корректировок `add-cp`, `remove-cp`, `exclude-leg` с параметрами:
+  - для одного участника или для всех;
+  - прямое/обратное/оба направления;
+  - 1 раз или всегда;
+  - максимум времени перегона (вычитается `min(реальное, максимум)`).
+- управление правилами исключения: просмотр, изменение, удаление.
+
+## Важно про CSV
+
+- CSV должен быть с разделителем `;`.
+- Внутри поля `brief` могут быть переводы строк — это поддерживается.
+- Значения времени должны быть в ISO-формате (`YYYY-MM-DD HH:MM:SS`).
+- При успешной загрузке CSV результаты пересчитываются автоматически.
+- При ошибке формата CSV загрузка отклоняется и текущие данные/результаты в БД не изменяются.
