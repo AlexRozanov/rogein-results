@@ -6,8 +6,9 @@ use std::sync::Mutex;
 
 use domain::{
     AnomalyBulkActionsState, AnomalyScanSummary, BulkAnomalyCorrectionSummary,
-    BulkAnomalyRollbackSummary, CorrectionRow, ExclusionRuleRow, ImportSummary, ParticipantDetails,
-    ParticipantRow, ResultRow, Settings,
+    BulkAnomalyRollbackSummary, CorrectionRow, ExclusionRuleRow, FormatSettings, ImportSummary,
+    ParticipantDetails, ParticipantRow, ResultRow, Settings, StartProtocolFormatRow,
+    StartProtocolImportSummary, StartProtocolRow,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -26,6 +27,14 @@ struct ResultsResponse {
     limit: i64,
 }
 
+#[derive(Serialize)]
+struct StartProtocolResponse {
+    rows: Vec<StartProtocolRow>,
+    total_count: i64,
+    offset: i64,
+    limit: i64,
+}
+
 #[tauri::command]
 fn import_csv_content(
     state: State<'_, AppState>,
@@ -38,6 +47,20 @@ fn import_csv_content(
         .map_err(|_| "database lock poisoned".to_string())?;
     let mut conn = domain::open_and_init_db(&state.db_path)?;
     domain::import_csv_content(&mut conn, &csv_content, reset)
+}
+
+#[tauri::command]
+fn import_start_protocol_content(
+    state: State<'_, AppState>,
+    csv_content: String,
+    reset: bool,
+) -> Result<StartProtocolImportSummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::import_start_protocol_content(&conn, &csv_content, reset)
 }
 
 #[tauri::command]
@@ -93,6 +116,8 @@ fn get_results(
     offset: Option<i64>,
     status: Option<String>,
     search: Option<String>,
+    format_id: Option<i64>,
+    only_missing_format: Option<bool>,
     sort_by: Option<String>,
     sort_dir: Option<String>,
 ) -> Result<ResultsResponse, String> {
@@ -103,16 +128,19 @@ fn get_results(
     let conn = domain::open_and_init_db(&state.db_path)?;
     let safe_limit = limit.unwrap_or(50);
     let safe_offset = offset.unwrap_or(0);
+    let missing = only_missing_format.unwrap_or(false);
     let (rows, total_count) = domain::query_results(
         &conn,
         safe_limit,
         safe_offset,
         status,
         search,
+        format_id,
+        missing,
         sort_by,
         sort_dir,
     )?;
-    let counts = domain::query_status_counts(&conn)?;
+    let counts = domain::query_status_counts(&conn, format_id, missing)?;
     Ok(ResultsResponse {
         rows,
         counts,
@@ -130,6 +158,160 @@ fn get_participants(state: State<'_, AppState>, limit: Option<i64>) -> Result<Ve
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::query_participants(&conn, limit.unwrap_or(200))
+}
+
+#[tauri::command]
+fn get_start_protocol(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    search: Option<String>,
+    format_id: Option<i64>,
+    only_incomplete: Option<bool>,
+    only_missing_format: Option<bool>,
+) -> Result<StartProtocolResponse, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let safe_limit = limit.unwrap_or(200);
+    let safe_offset = offset.unwrap_or(0);
+    let (rows, total_count) = domain::query_start_protocol(
+        &conn,
+        safe_limit,
+        safe_offset,
+        search,
+        format_id,
+        only_incomplete.unwrap_or(false),
+        only_missing_format.unwrap_or(false),
+    )?;
+    Ok(StartProtocolResponse {
+        rows,
+        total_count,
+        offset: safe_offset,
+        limit: safe_limit,
+    })
+}
+
+#[tauri::command]
+fn get_start_protocol_formats(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_start_protocol_formats(&conn)
+}
+
+#[tauri::command]
+fn get_start_protocol_format_rows(
+    state: State<'_, AppState>,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_start_protocol_format_rows(&conn)
+}
+
+#[tauri::command]
+fn add_start_protocol_format(
+    state: State<'_, AppState>,
+    format_name: String,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::add_start_protocol_format(&conn, format_name)
+}
+
+#[tauri::command]
+fn rename_start_protocol_format(
+    state: State<'_, AppState>,
+    format_id: i64,
+    new_format_name: String,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::rename_start_protocol_format(&conn, format_id, new_format_name)
+}
+
+#[tauri::command]
+fn delete_start_protocol_format(
+    state: State<'_, AppState>,
+    format_id: i64,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_start_protocol_format(&conn, format_id)
+}
+
+#[tauri::command]
+fn get_format_settings(state: State<'_, AppState>) -> Result<Vec<FormatSettings>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_format_settings(&conn)
+}
+
+#[tauri::command]
+fn set_format_settings(
+    state: State<'_, AppState>,
+    format_id: i64,
+    control_minutes: Option<i64>,
+    penalty_per_minute: Option<i64>,
+    dq_minutes: Option<i64>,
+    finish_cp: Option<i64>,
+) -> Result<FormatSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_format_settings(
+        &conn,
+        format_id,
+        control_minutes,
+        penalty_per_minute,
+        dq_minutes,
+        finish_cp,
+    )
+}
+
+#[tauri::command]
+fn update_start_protocol_entry(
+    state: State<'_, AppState>,
+    participant_id: String,
+    name: String,
+    format_id: Option<i64>,
+    gender: Option<String>,
+    birth_date_raw: Option<String>,
+) -> Result<StartProtocolRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::update_start_protocol_entry(
+        &conn,
+        participant_id,
+        name,
+        format_id,
+        gender,
+        birth_date_raw,
+    )
 }
 
 #[tauri::command]
@@ -383,11 +565,21 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             import_csv_content,
+            import_start_protocol_content,
             recalculate_results,
             get_settings,
             set_settings,
             get_results,
             get_participants,
+            get_start_protocol,
+            get_start_protocol_formats,
+            get_start_protocol_format_rows,
+            add_start_protocol_format,
+            rename_start_protocol_format,
+            delete_start_protocol_format,
+            get_format_settings,
+            set_format_settings,
+            update_start_protocol_entry,
             get_participant_details,
             add_cp_correction,
             add_anomaly_day_shift_correction,

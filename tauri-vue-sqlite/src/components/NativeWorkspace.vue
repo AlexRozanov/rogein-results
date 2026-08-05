@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import NativeResultsTable from "./NativeResultsTable.vue";
 import FilePickerButton from "./FilePickerButton.vue";
-import NativeSettingsForm from "./NativeSettingsForm.vue";
 import NativeFilters from "./NativeFilters.vue";
 import NativeAdjustments from "./NativeAdjustments.vue";
+import NativeStartProtocol from "./NativeStartProtocol.vue";
+import NativeSettingsTab from "./NativeSettingsTab.vue";
 
 type ImportSummary = {
   participants_count: number;
@@ -26,6 +27,8 @@ type NativeResultRow = {
   participant_id: string;
   name: string;
   status: "OK" | "DQ" | "ERR";
+  format_id: number | null;
+  format_name: string;
   has_personal_corrections: boolean;
   has_anomalies: boolean;
   anomaly_count: number;
@@ -71,8 +74,14 @@ type AnomalyBulkActionsState = {
   applied_count: number;
 };
 
+type FormatOption = {
+  id: number;
+  format_name: string;
+};
+
 type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds";
 type SortDir = "asc" | "desc";
+type MainTab = "results" | "start_protocol" | "settings";
 
 const nativeStatus = ref("Native core готов к импорту.");
 const csvFile = ref<File | null>(null);
@@ -83,11 +92,14 @@ const nativeResults = ref<NativeResultRow[]>([]);
 const nativeCounts = ref<Record<string, number>>({ OK: 0, DQ: 0, ERR: 0 });
 const nativeFilterStatus = ref<string>("");
 const nativeFilterSearch = ref<string>("");
+const nativeFilterFormatId = ref<string>("");
+const formatOptions = ref<FormatOption[]>([]);
 const pageSize = ref(50);
 const pageOffset = ref(0);
 const totalCount = ref(0);
 const sortBy = ref<SortBy>("points_final");
 const sortDir = ref<SortDir>("desc");
+const activeTab = ref<MainTab>("start_protocol");
 const anomalyBulkState = ref<AnomalyBulkActionsState>({
   can_apply_day_shift_24h: false,
   can_rollback_day_shift_24h: false,
@@ -187,11 +199,19 @@ async function refreshNativeData() {
   try {
     const settings = await invoke<NativeSettings>("get_settings");
     nativeSettings.value = settings;
+    formatOptions.value = await invoke<FormatOption[]>("get_start_protocol_format_rows");
+    const onlyMissingFormat = nativeFilterFormatId.value === "missing";
+    const formatId =
+      !nativeFilterFormatId.value || onlyMissingFormat
+        ? null
+        : Number(nativeFilterFormatId.value);
     const response = await invoke<NativeResultsResponse>("get_results", {
       limit: pageSize.value,
       offset: pageOffset.value,
       status: nativeFilterStatus.value || null,
       search: nativeFilterSearch.value || null,
+      formatId,
+      onlyMissingFormat,
       sortBy: sortBy.value,
       sortDir: sortDir.value,
     });
@@ -204,27 +224,6 @@ async function refreshNativeData() {
     );
   } catch (error) {
     nativeStatus.value = `Ошибка загрузки native данных: ${String(error)}`;
-  }
-}
-
-async function saveNativeSettings(form: NativeSettings) {
-  nativeBusy.value = true;
-  try {
-    const updated = await invoke<NativeSettings>("set_settings", {
-      controlMinutes: Number(form.control_minutes),
-      penaltyPerMinute: Number(form.penalty_per_minute),
-      dqMinutes: Number(form.dq_minutes),
-      finishCp: Number(form.finish_cp),
-      competitionDate: String(form.competition_date || "").trim(),
-      competitionStartTime: String(form.competition_start_time || "").trim(),
-    });
-    nativeSettings.value = updated;
-    nativeStatus.value = "Настройки сохранены.";
-    await recalculateNative();
-  } catch (error) {
-    nativeStatus.value = `Ошибка сохранения настроек: ${String(error)}`;
-  } finally {
-    nativeBusy.value = false;
   }
 }
 
@@ -358,90 +357,129 @@ async function onSortChanged(column: SortBy) {
     <p class="subtitle">
       Импорт CSV и пересчет через Rust + SQLite (без Python backend).
     </p>
-    <div class="native-row">
-      <FilePickerButton @file-selected="onCsvSelected" />
-      <button :disabled="nativeBusy" @click="importCsv">Импорт CSV</button>
-      <button :disabled="nativeBusy" @click="recalculateNative">Пересчитать</button>
-      <button :disabled="nativeBusy" @click="scanAnomalies">Поиск аномалий</button>
+    <div class="native-tabs">
       <button
-        v-if="anomalyBulkState.can_apply_day_shift_24h"
-        :disabled="nativeBusy"
-        @click="applyAnomalyDayShiftForAll"
+        class="tab-btn"
+        :class="{ active: activeTab === 'start_protocol' }"
+        :disabled="nativeBusy && activeTab !== 'start_protocol'"
+        @click="activeTab = 'start_protocol'"
       >
-        Применить -24ч всем с аномалией ({{ anomalyBulkState.available_apply_count }})
+        Стартовый протокол
       </button>
       <button
-        v-if="anomalyBulkState.can_rollback_day_shift_24h"
-        :disabled="nativeBusy"
-        @click="rollbackAnomalyDayShiftForAll"
+        class="tab-btn"
+        :class="{ active: activeTab === 'results' }"
+        :disabled="nativeBusy && activeTab !== 'results'"
+        @click="activeTab = 'results'"
       >
-        Откатить -24ч у всех ({{ anomalyBulkState.applied_count }})
+        Результаты
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'settings' }"
+        :disabled="nativeBusy && activeTab !== 'settings'"
+        @click="activeTab = 'settings'"
+      >
+        Настройки
       </button>
     </div>
-    <p class="subtitle">
-      При выборе файла импорт запускается автоматически.
-    </p>
     <p class="status">{{ nativeStatus }}</p>
 
-    <div class="native-summary">
-      <span>OK: {{ nativeCounts.OK ?? 0 }}</span>
-      <span>DQ: {{ nativeCounts.DQ ?? 0 }}</span>
-      <span>ERR: {{ nativeCounts.ERR ?? 0 }}</span>
-    </div>
-    <NativeSettingsForm
-      :settings="nativeSettings"
-      :busy="nativeBusy"
-      @save="saveNativeSettings"
-    />
+    <template v-if="activeTab === 'results'">
+      <div class="native-row">
+        <FilePickerButton @file-selected="onCsvSelected" />
+        <button :disabled="nativeBusy" @click="importCsv">Импорт CSV</button>
+        <button :disabled="nativeBusy" @click="recalculateNative">Пересчитать</button>
+        <button :disabled="nativeBusy" @click="scanAnomalies">Поиск аномалий</button>
+        <button
+          v-if="anomalyBulkState.can_apply_day_shift_24h"
+          :disabled="nativeBusy"
+          @click="applyAnomalyDayShiftForAll"
+        >
+          Применить -24ч всем с аномалией ({{ anomalyBulkState.available_apply_count }})
+        </button>
+        <button
+          v-if="anomalyBulkState.can_rollback_day_shift_24h"
+          :disabled="nativeBusy"
+          @click="rollbackAnomalyDayShiftForAll"
+        >
+          Откатить -24ч у всех ({{ anomalyBulkState.applied_count }})
+        </button>
+      </div>
+      <p class="subtitle">
+        При выборе файла импорт запускается автоматически.
+      </p>
 
-    <NativeFilters
-      :busy="nativeBusy"
-      :status="nativeFilterStatus"
-      :search="nativeFilterSearch"
-      @update:status="nativeFilterStatus = $event"
-      @update:search="nativeFilterSearch = $event"
-      @apply="applyFilters"
-    />
+      <div class="native-summary">
+        <span>OK: {{ nativeCounts.OK ?? 0 }}</span>
+        <span>DQ: {{ nativeCounts.DQ ?? 0 }}</span>
+        <span>ERR: {{ nativeCounts.ERR ?? 0 }}</span>
+      </div>
 
-    <NativeResultsTable
-      :rows="nativeResults"
-      :sort-by="sortBy"
-      :sort-dir="sortDir"
-      @participant-selected="selectParticipant"
-      @sort-changed="onSortChanged"
-    />
-    <div class="native-settings">
-      <button :disabled="nativeBusy || pageOffset <= 0" @click="prevPage">← Назад</button>
-      <span class="subtitle">
-        Показано {{ pageFrom() }}-{{ pageTo() }} из {{ totalCount }}
-      </span>
-      <button
-        :disabled="nativeBusy || pageOffset + pageSize >= totalCount"
-        @click="nextPage"
-      >
-        Вперед →
-      </button>
-    </div>
-    <div class="native-settings">
-      <label>
-        Строк на странице:
-        <select :value="String(pageSize)" @change="changePageSize(($event.target as HTMLSelectElement).value)">
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-        </select>
-      </label>
-      <button
-        v-for="p in pageButtons"
-        :key="`page-${p}`"
-        :disabled="nativeBusy || p === currentPage"
-        @click="goToPage(p)"
-      >
-        {{ p }}
-      </button>
-      <span class="subtitle">Страница {{ currentPage }} из {{ totalPages }}</span>
-    </div>
+      <NativeFilters
+        :busy="nativeBusy"
+        :status="nativeFilterStatus"
+        :search="nativeFilterSearch"
+        :format-id="nativeFilterFormatId"
+        :formats="formatOptions"
+        @update:status="nativeFilterStatus = $event"
+        @update:search="nativeFilterSearch = $event"
+        @update:format-id="nativeFilterFormatId = $event"
+        @apply="applyFilters"
+      />
 
-    <NativeAdjustments :busy="nativeBusy" @status="nativeStatus = $event" />
+      <NativeResultsTable
+        :rows="nativeResults"
+        :sort-by="sortBy"
+        :sort-dir="sortDir"
+        @participant-selected="selectParticipant"
+        @sort-changed="onSortChanged"
+      />
+      <div class="native-settings">
+        <button :disabled="nativeBusy || pageOffset <= 0" @click="prevPage">← Назад</button>
+        <span class="subtitle">
+          Показано {{ pageFrom() }}-{{ pageTo() }} из {{ totalCount }}
+        </span>
+        <button
+          :disabled="nativeBusy || pageOffset + pageSize >= totalCount"
+          @click="nextPage"
+        >
+          Вперед →
+        </button>
+      </div>
+      <div class="native-settings">
+        <label>
+          Строк на странице:
+          <select :value="String(pageSize)" @change="changePageSize(($event.target as HTMLSelectElement).value)">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <button
+          v-for="p in pageButtons"
+          :key="`page-${p}`"
+          :disabled="nativeBusy || p === currentPage"
+          @click="goToPage(p)"
+        >
+          {{ p }}
+        </button>
+        <span class="subtitle">Страница {{ currentPage }} из {{ totalPages }}</span>
+      </div>
+
+      <NativeAdjustments :busy="nativeBusy" @status="nativeStatus = $event" />
+    </template>
+
+    <template v-else-if="activeTab === 'settings'">
+      <NativeSettingsTab
+        :busy="nativeBusy"
+        @status="nativeStatus = $event"
+        @saved="refreshNativeData"
+      />
+    </template>
+
+    <template v-else>
+      <NativeStartProtocol :busy="nativeBusy" @status="nativeStatus = $event" />
+    </template>
   </section>
 </template>

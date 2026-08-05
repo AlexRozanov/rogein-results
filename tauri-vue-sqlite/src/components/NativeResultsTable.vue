@@ -3,6 +3,8 @@ type NativeResultRow = {
   participant_id: string;
   name: string;
   status: "OK" | "DQ" | "ERR";
+  format_id: number | null;
+  format_name: string;
   has_personal_corrections: boolean;
   has_anomalies: boolean;
   anomaly_count: number;
@@ -46,6 +48,7 @@ function sortMark(column: SortBy) {
         <tr>
           <th class="sortable-col" @click="emit('sortChanged', 'participant_id')">ID{{ sortMark("participant_id") }}</th>
           <th class="sortable-col" @click="emit('sortChanged', 'name')">Имя{{ sortMark("name") }}</th>
+          <th>Формат</th>
           <th>Статус</th>
           <th class="sortable-col" @click="emit('sortChanged', 'points_raw')">Очки{{ sortMark("points_raw") }}</th>
           <th>Штраф</th>
@@ -79,6 +82,7 @@ function sortMark(column: SortBy) {
             </span>
           </td>
           <td>{{ row.name }}</td>
+          <td>{{ row.format_name || "—" }}</td>
           <td>{{ row.status }}</td>
           <td>{{ row.points_raw }}</td>
           <td>{{ row.penalty_points }}</td>

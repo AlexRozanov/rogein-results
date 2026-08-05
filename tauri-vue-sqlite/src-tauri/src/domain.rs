@@ -15,6 +15,12 @@ pub struct ImportSummary {
     pub results_count: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct StartProtocolImportSummary {
+    pub imported_rows: i64,
+    pub total_rows: i64,
+}
+
 #[derive(Debug)]
 pub struct CsvFormatError(pub String);
 
@@ -72,6 +78,8 @@ pub struct ResultRow {
     pub participant_id: String,
     pub name: String,
     pub status: String,
+    pub format_id: Option<i64>,
+    pub format_name: String,
     pub has_personal_corrections: bool,
     pub has_anomalies: bool,
     pub anomaly_count: i64,
@@ -89,6 +97,38 @@ pub struct ResultRow {
 pub struct ParticipantRow {
     pub participant_id: String,
     pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartProtocolRow {
+    pub participant_id: String,
+    pub name: String,
+    pub format_id: Option<i64>,
+    pub format_name: String,
+    pub gender: Option<String>,
+    pub birth_date_raw: Option<String>,
+    pub birth_date_iso: Option<String>,
+    pub source_row: Option<i64>,
+    pub has_result: bool,
+    pub is_incomplete: bool,
+    pub missing_format: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartProtocolFormatRow {
+    pub id: i64,
+    pub format_name: String,
+    pub usage_count: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FormatSettings {
+    pub format_id: i64,
+    pub format_name: String,
+    pub control_minutes: Option<i64>,
+    pub penalty_per_minute: Option<i64>,
+    pub dq_minutes: Option<i64>,
+    pub finish_cp: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,9 +323,36 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
             FOREIGN KEY (participant_id) REFERENCES participants(participant_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_participant_anomalies_participant ON participant_anomalies(participant_id, anomaly_type);
+
+        CREATE TABLE IF NOT EXISTS start_protocol (
+            participant_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            format_id INTEGER NULL,
+            format_name TEXT NOT NULL DEFAULT '',
+            gender TEXT NULL,
+            birth_date_raw TEXT NULL,
+            birth_date_iso TEXT NULL,
+            source_row INTEGER NULL
+        );
+        CREATE TABLE IF NOT EXISTS start_protocol_formats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            format_name TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS format_settings (
+            format_id INTEGER PRIMARY KEY,
+            control_minutes INTEGER NULL,
+            penalty_per_minute INTEGER NULL,
+            dq_minutes INTEGER NULL,
+            finish_cp INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_start_protocol_format ON start_protocol(format_name);
+        CREATE INDEX IF NOT EXISTS idx_start_protocol_name ON start_protocol(name);
         "#,
     )
     .map_err(|e| format!("init schema: {e}"))?;
+
+    // Must run before any SQL that references format_id on existing DBs.
+    migrate_format_id_schema(conn)?;
 
     for (k, v) in [
         ("control_minutes", "240".to_string()),
@@ -324,6 +391,101 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("mark anomaly defaults migration: {e}"))?;
     }
+    sync_start_protocol_format_ids(conn)?;
+    Ok(())
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("pragma table_info {table}: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("query table_info {table}: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read table_info {table}: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn migrate_format_id_schema(conn: &Connection) -> Result<(), String> {
+    let format_cols = table_columns(conn, "start_protocol_formats")?;
+    if !format_cols.iter().any(|c| c == "id") {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE start_protocol_formats_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                format_name TEXT NOT NULL UNIQUE
+            );
+            INSERT OR IGNORE INTO start_protocol_formats_v2(format_name)
+            SELECT DISTINCT TRIM(format_name)
+            FROM start_protocol_formats
+            WHERE TRIM(format_name) <> '';
+            DROP TABLE start_protocol_formats;
+            ALTER TABLE start_protocol_formats_v2 RENAME TO start_protocol_formats;
+            "#,
+        )
+        .map_err(|e| format!("migrate start_protocol_formats to id: {e}"))?;
+    }
+
+    let protocol_cols = table_columns(conn, "start_protocol")?;
+    if !protocol_cols.iter().any(|c| c == "format_id") {
+        conn.execute(
+            "ALTER TABLE start_protocol ADD COLUMN format_id INTEGER NULL",
+            [],
+        )
+        .map_err(|e| format!("add start_protocol.format_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS format_settings (
+            format_id INTEGER PRIMARY KEY,
+            control_minutes INTEGER NULL,
+            penalty_per_minute INTEGER NULL,
+            dq_minutes INTEGER NULL,
+            finish_cp INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_start_protocol_format_id ON start_protocol(format_id);
+        "#,
+    )
+    .map_err(|e| format!("ensure format_settings: {e}"))?;
+    Ok(())
+}
+
+fn sync_start_protocol_format_ids(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO start_protocol_formats(format_name)
+        SELECT DISTINCT TRIM(format_name)
+        FROM start_protocol
+        WHERE TRIM(format_name) <> ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("sync formats from protocol: {e}"))?;
+    conn.execute(
+        r#"
+        UPDATE start_protocol
+        SET format_id = (
+            SELECT f.id FROM start_protocol_formats f
+            WHERE f.format_name = start_protocol.format_name
+        )
+        WHERE TRIM(IFNULL(format_name, '')) <> ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("backfill format_id: {e}"))?;
+    conn.execute(
+        r#"
+        UPDATE start_protocol
+        SET format_id = NULL
+        WHERE TRIM(IFNULL(format_name, '')) = ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("clear empty format_id: {e}"))?;
     Ok(())
 }
 
@@ -490,6 +652,106 @@ pub fn import_csv_content(
     })
 }
 
+pub fn import_start_protocol_content(
+    conn: &Connection,
+    csv_content: &str,
+    reset: bool,
+) -> Result<StartProtocolImportSummary, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(csv_content.as_bytes());
+
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("start protocol header read: {e}"))?
+        .clone();
+    if headers.len() < 5 {
+        return Err("Стартовый протокол: ожидается минимум 5 колонок".to_string());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("start protocol transaction: {e}"))?;
+    if reset {
+        tx.execute("DELETE FROM start_protocol", [])
+            .map_err(|e| format!("clear start protocol: {e}"))?;
+    }
+
+    let mut imported_rows = 0_i64;
+    let mut stmt = tx
+        .prepare(
+            r#"
+            INSERT INTO start_protocol(
+                participant_id, name, format_id, format_name, gender, birth_date_raw, birth_date_iso, source_row
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(participant_id) DO UPDATE SET
+                name=excluded.name,
+                format_id=excluded.format_id,
+                format_name=excluded.format_name,
+                gender=excluded.gender,
+                birth_date_raw=excluded.birth_date_raw,
+                birth_date_iso=excluded.birth_date_iso,
+                source_row=excluded.source_row
+            "#,
+        )
+        .map_err(|e| format!("prepare start protocol upsert: {e}"))?;
+
+    for (idx, row) in reader.records().enumerate() {
+        let source_row = idx as i64 + 2;
+        let rec = row.map_err(|e| format!("Строка {source_row}: {e}"))?;
+        if record_is_blank(&rec) {
+            continue;
+        }
+        let participant_id = field(&rec, 0);
+        let name = field(&rec, 1);
+        let format_name = field(&rec, 2).trim().to_string();
+        let gender = field(&rec, 3);
+        let birth_date_raw = field(&rec, 4);
+        if participant_id.is_empty() || name.is_empty() {
+            return Err(format!(
+                "Строка {source_row}: обязательные поля id/имя не заполнены"
+            ));
+        }
+        let format_id = if format_name.is_empty() {
+            None
+        } else {
+            Some(ensure_format_id_tx(&tx, &format_name)?)
+        };
+        let birth_date_iso = parse_birth_date_ru(&birth_date_raw);
+        stmt.execute(params![
+            participant_id,
+            name,
+            format_id,
+            format_name,
+            if gender.is_empty() { None::<String> } else { Some(gender) },
+            if birth_date_raw.is_empty() {
+                None::<String>
+            } else {
+                Some(birth_date_raw)
+            },
+            birth_date_iso,
+            source_row,
+        ])
+        .map_err(|e| format!("upsert start protocol row {source_row}: {e}"))?;
+        imported_rows += 1;
+    }
+    drop(stmt);
+    sync_start_protocol_format_ids_tx(&tx)?;
+
+    let total_rows: i64 = tx
+        .query_row("SELECT COUNT(*) FROM start_protocol", [], |r| r.get(0))
+        .map_err(|e| format!("count start protocol rows: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit start protocol import: {e}"))?;
+
+    Ok(StartProtocolImportSummary {
+        imported_rows,
+        total_rows,
+    })
+}
+
 pub fn recalculate(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction()
@@ -501,7 +763,7 @@ pub fn recalculate(conn: &mut Connection) -> Result<(), String> {
 }
 
 fn recalculate_tx(tx: &Transaction<'_>) -> Result<(), String> {
-    let settings = get_settings_tx(tx)?;
+    let global_settings = get_settings_tx(tx)?;
     tx.execute("DELETE FROM results", [])
         .map_err(|e| format!("clear results: {e}"))?;
 
@@ -539,13 +801,18 @@ fn recalculate_tx(tx: &Transaction<'_>) -> Result<(), String> {
             &mut exclusion_rules,
         )?;
         marks.sort_by_key(|m| (m.mark_time, m.seq));
-        let result = calculate_result(
+        let settings =
+            resolve_settings_for_participant_tx(tx, &global_settings, &participant.participant_id)?;
+        let mut result = calculate_result(
             &participant,
             &marks,
             &exclusion_rules,
             &manual_corrections,
             &settings,
         )?;
+        if participant_missing_format_tx(tx, &participant.participant_id)? {
+            result.diagnostics.insert(0, "missing_format".to_string());
+        }
         tx.execute(
             r#"
             INSERT INTO results(
@@ -572,6 +839,78 @@ fn recalculate_tx(tx: &Transaction<'_>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn participant_missing_format_tx(
+    tx: &Transaction<'_>,
+    participant_id: &str,
+) -> Result<bool, String> {
+    let row = tx
+        .query_row(
+            r#"
+            SELECT format_id, TRIM(IFNULL(format_name, ''))
+            FROM start_protocol
+            WHERE participant_id = ?
+            LIMIT 1
+            "#,
+            params![participant_id],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("check participant format: {e}"))?;
+    Ok(match row {
+        None => true,
+        Some((format_id, format_name)) => format_id.is_none() || format_name.is_empty(),
+    })
+}
+
+fn resolve_settings_for_participant_tx(
+    tx: &Transaction<'_>,
+    global: &Settings,
+    participant_id: &str,
+) -> Result<Settings, String> {
+    let format_id: Option<i64> = tx
+        .query_row(
+            "SELECT format_id FROM start_protocol WHERE participant_id = ? LIMIT 1",
+            params![participant_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load participant format_id: {e}"))?
+        .flatten();
+    let Some(format_id) = format_id else {
+        return Ok(global.clone());
+    };
+    let overrides = tx
+        .query_row(
+            r#"
+            SELECT control_minutes, penalty_per_minute, dq_minutes, finish_cp
+            FROM format_settings
+            WHERE format_id = ?
+            "#,
+            params![format_id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load format settings: {e}"))?;
+    let Some((control_minutes, penalty_per_minute, dq_minutes, finish_cp)) = overrides else {
+        return Ok(global.clone());
+    };
+    Ok(Settings {
+        control_minutes: control_minutes.unwrap_or(global.control_minutes),
+        penalty_per_minute: penalty_per_minute.unwrap_or(global.penalty_per_minute),
+        dq_minutes: dq_minutes.unwrap_or(global.dq_minutes),
+        finish_cp: finish_cp.unwrap_or(global.finish_cp),
+        competition_date: global.competition_date.clone(),
+        competition_start_time: global.competition_start_time.clone(),
+    })
 }
 
 #[derive(Debug)]
@@ -1104,6 +1443,8 @@ pub fn query_results(
     offset: i64,
     status: Option<String>,
     search: Option<String>,
+    format_id: Option<i64>,
+    only_missing_format: bool,
     sort_by: Option<String>,
     sort_dir: Option<String>,
 ) -> Result<(Vec<ResultRow>, i64), String> {
@@ -1115,6 +1456,8 @@ pub fn query_results(
                results.participant_id,
                results.name,
                results.status,
+               sp.format_id,
+               COALESCE(sp.format_name, '') AS format_name,
                EXISTS(
                  SELECT 1 FROM corrections c
                  WHERE c.participant_id = results.participant_id
@@ -1126,6 +1469,7 @@ pub fn query_results(
                results.points_raw, results.penalty_points, results.points_final,
                results.elapsed_seconds, results.delay_seconds, results.penalty_minutes, results.diagnostics_json, results.computed_at
         FROM results
+        LEFT JOIN start_protocol sp ON sp.participant_id = results.participant_id
         LEFT JOIN (
             SELECT pa.participant_id, COUNT(*) AS anomaly_count
             FROM participant_anomalies pa
@@ -1144,6 +1488,7 @@ pub fn query_results(
         "#,
     );
     let mut params_dyn: Vec<String> = Vec::new();
+    let mut int_params: Vec<i64> = Vec::new();
     let mut values: Vec<i64> = Vec::new();
 
     if let Some(ref s) = status {
@@ -1157,6 +1502,14 @@ pub fn query_results(
         let wildcard = format!("%{s}%");
         params_dyn.push(wildcard.clone());
         params_dyn.push(wildcard);
+    }
+    if only_missing_format {
+        query.push_str(
+            " AND (sp.format_id IS NULL OR TRIM(IFNULL(sp.format_name, '')) = '') ",
+        );
+    } else if let Some(fid) = format_id {
+        query.push_str(" AND sp.format_id = ? ");
+        int_params.push(fid);
     }
     let safe_sort_by = match sort_by.as_deref() {
         Some("participant_id") => "participant_id",
@@ -1221,26 +1574,31 @@ pub fn query_results(
         .into_iter()
         .map(rusqlite::types::Value::Text)
         .collect();
+    for v in int_params {
+        bind_values.push(rusqlite::types::Value::Integer(v));
+    }
     bind_values.push(rusqlite::types::Value::Integer(values[0]));
     bind_values.push(rusqlite::types::Value::Integer(values[1]));
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bind_values), |r| {
-            let anomaly_count: i64 = r.get(4)?;
+            let anomaly_count: i64 = r.get(6)?;
             Ok(ResultRow {
                 participant_id: r.get(0)?,
                 name: r.get(1)?,
                 status: r.get(2)?,
-                has_personal_corrections: r.get(3)?,
+                format_id: r.get(3)?,
+                format_name: r.get(4)?,
+                has_personal_corrections: r.get(5)?,
                 has_anomalies: anomaly_count > 0,
                 anomaly_count,
-                points_raw: r.get(5)?,
-                penalty_points: r.get(6)?,
-                points_final: r.get(7)?,
-                elapsed_seconds: r.get(8)?,
-                delay_seconds: r.get(9)?,
-                penalty_minutes: r.get(10)?,
-                diagnostics_json: r.get(11)?,
-                computed_at: r.get(12)?,
+                points_raw: r.get(7)?,
+                penalty_points: r.get(8)?,
+                points_final: r.get(9)?,
+                elapsed_seconds: r.get(10)?,
+                delay_seconds: r.get(11)?,
+                penalty_minutes: r.get(12)?,
+                diagnostics_json: r.get(13)?,
+                computed_at: r.get(14)?,
             })
         })
         .map_err(|e| format!("query results: {e}"))?;
@@ -1253,29 +1611,42 @@ pub fn query_results(
         r#"
         SELECT COUNT(*)
         FROM results
+        LEFT JOIN start_protocol sp ON sp.participant_id = results.participant_id
         WHERE 1=1
         "#,
     );
     let mut count_params_dyn: Vec<String> = Vec::new();
+    let mut count_int_params: Vec<i64> = Vec::new();
     if let Some(ref s) = status {
         if s == "OK" || s == "DQ" || s == "ERR" {
-            count_query.push_str(" AND status = ? ");
+            count_query.push_str(" AND results.status = ? ");
             count_params_dyn.push(s.clone());
         }
     }
     if let Some(ref s) = search {
-        count_query.push_str(" AND (participant_id LIKE ? OR name LIKE ?) ");
+        count_query.push_str(" AND (results.participant_id LIKE ? OR results.name LIKE ?) ");
         let wildcard = format!("%{s}%");
         count_params_dyn.push(wildcard.clone());
         count_params_dyn.push(wildcard);
     }
+    if only_missing_format {
+        count_query.push_str(
+            " AND (sp.format_id IS NULL OR TRIM(IFNULL(sp.format_name, '')) = '') ",
+        );
+    } else if let Some(fid) = format_id {
+        count_query.push_str(" AND sp.format_id = ? ");
+        count_int_params.push(fid);
+    }
     let mut count_stmt = conn
         .prepare(&count_query)
         .map_err(|e| format!("prepare query results count: {e}"))?;
-    let count_bind_values: Vec<rusqlite::types::Value> = count_params_dyn
+    let mut count_bind_values: Vec<rusqlite::types::Value> = count_params_dyn
         .into_iter()
         .map(rusqlite::types::Value::Text)
         .collect();
+    for v in count_int_params {
+        count_bind_values.push(rusqlite::types::Value::Integer(v));
+    }
     let total_count: i64 = count_stmt
         .query_row(rusqlite::params_from_iter(count_bind_values), |r| r.get(0))
         .map_err(|e| format!("query results count: {e}"))?;
@@ -1283,17 +1654,41 @@ pub fn query_results(
     Ok((out, total_count))
 }
 
-pub fn query_status_counts(conn: &Connection) -> Result<BTreeMap<String, i64>, String> {
+pub fn query_status_counts(
+    conn: &Connection,
+    format_id: Option<i64>,
+    only_missing_format: bool,
+) -> Result<BTreeMap<String, i64>, String> {
     let mut out = BTreeMap::from([
         ("OK".to_string(), 0_i64),
         ("DQ".to_string(), 0_i64),
         ("ERR".to_string(), 0_i64),
     ]);
+    let mut query = String::from(
+        r#"
+        SELECT results.status, COUNT(*) as cnt
+        FROM results
+        LEFT JOIN start_protocol sp ON sp.participant_id = results.participant_id
+        WHERE 1=1
+        "#,
+    );
+    let mut bind_values: Vec<rusqlite::types::Value> = Vec::new();
+    if only_missing_format {
+        query.push_str(
+            " AND (sp.format_id IS NULL OR TRIM(IFNULL(sp.format_name, '')) = '') ",
+        );
+    } else if let Some(fid) = format_id {
+        query.push_str(" AND sp.format_id = ? ");
+        bind_values.push(rusqlite::types::Value::Integer(fid));
+    }
+    query.push_str(" GROUP BY results.status ");
     let mut stmt = conn
-        .prepare("SELECT status, COUNT(*) as cnt FROM results GROUP BY status")
+        .prepare(&query)
         .map_err(|e| format!("prepare status counts: {e}"))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .query_map(rusqlite::params_from_iter(bind_values), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("query status counts: {e}"))?;
     for row in rows {
         let (status, cnt) = row.map_err(|e| format!("read status count row: {e}"))?;
@@ -1390,6 +1785,579 @@ pub fn query_participants(conn: &Connection, limit: i64) -> Result<Vec<Participa
         out.push(row.map_err(|e| format!("read participants list row: {e}"))?);
     }
     Ok(out)
+}
+
+pub fn query_start_protocol(
+    conn: &Connection,
+    limit: i64,
+    offset: i64,
+    search: Option<String>,
+    format_id: Option<i64>,
+    only_incomplete: bool,
+    only_missing_format: bool,
+) -> Result<(Vec<StartProtocolRow>, i64), String> {
+    let safe_limit = limit.clamp(1, 2000);
+    let safe_offset = offset.max(0);
+    let missing_format_expr = r#"
+        (
+            sp.format_id IS NULL
+            OR TRIM(IFNULL(sp.format_name, '')) = ''
+        )
+    "#;
+    let incomplete_expr = format!(
+        r#"
+        (
+            TRIM(IFNULL(sp.name, '')) = ''
+            OR {missing_format_expr}
+            OR TRIM(IFNULL(sp.gender, '')) = ''
+            OR (
+                TRIM(IFNULL(sp.birth_date_raw, '')) = ''
+                AND TRIM(IFNULL(sp.birth_date_iso, '')) = ''
+            )
+        )
+        "#
+    );
+    let mut query = format!(
+        r#"
+        SELECT
+            sp.participant_id,
+            sp.name,
+            sp.format_id,
+            sp.format_name,
+            sp.gender,
+            sp.birth_date_raw,
+            sp.birth_date_iso,
+            sp.source_row,
+            EXISTS(
+                SELECT 1 FROM participants p
+                WHERE p.participant_id = sp.participant_id
+            ) as has_result,
+            {incomplete_expr} as is_incomplete,
+            {missing_format_expr} as missing_format
+        FROM start_protocol sp
+        WHERE 1=1
+        "#
+    );
+    let mut params_dyn: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(ref s) = search {
+        let wildcard = format!("%{}%", s.trim());
+        query.push_str(" AND (sp.participant_id LIKE ? OR sp.name LIKE ?) ");
+        params_dyn.push(rusqlite::types::Value::Text(wildcard.clone()));
+        params_dyn.push(rusqlite::types::Value::Text(wildcard));
+    }
+    if let Some(fid) = format_id {
+        query.push_str(" AND sp.format_id = ? ");
+        params_dyn.push(rusqlite::types::Value::Integer(fid));
+    }
+    if only_incomplete {
+        query.push_str(" AND ");
+        query.push_str(&incomplete_expr);
+    }
+    if only_missing_format {
+        query.push_str(" AND ");
+        query.push_str(missing_format_expr);
+    }
+    query.push_str(" ORDER BY sp.format_name, sp.participant_id COLLATE NOCASE ASC LIMIT ? OFFSET ? ");
+    params_dyn.push(rusqlite::types::Value::Integer(safe_limit));
+    params_dyn.push(rusqlite::types::Value::Integer(safe_offset));
+
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|e| format!("prepare start protocol query: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_dyn), |r| {
+            Ok(StartProtocolRow {
+                participant_id: r.get(0)?,
+                name: r.get(1)?,
+                format_id: r.get(2)?,
+                format_name: r.get(3)?,
+                gender: r.get(4)?,
+                birth_date_raw: r.get(5)?,
+                birth_date_iso: r.get(6)?,
+                source_row: r.get(7)?,
+                has_result: r.get(8)?,
+                is_incomplete: r.get(9)?,
+                missing_format: r.get(10)?,
+            })
+        })
+        .map_err(|e| format!("query start protocol: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read start protocol row: {e}"))?);
+    }
+
+    let mut count_query = String::from("SELECT COUNT(*) FROM start_protocol sp WHERE 1=1 ");
+    let mut count_params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(ref s) = search {
+        let wildcard = format!("%{}%", s.trim());
+        count_query.push_str(" AND (sp.participant_id LIKE ? OR sp.name LIKE ?) ");
+        count_params.push(rusqlite::types::Value::Text(wildcard.clone()));
+        count_params.push(rusqlite::types::Value::Text(wildcard));
+    }
+    if let Some(fid) = format_id {
+        count_query.push_str(" AND sp.format_id = ? ");
+        count_params.push(rusqlite::types::Value::Integer(fid));
+    }
+    if only_incomplete {
+        count_query.push_str(" AND ");
+        count_query.push_str(&incomplete_expr);
+    }
+    if only_missing_format {
+        count_query.push_str(" AND ");
+        count_query.push_str(missing_format_expr);
+    }
+    let mut count_stmt = conn
+        .prepare(&count_query)
+        .map_err(|e| format!("prepare start protocol count query: {e}"))?;
+    let total_count: i64 = count_stmt
+        .query_row(rusqlite::params_from_iter(count_params), |r| r.get(0))
+        .map_err(|e| format!("query start protocol count: {e}"))?;
+
+    Ok((out, total_count))
+}
+
+pub fn query_start_protocol_formats(conn: &Connection) -> Result<Vec<String>, String> {
+    let rows = query_start_protocol_format_rows(conn)?;
+    Ok(rows.into_iter().map(|r| r.format_name).collect())
+}
+
+pub fn query_start_protocol_format_rows(
+    conn: &Connection,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                f.id,
+                f.format_name,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM start_protocol sp
+                    WHERE sp.format_id = f.id
+                ), 0) AS usage_count
+            FROM start_protocol_formats f
+            ORDER BY f.format_name COLLATE NOCASE ASC
+            "#,
+        )
+        .map_err(|e| format!("prepare start protocol formats query: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(StartProtocolFormatRow {
+                id: r.get(0)?,
+                format_name: r.get(1)?,
+                usage_count: r.get(2)?,
+            })
+        })
+        .map_err(|e| format!("query start protocol formats: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read start protocol format: {e}"))?);
+    }
+    Ok(out)
+}
+
+pub fn add_start_protocol_format(
+    conn: &Connection,
+    format_name: String,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let name = format_name.trim().to_string();
+    if name.is_empty() {
+        return Err("Имя формата не может быть пустым".to_string());
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM start_protocol_formats WHERE format_name = ? COLLATE NOCASE LIMIT 1",
+            params![name],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| format!("check format exists: {e}"))?;
+    if exists.is_some() {
+        return Err(format!("Формат «{name}» уже существует"));
+    }
+    conn.execute(
+        "INSERT INTO start_protocol_formats(format_name) VALUES(?)",
+        params![name],
+    )
+    .map_err(|e| format!("insert format: {e}"))?;
+    query_start_protocol_format_rows(conn)
+}
+
+pub fn rename_start_protocol_format(
+    conn: &Connection,
+    format_id: i64,
+    new_format_name: String,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let new_name = new_format_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err("Имя формата не может быть пустым".to_string());
+    }
+    let old_name: String = conn
+        .query_row(
+            "SELECT format_name FROM start_protocol_formats WHERE id = ? LIMIT 1",
+            params![format_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("check format exists: {e}"))?
+        .ok_or_else(|| format!("Формат id={format_id} не найден"))?;
+    if old_name == new_name {
+        return query_start_protocol_format_rows(conn);
+    }
+
+    let conflict = conn
+        .query_row(
+            "SELECT 1 FROM start_protocol_formats WHERE format_name = ? COLLATE NOCASE AND id <> ? LIMIT 1",
+            params![new_name, format_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| format!("check format rename conflict: {e}"))?;
+    if conflict.is_some() {
+        return Err(format!("Формат «{new_name}» уже существует"));
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("start format rename transaction: {e}"))?;
+    tx.execute(
+        "UPDATE start_protocol_formats SET format_name = ? WHERE id = ?",
+        params![new_name, format_id],
+    )
+    .map_err(|e| format!("rename format in dictionary: {e}"))?;
+    tx.execute(
+        "UPDATE start_protocol SET format_name = ? WHERE format_id = ?",
+        params![new_name, format_id],
+    )
+    .map_err(|e| format!("rename format in protocol: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit format rename: {e}"))?;
+    query_start_protocol_format_rows(conn)
+}
+
+pub fn delete_start_protocol_format(
+    conn: &Connection,
+    format_id: i64,
+) -> Result<Vec<StartProtocolFormatRow>, String> {
+    let name: String = conn
+        .query_row(
+            "SELECT format_name FROM start_protocol_formats WHERE id = ? LIMIT 1",
+            params![format_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("check format exists: {e}"))?
+        .ok_or_else(|| format!("Формат id={format_id} не найден"))?;
+    let usage_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM start_protocol WHERE format_id = ?",
+            params![format_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("count format usage: {e}"))?;
+    if usage_count > 0 {
+        return Err(format!(
+            "Нельзя удалить формат «{name}»: в нём зарегистрировано участников: {usage_count}"
+        ));
+    }
+    conn.execute(
+        "DELETE FROM format_settings WHERE format_id = ?",
+        params![format_id],
+    )
+    .map_err(|e| format!("delete format settings: {e}"))?;
+    conn.execute(
+        "DELETE FROM start_protocol_formats WHERE id = ?",
+        params![format_id],
+    )
+    .map_err(|e| format!("delete format: {e}"))?;
+    query_start_protocol_format_rows(conn)
+}
+
+pub fn query_format_settings(conn: &Connection) -> Result<Vec<FormatSettings>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                f.id,
+                f.format_name,
+                fs.control_minutes,
+                fs.penalty_per_minute,
+                fs.dq_minutes,
+                fs.finish_cp
+            FROM start_protocol_formats f
+            LEFT JOIN format_settings fs ON fs.format_id = f.id
+            ORDER BY f.format_name COLLATE NOCASE ASC
+            "#,
+        )
+        .map_err(|e| format!("prepare format settings query: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(FormatSettings {
+                format_id: r.get(0)?,
+                format_name: r.get(1)?,
+                control_minutes: r.get(2)?,
+                penalty_per_minute: r.get(3)?,
+                dq_minutes: r.get(4)?,
+                finish_cp: r.get(5)?,
+            })
+        })
+        .map_err(|e| format!("query format settings: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read format settings row: {e}"))?);
+    }
+    Ok(out)
+}
+
+pub fn set_format_settings(
+    conn: &Connection,
+    format_id: i64,
+    control_minutes: Option<i64>,
+    penalty_per_minute: Option<i64>,
+    dq_minutes: Option<i64>,
+    finish_cp: Option<i64>,
+) -> Result<FormatSettings, String> {
+    let format_name: String = conn
+        .query_row(
+            "SELECT format_name FROM start_protocol_formats WHERE id = ? LIMIT 1",
+            params![format_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("check format for settings: {e}"))?
+        .ok_or_else(|| format!("Формат id={format_id} не найден"))?;
+
+    for (label, value) in [
+        ("control_minutes", control_minutes),
+        ("penalty_per_minute", penalty_per_minute),
+        ("dq_minutes", dq_minutes),
+        ("finish_cp", finish_cp),
+    ] {
+        if let Some(v) = value {
+            if v < 0 {
+                return Err(format!("{label} не может быть отрицательным"));
+            }
+        }
+    }
+
+    if control_minutes.is_none()
+        && penalty_per_minute.is_none()
+        && dq_minutes.is_none()
+        && finish_cp.is_none()
+    {
+        conn.execute(
+            "DELETE FROM format_settings WHERE format_id = ?",
+            params![format_id],
+        )
+        .map_err(|e| format!("cleanup empty format settings: {e}"))?;
+    } else {
+        conn.execute(
+            r#"
+            INSERT INTO format_settings(
+                format_id, control_minutes, penalty_per_minute, dq_minutes, finish_cp
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(format_id) DO UPDATE SET
+                control_minutes=excluded.control_minutes,
+                penalty_per_minute=excluded.penalty_per_minute,
+                dq_minutes=excluded.dq_minutes,
+                finish_cp=excluded.finish_cp
+            "#,
+            params![
+                format_id,
+                control_minutes,
+                penalty_per_minute,
+                dq_minutes,
+                finish_cp
+            ],
+        )
+        .map_err(|e| format!("upsert format settings: {e}"))?;
+    }
+
+    Ok(FormatSettings {
+        format_id,
+        format_name,
+        control_minutes,
+        penalty_per_minute,
+        dq_minutes,
+        finish_cp,
+    })
+}
+
+pub fn update_start_protocol_entry(
+    conn: &Connection,
+    participant_id: String,
+    name: String,
+    format_id: Option<i64>,
+    gender: Option<String>,
+    birth_date_raw: Option<String>,
+) -> Result<StartProtocolRow, String> {
+    let pid = participant_id.trim().to_string();
+    let name = name.trim().to_string();
+    if pid.is_empty() || name.is_empty() {
+        return Err("Поля id и имя обязательны".to_string());
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM start_protocol WHERE participant_id = ? LIMIT 1",
+            params![pid],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| format!("check start protocol entry exists: {e}"))?;
+    if exists.is_none() {
+        return Err(format!("Запись стартового протокола для id {} не найдена", pid));
+    }
+
+    let (resolved_format_id, format_name) = match format_id {
+        Some(fid) => {
+            let fname: String = conn
+                .query_row(
+                    "SELECT format_name FROM start_protocol_formats WHERE id = ? LIMIT 1",
+                    params![fid],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("resolve format by id: {e}"))?
+                .ok_or_else(|| format!("Формат id={fid} не найден"))?;
+            (Some(fid), fname)
+        }
+        None => (None, String::new()),
+    };
+
+    let gender_clean = gender.and_then(|g| {
+        let t = g.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let birth_raw_clean = birth_date_raw.and_then(|d| {
+        let t = d.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let birth_iso = birth_raw_clean
+        .as_ref()
+        .and_then(|d| parse_birth_date_ru(d));
+
+    conn.execute(
+        r#"
+        UPDATE start_protocol
+        SET name = ?, format_id = ?, format_name = ?, gender = ?, birth_date_raw = ?, birth_date_iso = ?
+        WHERE participant_id = ?
+        "#,
+        params![
+            name,
+            resolved_format_id,
+            format_name,
+            gender_clean,
+            birth_raw_clean,
+            birth_iso,
+            pid
+        ],
+    )
+    .map_err(|e| format!("update start protocol entry: {e}"))?;
+
+    conn.query_row(
+        r#"
+        SELECT
+            sp.participant_id,
+            sp.name,
+            sp.format_id,
+            sp.format_name,
+            sp.gender,
+            sp.birth_date_raw,
+            sp.birth_date_iso,
+            sp.source_row,
+            EXISTS(
+                SELECT 1 FROM participants p
+                WHERE p.participant_id = sp.participant_id
+            ) as has_result,
+            (
+                TRIM(IFNULL(sp.name, '')) = ''
+                OR sp.format_id IS NULL
+                OR TRIM(IFNULL(sp.format_name, '')) = ''
+                OR TRIM(IFNULL(sp.gender, '')) = ''
+                OR (
+                    TRIM(IFNULL(sp.birth_date_raw, '')) = ''
+                    AND TRIM(IFNULL(sp.birth_date_iso, '')) = ''
+                )
+            ) as is_incomplete,
+            (
+                sp.format_id IS NULL
+                OR TRIM(IFNULL(sp.format_name, '')) = ''
+            ) as missing_format
+        FROM start_protocol sp
+        WHERE sp.participant_id = ?
+        "#,
+        params![pid],
+        |r| {
+            Ok(StartProtocolRow {
+                participant_id: r.get(0)?,
+                name: r.get(1)?,
+                format_id: r.get(2)?,
+                format_name: r.get(3)?,
+                gender: r.get(4)?,
+                birth_date_raw: r.get(5)?,
+                birth_date_iso: r.get(6)?,
+                source_row: r.get(7)?,
+                has_result: r.get(8)?,
+                is_incomplete: r.get(9)?,
+                missing_format: r.get(10)?,
+            })
+        },
+    )
+    .map_err(|e| format!("load updated start protocol entry: {e}"))
+}
+
+fn sync_start_protocol_format_ids_tx(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO start_protocol_formats(format_name)
+        SELECT DISTINCT TRIM(format_name)
+        FROM start_protocol
+        WHERE TRIM(format_name) <> ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("sync formats from protocol: {e}"))?;
+    tx.execute(
+        r#"
+        UPDATE start_protocol
+        SET format_id = (
+            SELECT f.id FROM start_protocol_formats f
+            WHERE f.format_name = start_protocol.format_name
+        )
+        WHERE TRIM(IFNULL(format_name, '')) <> ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("backfill format_id: {e}"))?;
+    tx.execute(
+        r#"
+        UPDATE start_protocol
+        SET format_id = NULL
+        WHERE TRIM(IFNULL(format_name, '')) = ''
+        "#,
+        [],
+    )
+    .map_err(|e| format!("clear empty format_id: {e}"))?;
+    Ok(())
+}
+
+fn ensure_format_id_tx(tx: &Transaction<'_>, format_name: &str) -> Result<i64, String> {
+    let name = format_name.trim();
+    if name.is_empty() {
+        return Err("Имя формата не может быть пустым".to_string());
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO start_protocol_formats(format_name) VALUES(?)",
+        params![name],
+    )
+    .map_err(|e| format!("ensure format: {e}"))?;
+    tx.query_row(
+        "SELECT id FROM start_protocol_formats WHERE format_name = ? LIMIT 1",
+        params![name],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("load format id: {e}"))
 }
 
 pub fn query_participant_details(
@@ -1505,9 +2473,11 @@ pub fn query_participant_details(
         .query_row(
             r#"
             SELECT
-                   participant_id,
-                   name,
-                   status,
+                   results.participant_id,
+                   results.name,
+                   results.status,
+                   sp.format_id,
+                   COALESCE(sp.format_name, '') AS format_name,
                    EXISTS(
                      SELECT 1 FROM corrections c
                      WHERE c.participant_id = results.participant_id
@@ -1515,10 +2485,11 @@ pub fn query_participant_details(
                      SELECT 1 FROM manual_corrections mc
                      WHERE mc.participant_id = results.participant_id
                    ) AS has_personal_corrections,
-                   points_raw, penalty_points, points_final,
-                   elapsed_seconds, delay_seconds, penalty_minutes, diagnostics_json, computed_at
+                   results.points_raw, results.penalty_points, results.points_final,
+                   results.elapsed_seconds, results.delay_seconds, results.penalty_minutes, results.diagnostics_json, results.computed_at
             FROM results
-            WHERE participant_id = ?
+            LEFT JOIN start_protocol sp ON sp.participant_id = results.participant_id
+            WHERE results.participant_id = ?
             "#,
             params![participant_id],
             |r| {
@@ -1526,17 +2497,19 @@ pub fn query_participant_details(
                     participant_id: r.get(0)?,
                     name: r.get(1)?,
                     status: r.get(2)?,
-                    has_personal_corrections: r.get(3)?,
+                    format_id: r.get(3)?,
+                    format_name: r.get(4)?,
+                    has_personal_corrections: r.get(5)?,
                     has_anomalies: false,
                     anomaly_count: 0,
-                    points_raw: r.get(4)?,
-                    penalty_points: r.get(5)?,
-                    points_final: r.get(6)?,
-                    elapsed_seconds: r.get(7)?,
-                    delay_seconds: r.get(8)?,
-                    penalty_minutes: r.get(9)?,
-                    diagnostics_json: r.get(10)?,
-                    computed_at: r.get(11)?,
+                    points_raw: r.get(6)?,
+                    penalty_points: r.get(7)?,
+                    points_final: r.get(8)?,
+                    elapsed_seconds: r.get(9)?,
+                    delay_seconds: r.get(10)?,
+                    penalty_minutes: r.get(11)?,
+                    diagnostics_json: r.get(12)?,
+                    computed_at: r.get(13)?,
                 })
             },
         )
@@ -2244,6 +3217,16 @@ fn competition_start_datetime(settings: &Settings) -> Option<NaiveDateTime> {
     let date = NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d").ok()?;
     let time = NaiveTime::parse_from_str(settings.competition_start_time.trim(), "%H:%M:%S").ok()?;
     Some(date.and_time(time))
+}
+
+fn parse_birth_date_ru(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    NaiveDate::parse_from_str(trimmed, "%d.%m.%Y")
+        .ok()
+        .map(|d| d.format("%Y-%m-%d").to_string())
 }
 
 fn detect_anomalies_for_start_time(start_time: &str, settings: &Settings) -> Vec<ParticipantAnomaly> {
