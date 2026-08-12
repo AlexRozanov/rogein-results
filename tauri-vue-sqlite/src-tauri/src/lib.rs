@@ -1,21 +1,71 @@
-mod domain;
+pub mod archive;
+pub mod domain;
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use archive::{ActiveArchiveInfo, ArchiveActionResult, ArchiveListItem};
 use domain::{
-    AnomalyBulkActionsState, AnomalyScanSummary, BulkAnomalyCorrectionSummary,
-    BulkAnomalyRollbackSummary, CorrectionRow, ExclusionRuleRow, FormatSettings, ImportSummary,
-    ParticipantDetails, ParticipantRow, ResultRow, Settings, StartProtocolFormatRow,
-    StartProtocolImportSummary, StartProtocolRow,
+    AnomalyBulkActionsState, AnomalyListResponse, AnomalyScanSummary, AwardGroupRow,
+    BulkAnomalyCorrectionSummary, BulkAnomalyRollbackSummary, CorrectionRow,
+    CourseMapSpecialPoints, CpLegendImportSummary, CpLegendRow, CpLegendTypeRow,
+    CpRemapAnalyzeSummary, CpRemapApplyItem, CpRemapApplySummary, ErrorRow, ExclusionRuleRow,
+    FormatCpTypeRuleInput, FormatCpTypeRulesBundle, FormatSettings, ImportSummary,
+    MapGeorefInfo, MapGpsAnchor, MapGpsAnchorUpsert, ParticipantDetails, ParticipantPathDistance,
+    ParticipantRow, ResultRow, SearchSuggestion, Settings, StartProtocolFormatRow,
+    StartProtocolImportSummary, StartProtocolRow, DataPresenceCounts,
 };
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct AppState {
+    app_data_dir: PathBuf,
     db_path: PathBuf,
     db_lock: Mutex<()>,
+}
+
+const COURSE_MAP_FILE: &str = "course_map.bin";
+const COURSE_MAP_NAME_KEY: &str = "course_map_file_name";
+const COURSE_MAP_MIME_KEY: &str = "course_map_mime";
+
+#[derive(Serialize)]
+struct CourseMapInfo {
+    has_map: bool,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CourseMapPayload {
+    file_name: String,
+    mime_type: String,
+    data_base64: String,
+}
+
+fn course_map_path(state: &AppState) -> PathBuf {
+    state.app_data_dir.join(COURSE_MAP_FILE)
+}
+
+fn guess_image_mime(file_name: &str) -> String {
+    let ext = PathBuf::from(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "png" => "image/png".to_string(),
+        "gif" => "image/gif".to_string(),
+        "webp" => "image/webp".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "tif" | "tiff" => "image/tiff".to_string(),
+        "ico" => "image/x-icon".to_string(),
+        "avif" => "image/avif".to_string(),
+        "heic" | "heif" => "image/heic".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
 }
 
 #[derive(Serialize)]
@@ -33,6 +83,157 @@ struct StartProtocolResponse {
     total_count: i64,
     offset: i64,
     limit: i64,
+}
+
+#[tauri::command]
+fn get_data_presence_counts(state: State<'_, AppState>) -> Result<DataPresenceCounts, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::get_data_presence_counts(&conn)
+}
+
+#[tauri::command]
+fn get_archives_dir(state: State<'_, AppState>) -> Result<String, String> {
+    let dir = archive::ensure_archives_dir(&state.app_data_dir)?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn list_start_archives(state: State<'_, AppState>) -> Result<Vec<ArchiveListItem>, String> {
+    archive::list_archives(&state.app_data_dir)
+}
+
+#[tauri::command]
+fn get_active_start_archive(state: State<'_, AppState>) -> Result<Option<ActiveArchiveInfo>, String> {
+    Ok(archive::get_active_archive(&state.app_data_dir))
+}
+
+#[tauri::command]
+fn suggest_finish_start_name(state: State<'_, AppState>) -> Result<String, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let settings = domain::get_settings(&conn)?;
+    Ok(archive::default_archive_title(&settings.competition_date))
+}
+
+#[tauri::command]
+fn finish_current_start(
+    state: State<'_, AppState>,
+    mode: String,
+    archive_name: Option<String>,
+    overwrite: Option<bool>,
+) -> Result<ArchiveActionResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+
+    let overwrite = overwrite.unwrap_or(false);
+    let map_path = course_map_path(&state);
+    let (archive_path, title) = match mode.as_str() {
+        "overwrite_active" => {
+            let active = archive::get_active_archive(&state.app_data_dir).ok_or_else(|| {
+                "Нет открытого архива для перезаписи. Сохраните старт под новым именем.".to_string()
+            })?;
+            let path = PathBuf::from(&active.path);
+            if !path.exists() {
+                let _ = archive::clear_active_archive(&state.app_data_dir);
+                return Err("Файл открытого архива больше не найден. Сохраните под новым именем.".into());
+            }
+            let title = active.title.clone();
+            (path, title)
+        }
+        "save_as" => {
+            let name = archive_name.unwrap_or_default();
+            let stem = archive::sanitize_archive_stem(&name)?;
+            let archives = archive::ensure_archives_dir(&state.app_data_dir)?;
+            let archive_path = archives.join(format!("{stem}.rogein"));
+            if archive_path.exists() && !overwrite {
+                return Err(format!(
+                    "Архив уже существует: {}. Укажите другое имя или подтвердите перезапись.",
+                    archive_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("archive.rogein")
+                ));
+            }
+            (archive_path, stem)
+        }
+        other => {
+            return Err(format!(
+                "Неизвестный режим завершения старта: {other}. Ожидается overwrite_active или save_as."
+            ));
+        }
+    };
+
+    let manifest =
+        archive::create_start_archive(&state.db_path, &map_path, &archive_path, &title)?;
+    archive::wipe_working_start(&state.app_data_dir, &state.db_path, &map_path)?;
+
+    Ok(ArchiveActionResult {
+        archive_path: archive_path.to_string_lossy().to_string(),
+        title: manifest.title,
+        cleared: true,
+    })
+}
+
+#[tauri::command]
+fn open_start_archive(
+    state: State<'_, AppState>,
+    archive_path: String,
+    archive_current_first: Option<bool>,
+) -> Result<ArchiveActionResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+
+    let path = archive::resolve_archive_path(&state.app_data_dir, &archive_path)?;
+    if !path.exists() {
+        return Err(format!("Файл архива не найден: {}", path.display()));
+    }
+
+    let map_path = course_map_path(&state);
+    if archive_current_first.unwrap_or(false) {
+        let auto_name = {
+            let conn = domain::open_and_init_db(&state.db_path)?;
+            let settings = domain::get_settings(&conn)?;
+            archive::default_archive_title(&settings.competition_date)
+        };
+        let stem = archive::sanitize_archive_stem(&auto_name)?;
+        let archives = archive::ensure_archives_dir(&state.app_data_dir)?;
+        let mut dest = archives.join(format!("{stem}.rogein"));
+        let mut idx = 2u32;
+        while dest.exists() {
+            dest = archives.join(format!("{stem}_{idx}.rogein"));
+            idx += 1;
+        }
+        let title = dest
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&stem)
+            .to_string();
+        archive::create_start_archive(&state.db_path, &map_path, &dest, &title)?;
+    }
+
+    let manifest = archive::restore_start_archive(&path, &state.db_path, &map_path)?;
+    archive::set_active_archive(&state.app_data_dir, &path, &manifest.title)?;
+    Ok(ArchiveActionResult {
+        archive_path: path.to_string_lossy().to_string(),
+        title: manifest.title,
+        cleared: false,
+    })
+}
+
+#[tauri::command]
+fn pick_start_archive_file() -> Result<Option<String>, String> {
+    Ok(archive::pick_archive_file().map(|p| p.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -90,6 +291,8 @@ fn set_settings(
     penalty_per_minute: Option<i64>,
     dq_minutes: Option<i64>,
     finish_cp: Option<i64>,
+    start_mode: Option<String>,
+    start_cp: Option<i64>,
     competition_date: Option<String>,
     competition_start_time: Option<String>,
 ) -> Result<Settings, String> {
@@ -104,6 +307,8 @@ fn set_settings(
         penalty_per_minute,
         dq_minutes,
         finish_cp,
+        start_mode,
+        start_cp,
         competition_date,
         competition_start_time,
     )
@@ -118,6 +323,7 @@ fn get_results(
     search: Option<String>,
     format_id: Option<i64>,
     only_missing_format: Option<bool>,
+    award_group_id: Option<i64>,
     sort_by: Option<String>,
     sort_dir: Option<String>,
 ) -> Result<ResultsResponse, String> {
@@ -137,10 +343,11 @@ fn get_results(
         search,
         format_id,
         missing,
+        award_group_id,
         sort_by,
         sort_dir,
     )?;
-    let counts = domain::query_status_counts(&conn, format_id, missing)?;
+    let counts = domain::query_status_counts(&conn, format_id, missing, award_group_id)?;
     Ok(ResultsResponse {
         rows,
         counts,
@@ -151,6 +358,16 @@ fn get_results(
 }
 
 #[tauri::command]
+fn get_error_list(state: State<'_, AppState>) -> Result<Vec<ErrorRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_error_list(&conn)
+}
+
+#[tauri::command]
 fn get_participants(state: State<'_, AppState>, limit: Option<i64>) -> Result<Vec<ParticipantRow>, String> {
     let _guard = state
         .db_lock
@@ -158,6 +375,34 @@ fn get_participants(state: State<'_, AppState>, limit: Option<i64>) -> Result<Ve
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::query_participants(&conn, limit.unwrap_or(200))
+}
+
+#[tauri::command]
+fn suggest_results_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<SearchSuggestion>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::suggest_results_search(&conn, &query, limit.unwrap_or(12))
+}
+
+#[tauri::command]
+fn suggest_start_protocol_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<SearchSuggestion>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::suggest_start_protocol_search(&conn, &query, limit.unwrap_or(12))
 }
 
 #[tauri::command]
@@ -257,6 +502,424 @@ fn delete_start_protocol_format(
 }
 
 #[tauri::command]
+fn get_award_groups(state: State<'_, AppState>) -> Result<Vec<AwardGroupRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_award_groups(&conn)
+}
+
+#[tauri::command]
+fn upsert_award_group(
+    state: State<'_, AppState>,
+    group_id: Option<i64>,
+    name: String,
+    gender_mode: String,
+    format_ids: Vec<i64>,
+    sort_order: Option<i64>,
+) -> Result<AwardGroupRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::upsert_award_group(&conn, group_id, name, gender_mode, format_ids, sort_order)
+}
+
+#[tauri::command]
+fn delete_award_group(state: State<'_, AppState>, group_id: i64) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_award_group(&conn, group_id)
+}
+
+#[tauri::command]
+fn get_cp_legends(state: State<'_, AppState>) -> Result<Vec<CpLegendRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_cp_legends(&conn)
+}
+
+#[tauri::command]
+fn get_cp_legend_type_rows(state: State<'_, AppState>) -> Result<Vec<CpLegendTypeRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_cp_legend_type_rows(&conn)
+}
+
+#[tauri::command]
+fn add_cp_legend_type(
+    state: State<'_, AppState>,
+    type_name: String,
+) -> Result<Vec<CpLegendTypeRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::add_cp_legend_type(&conn, type_name)
+}
+
+#[tauri::command]
+fn rename_cp_legend_type(
+    state: State<'_, AppState>,
+    type_id: i64,
+    new_type_name: String,
+) -> Result<Vec<CpLegendTypeRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::rename_cp_legend_type(&conn, type_id, new_type_name)
+}
+
+#[tauri::command]
+fn delete_cp_legend_type(
+    state: State<'_, AppState>,
+    type_id: i64,
+) -> Result<Vec<CpLegendTypeRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_cp_legend_type(&conn, type_id)
+}
+
+#[tauri::command]
+fn upsert_cp_legend(
+    state: State<'_, AppState>,
+    legend_id: Option<i64>,
+    cp_number: i64,
+    name: String,
+    cp_type_id: Option<i64>,
+) -> Result<CpLegendRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::upsert_cp_legend(&conn, legend_id, cp_number, name, cp_type_id)
+}
+
+#[tauri::command]
+fn set_cp_legend_map_position(
+    state: State<'_, AppState>,
+    legend_id: i64,
+    map_x: Option<f64>,
+    map_y: Option<f64>,
+) -> Result<CpLegendRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_cp_legend_map_position(&conn, legend_id, map_x, map_y)
+}
+
+#[tauri::command]
+fn get_course_map_special_points(
+    state: State<'_, AppState>,
+) -> Result<CourseMapSpecialPoints, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::get_course_map_special_points(&conn)
+}
+
+#[tauri::command]
+fn set_course_map_special_position(
+    state: State<'_, AppState>,
+    point: String,
+    map_x: Option<f64>,
+    map_y: Option<f64>,
+) -> Result<CourseMapSpecialPoints, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_course_map_special_position(&conn, point, map_x, map_y)
+}
+
+#[tauri::command]
+fn delete_cp_legend(state: State<'_, AppState>, legend_id: i64) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_cp_legend(&conn, legend_id)
+}
+
+#[tauri::command]
+fn import_cp_legends_content(
+    state: State<'_, AppState>,
+    csv_content: String,
+    reset: bool,
+) -> Result<CpLegendImportSummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::import_cp_legends_content(&conn, &csv_content, reset)
+}
+
+#[tauri::command]
+fn get_course_map_info(state: State<'_, AppState>) -> Result<CourseMapInfo, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let path = course_map_path(&state);
+    let has_file = path.is_file();
+    let file_name = domain::get_setting_value(&conn, COURSE_MAP_NAME_KEY)?;
+    let mime_type = domain::get_setting_value(&conn, COURSE_MAP_MIME_KEY)?;
+    Ok(CourseMapInfo {
+        has_map: has_file && file_name.is_some(),
+        file_name,
+        mime_type,
+    })
+}
+
+#[tauri::command]
+fn get_course_map_payload(state: State<'_, AppState>) -> Result<Option<CourseMapPayload>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let path = course_map_path(&state);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let file_name = domain::get_setting_value(&conn, COURSE_MAP_NAME_KEY)?
+        .unwrap_or_else(|| "map".to_string());
+    let mime_type = domain::get_setting_value(&conn, COURSE_MAP_MIME_KEY)?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let bytes = fs::read(&path).map_err(|e| format!("read course map: {e}"))?;
+    Ok(Some(CourseMapPayload {
+        file_name,
+        mime_type,
+        data_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+    }))
+}
+
+#[tauri::command]
+fn save_course_map(
+    state: State<'_, AppState>,
+    file_name: String,
+    content_base64: String,
+    mime_type: Option<String>,
+) -> Result<CourseMapInfo, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let name = file_name.trim().to_string();
+    if name.is_empty() {
+        return Err("Имя файла карты пустое".to_string());
+    }
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        content_base64.trim(),
+    )
+    .map_err(|e| format!("decode course map: {e}"))?;
+    if bytes.is_empty() {
+        return Err("Файл карты пустой".to_string());
+    }
+    let mime = mime_type
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| guess_image_mime(&name));
+    if !mime.starts_with("image/") && mime != "application/octet-stream" {
+        return Err(format!(
+            "Ожидается изображение, получен тип «{mime}»"
+        ));
+    }
+
+    let path = course_map_path(&state);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create map dir: {e}"))?;
+    }
+    fs::write(&path, &bytes).map_err(|e| format!("write course map: {e}"))?;
+
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_setting_value(&conn, COURSE_MAP_NAME_KEY, &name)?;
+    domain::set_setting_value(&conn, COURSE_MAP_MIME_KEY, &mime)?;
+    Ok(CourseMapInfo {
+        has_map: true,
+        file_name: Some(name),
+        mime_type: Some(mime),
+    })
+}
+
+#[tauri::command]
+fn clear_course_map(
+    state: State<'_, AppState>,
+    clear_positions: Option<bool>,
+) -> Result<CourseMapInfo, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let path = course_map_path(&state);
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("remove course map: {e}"))?;
+    }
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_setting_value(&conn, COURSE_MAP_NAME_KEY)?;
+    domain::delete_setting_value(&conn, COURSE_MAP_MIME_KEY)?;
+    if clear_positions.unwrap_or(false) {
+        domain::clear_all_course_map_positions(&conn)?;
+    }
+    Ok(CourseMapInfo {
+        has_map: false,
+        file_name: None,
+        mime_type: None,
+    })
+}
+
+#[tauri::command]
+fn get_map_georef_info(state: State<'_, AppState>) -> Result<MapGeorefInfo, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::get_map_georef_info(&conn)
+}
+
+#[tauri::command]
+fn set_map_scale_denominator(
+    state: State<'_, AppState>,
+    denominator: Option<i64>,
+) -> Result<MapGeorefInfo, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_map_scale_denominator(&conn, denominator)?;
+    domain::get_map_georef_info(&conn)
+}
+
+#[tauri::command]
+fn set_course_map_image_size(
+    state: State<'_, AppState>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_course_map_image_size(&conn, width, height)
+}
+
+#[tauri::command]
+fn list_map_gps_anchors(state: State<'_, AppState>) -> Result<Vec<MapGpsAnchor>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::list_map_gps_anchors(&conn)
+}
+
+#[tauri::command]
+fn upsert_map_gps_anchor(
+    state: State<'_, AppState>,
+    item: MapGpsAnchorUpsert,
+) -> Result<MapGpsAnchor, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::upsert_map_gps_anchor(&conn, item)
+}
+
+#[tauri::command]
+fn delete_map_gps_anchor(state: State<'_, AppState>, anchor_id: i64) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_map_gps_anchor(&conn, anchor_id)
+}
+
+#[tauri::command]
+fn get_participant_path_distance(
+    state: State<'_, AppState>,
+    result_id: i64,
+) -> Result<ParticipantPathDistance, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::participant_path_distance_m(&mut conn, result_id)
+}
+
+#[tauri::command]
+fn get_format_cp_type_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<FormatCpTypeRulesBundle>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_format_cp_type_rules(&conn)
+}
+
+#[tauri::command]
+fn set_format_cp_type_rules(
+    state: State<'_, AppState>,
+    format_id: i64,
+    rules: Vec<FormatCpTypeRuleInput>,
+) -> Result<Vec<FormatCpTypeRulesBundle>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_format_cp_type_rules(&conn, format_id, rules)
+}
+
+#[tauri::command]
+fn delete_format_cp_type_rules(
+    state: State<'_, AppState>,
+    format_id: i64,
+) -> Result<Vec<FormatCpTypeRulesBundle>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_format_cp_type_rules(&conn, format_id)
+}
+
+#[tauri::command]
 fn get_format_settings(state: State<'_, AppState>) -> Result<Vec<FormatSettings>, String> {
     let _guard = state
         .db_lock
@@ -274,6 +937,7 @@ fn set_format_settings(
     penalty_per_minute: Option<i64>,
     dq_minutes: Option<i64>,
     finish_cp: Option<i64>,
+    competition_start_time: Option<String>,
 ) -> Result<FormatSettings, String> {
     let _guard = state
         .db_lock
@@ -287,12 +951,38 @@ fn set_format_settings(
         penalty_per_minute,
         dq_minutes,
         finish_cp,
+        competition_start_time,
+    )
+}
+
+#[tauri::command]
+fn add_start_protocol_entry(
+    state: State<'_, AppState>,
+    participant_id: String,
+    name: String,
+    format_id: Option<i64>,
+    gender: Option<String>,
+    birth_date_raw: Option<String>,
+) -> Result<StartProtocolRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::add_start_protocol_entry(
+        &conn,
+        participant_id,
+        name,
+        format_id,
+        gender,
+        birth_date_raw,
     )
 }
 
 #[tauri::command]
 fn update_start_protocol_entry(
     state: State<'_, AppState>,
+    entry_id: i64,
     participant_id: String,
     name: String,
     format_id: Option<i64>,
@@ -306,6 +996,7 @@ fn update_start_protocol_entry(
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::update_start_protocol_entry(
         &conn,
+        entry_id,
         participant_id,
         name,
         format_id,
@@ -315,16 +1006,74 @@ fn update_start_protocol_entry(
 }
 
 #[tauri::command]
+fn merge_start_protocol_team(
+    state: State<'_, AppState>,
+    entry_ids: Vec<i64>,
+) -> Result<i64, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let team_id = domain::merge_start_protocol_team(&conn, entry_ids)?;
+    domain::recalculate(&mut conn)?;
+    Ok(team_id)
+}
+
+#[tauri::command]
+fn leave_start_protocol_team(
+    state: State<'_, AppState>,
+    entry_ids: Vec<i64>,
+) -> Result<i64, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let left = domain::leave_start_protocol_teams(&conn, entry_ids)?;
+    domain::recalculate(&mut conn)?;
+    Ok(left)
+}
+
+#[tauri::command]
+fn dissolve_start_protocol_team(
+    state: State<'_, AppState>,
+    team_id: i64,
+) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::dissolve_start_protocol_team(&conn, team_id)?;
+    domain::recalculate(&mut conn)
+}
+
+#[tauri::command]
 fn get_participant_details(
     state: State<'_, AppState>,
-    participant_id: String,
+    result_id: i64,
 ) -> Result<ParticipantDetails, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
     let mut conn = domain::open_and_init_db(&state.db_path)?;
-    domain::query_participant_details(&mut conn, &participant_id)
+    domain::query_participant_details(&mut conn, result_id)
+}
+
+#[tauri::command]
+fn find_result_id(
+    state: State<'_, AppState>,
+    participant_id: String,
+    name: String,
+) -> Result<Option<i64>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::find_result_id(&conn, &participant_id, &name)
 }
 
 #[tauri::command]
@@ -423,6 +1172,7 @@ fn add_exclusion_rule(
     state: State<'_, AppState>,
     participant_scope: String,
     participant_id: Option<String>,
+    format_id: Option<i64>,
     from_cp: i64,
     to_cp: i64,
     direction: String,
@@ -438,6 +1188,7 @@ fn add_exclusion_rule(
         &conn,
         participant_scope,
         participant_id,
+        format_id,
         from_cp,
         to_cp,
         direction,
@@ -452,6 +1203,7 @@ fn update_exclusion_rule(
     rule_id: i64,
     participant_scope: String,
     participant_id: Option<String>,
+    format_id: Option<i64>,
     from_cp: i64,
     to_cp: i64,
     direction: String,
@@ -468,6 +1220,7 @@ fn update_exclusion_rule(
         rule_id,
         participant_scope,
         participant_id,
+        format_id,
         from_cp,
         to_cp,
         direction,
@@ -490,13 +1243,14 @@ fn delete_exclusion_rule(state: State<'_, AppState>, rule_id: i64) -> Result<(),
 fn get_exclusion_rules(
     state: State<'_, AppState>,
     participant_id: Option<String>,
+    format_id: Option<i64>,
 ) -> Result<Vec<ExclusionRuleRow>, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::query_exclusion_rules(&conn, participant_id)
+    domain::query_exclusion_rules(&conn, participant_id, format_id)
 }
 
 #[tauri::command]
@@ -510,6 +1264,103 @@ fn get_manual_corrections(
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::query_manual_corrections(&conn, participant_id)
+}
+
+#[tauri::command]
+fn get_anomaly_list(state: State<'_, AppState>) -> Result<AnomalyListResponse, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::query_anomaly_list(&conn)
+}
+
+#[tauri::command]
+fn analyze_cp_station_remap(
+    state: State<'_, AppState>,
+    from_cp: i64,
+    to_cp: i64,
+) -> Result<CpRemapAnalyzeSummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::analyze_cp_station_remap(&conn, from_cp, to_cp)
+}
+
+#[tauri::command]
+fn apply_cp_remap_corrections(
+    state: State<'_, AppState>,
+    items: Vec<CpRemapApplyItem>,
+) -> Result<CpRemapApplySummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::apply_cp_remap_corrections(&conn, &items)
+}
+
+#[tauri::command]
+fn open_aux_window(
+    app: AppHandle,
+    label: String,
+    title: String,
+    url: String,
+    width: Option<f64>,
+    height: Option<f64>,
+) -> Result<(), String> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err("label is empty".to_string());
+    }
+    let raw_url = url.trim().to_string();
+    if raw_url.is_empty() {
+        return Err("url is empty".to_string());
+    }
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.close();
+    }
+    // Allow a short moment for the previous window to release the label.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let fullscreen = app.webview_windows().values().any(|w| w.is_fullscreen().ok().unwrap_or(false));
+
+    let webview_url = resolve_aux_window_url(&app, &raw_url)?;
+    WebviewWindowBuilder::new(&app, &label, webview_url)
+        .title(title)
+        .inner_size(width.unwrap_or(1220.0), height.unwrap_or(900.0))
+        .fullscreen(fullscreen)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .focused(true)
+        .visible(true)
+        .build()
+        .map_err(|e| format!("create window '{label}': {e}"))?;
+    Ok(())
+}
+
+fn resolve_aux_window_url(app: &AppHandle, raw_url: &str) -> Result<WebviewUrl, String> {
+    let fragment = raw_url
+        .strip_prefix('#')
+        .unwrap_or(raw_url)
+        .trim_start_matches('/');
+
+    // Match participant-card behavior: same origin as main window + hash route.
+    if let Some(main) = app.get_webview_window("main") {
+        if let Ok(mut current) = main.url() {
+            current.set_path("/");
+            current.set_query(None);
+            current.set_fragment(Some(fragment));
+            return Ok(WebviewUrl::External(current));
+        }
+    }
+
+    Ok(WebviewUrl::App(format!("index.html#{fragment}").into()))
 }
 
 #[tauri::command]
@@ -546,10 +1397,12 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("resolve app data dir: {e}"))?;
             fs::create_dir_all(&app_data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+            archive::ensure_archives_dir(&app_data_dir)?;
             let db_path = app_data_dir.join("rogein_v01.sqlite3");
             let conn = domain::open_and_init_db(&db_path)?;
             drop(conn);
             app.manage(AppState {
+                app_data_dir,
                 db_path,
                 db_lock: Mutex::new(()),
             });
@@ -566,26 +1419,74 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import_csv_content,
             import_start_protocol_content,
+            get_data_presence_counts,
+            get_archives_dir,
+            list_start_archives,
+            get_active_start_archive,
+            suggest_finish_start_name,
+            finish_current_start,
+            open_start_archive,
+            pick_start_archive_file,
             recalculate_results,
             get_settings,
             set_settings,
             get_results,
+            get_error_list,
             get_participants,
+            suggest_results_search,
+            suggest_start_protocol_search,
             get_start_protocol,
             get_start_protocol_formats,
             get_start_protocol_format_rows,
             add_start_protocol_format,
             rename_start_protocol_format,
             delete_start_protocol_format,
+            get_award_groups,
+            upsert_award_group,
+            delete_award_group,
+            get_cp_legends,
+            get_cp_legend_type_rows,
+            add_cp_legend_type,
+            rename_cp_legend_type,
+            delete_cp_legend_type,
+            upsert_cp_legend,
+            set_cp_legend_map_position,
+            get_course_map_special_points,
+            set_course_map_special_position,
+            delete_cp_legend,
+            import_cp_legends_content,
+            get_course_map_info,
+            get_course_map_payload,
+            save_course_map,
+            clear_course_map,
+            get_map_georef_info,
+            set_map_scale_denominator,
+            set_course_map_image_size,
+            list_map_gps_anchors,
+            upsert_map_gps_anchor,
+            delete_map_gps_anchor,
+            get_participant_path_distance,
+            get_format_cp_type_rules,
+            set_format_cp_type_rules,
+            delete_format_cp_type_rules,
             get_format_settings,
             set_format_settings,
+            add_start_protocol_entry,
             update_start_protocol_entry,
+            merge_start_protocol_team,
+            leave_start_protocol_team,
+            dissolve_start_protocol_team,
             get_participant_details,
+            find_result_id,
             add_cp_correction,
             add_anomaly_day_shift_correction,
             add_anomaly_day_shift_corrections_for_all,
             rollback_anomaly_day_shift_corrections_for_all,
             get_anomaly_bulk_actions_state,
+            get_anomaly_list,
+            analyze_cp_station_remap,
+            apply_cp_remap_corrections,
+            open_aux_window,
             remove_cp_correction,
             add_exclusion_rule,
             update_exclusion_rule,

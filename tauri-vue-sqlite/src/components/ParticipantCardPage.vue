@@ -1,13 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  closeAuxiliaryWindowOrClearHash,
+  markReturnToResultsTab,
+  openAuxWebviewWindow,
+} from "../workspaceUiState";
+import AddToStartProtocolDialog, {
+  type AddToStartProtocolDraft,
+} from "./AddToStartProtocolDialog.vue";
+import IconActionButton from "./IconActionButton.vue";
 
 const props = defineProps<{
-  participantId: string;
+  resultId: number | null;
 }>();
 
 type NativeParticipantDetails = {
   participant: {
+    id: number | null;
+    chip_raw_id: string | null;
     participant_id: string;
     name: string;
     start_station_id: number;
@@ -15,9 +26,12 @@ type NativeParticipantDetails = {
     source_row: number | null;
   };
   result: {
+    id: number;
+    finish_participant_id: number | null;
+    chip_raw_id: string | null;
     participant_id: string;
     name: string;
-    status: "OK" | "DQ" | "ERR";
+    status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "Нет в протоколе";
     has_anomalies: boolean;
     anomaly_count: number;
     points_raw: number;
@@ -59,7 +73,7 @@ type NativeParticipantDetails = {
   }[];
   corrections: {
     id: number;
-    participant_id: string | null;
+    finish_participant_id: number | null;
     scope: "global" | "personal";
     source_table: "manual_corrections" | "legacy_corrections";
     correction_type: string;
@@ -74,13 +88,88 @@ const busy = ref(false);
 const addCpNumber = ref<number | null>(null);
 const removeCpNumber = ref<number | null>(null);
 const removeMode = ref<"remove_legs" | "points_only">("remove_legs");
+const addToProtocolOpen = ref(false);
 
-const participantIdClean = computed(() => decodeURIComponent(props.participantId || "").trim());
+type PathDistanceInfo = {
+  ready: boolean;
+  status: string;
+  distance_m: number | null;
+  legs_counted: number;
+  legs_missing: number;
+  missing_cps: number[];
+};
+
+const pathDistance = ref<PathDistanceInfo | null>(null);
+
+const resultIdClean = computed(() => {
+  const id = Number(props.resultId);
+  return Number.isFinite(id) && id > 0 ? id : null;
+});
+/** Surrogate finish-dump id used for personal corrections / anomalies. */
+const finishKeyClean = computed(() => {
+  const fromParticipant = details.value?.participant.id;
+  if (fromParticipant != null && Number.isFinite(fromParticipant) && fromParticipant > 0) {
+    return String(fromParticipant);
+  }
+  const fromResult = details.value?.result?.finish_participant_id;
+  if (fromResult != null && Number.isFinite(fromResult) && fromResult > 0) {
+    return String(fromResult);
+  }
+  return "";
+});
 const anomalyDayShiftCorrection = computed(() =>
   details.value?.corrections.find(
     (c) => c.scope === "personal" && c.correction_type === "anomaly_day_shift_24h",
   ) ?? null,
 );
+
+const pathMetrics = computed(() => {
+  const distM = pathDistance.value?.distance_m;
+  const result = details.value?.result;
+  if (
+    !pathDistance.value?.ready ||
+    distM == null ||
+    !Number.isFinite(distM) ||
+    distM <= 0 ||
+    !result
+  ) {
+    return null;
+  }
+  const km = distM / 1000;
+  const elapsed = Math.max(0, Number(result.elapsed_seconds || 0));
+  const hours = elapsed / 3600;
+  const points = Number(result.points_final || 0);
+
+  const speedKmh = hours > 0 ? km / hours : null;
+  const paceSecPerKm = km > 0 && elapsed > 0 ? elapsed / km : null;
+  const pointsPerKm = km > 0 ? points / km : null;
+  const pointsPerHour = hours > 0 ? points / hours : null;
+
+  return {
+    distanceKm: km,
+    speedKmh,
+    paceSecPerKm,
+    pointsPerKm,
+    pointsPerHour,
+    legsMissing: pathDistance.value.legs_missing,
+    status: pathDistance.value.status,
+  };
+});
+
+const canAddToProtocol = computed(() => {
+  const result = details.value?.result;
+  if (!result) return false;
+  if (result.status === "Нет в протоколе") return true;
+  return String(result.diagnostics_json || "").includes("not_in_start_protocol");
+});
+
+const addToProtocolDraft = computed<AddToStartProtocolDraft | null>(() => {
+  if (!details.value) return null;
+  return {
+    participant_id: details.value.participant.participant_id,
+    name: details.value.participant.name,
+  };
+});
 
 function fmtHms(totalSeconds: number) {
   const s = Math.max(0, Number(totalSeconds || 0));
@@ -88,6 +177,19 @@ function fmtHms(totalSeconds: number) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
+}
+
+function fmtNum(value: number | null | undefined, digits = 2) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return value.toFixed(digits);
+}
+
+function fmtPace(secPerKm: number | null | undefined) {
+  if (secPerKm == null || !Number.isFinite(secPerKm) || secPerKm <= 0) return "—";
+  const total = Math.round(secPerKm);
+  const mm = Math.floor(total / 60);
+  const ss = String(total % 60).padStart(2, "0");
+  return `${mm}:${ss} /км`;
 }
 
 function diffSeconds(prevMarkTime: string, currentMarkTime: string) {
@@ -112,6 +214,7 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "remove_cp") return "Удаление КП";
   if (correctionType === "exclude_leg_time") return "Исключение перегона";
   if (correctionType === "anomaly_day_shift_24h") return "Коррекция аномалии: -24ч";
+  if (correctionType === "remap_cp") return "Замена КП (станция)";
   return correctionType;
 }
 
@@ -166,38 +269,66 @@ function correctionPayloadText(c: NativeParticipantDetails["corrections"][number
     return `Коррекция времени: -${Number.isFinite(seconds) ? seconds : 86400} сек (-24ч)`;
   }
 
+  if (c.correction_type === "remap_cp") {
+    const fromText = Number.isFinite(fromCp) ? fromCp : "-";
+    const toText = Number.isFinite(toCp) ? toCp : "-";
+    const when = String(c.payload?.mark_time || "-");
+    return `Замена: ${fromText} → ${toText} @ ${when}`;
+  }
+
   return JSON.stringify(c.payload);
 }
 
 async function loadDetails() {
-  const pid = participantIdClean.value;
-  if (!pid) {
-    status.value = "Не указан ID участника";
+  const resultId = resultIdClean.value;
+  if (!resultId) {
+    status.value = "Не указан ID результата";
     details.value = null;
+    pathDistance.value = null;
     return;
   }
   status.value = "Загрузка карточки...";
   try {
     const response = await invoke<NativeParticipantDetails>("get_participant_details", {
-      participantId: pid,
+      resultId,
     });
     details.value = response;
-    status.value = `Загружен участник ${response.participant.participant_id}: ${response.participant.name}`;
+    status.value = `Загружен результат #${resultId}: ${response.participant.name} (id ${response.participant.participant_id})`;
+    try {
+      pathDistance.value = await invoke<PathDistanceInfo>("get_participant_path_distance", {
+        resultId,
+      });
+    } catch {
+      pathDistance.value = null;
+    }
   } catch (error) {
     details.value = null;
+    pathDistance.value = null;
     status.value = `Ошибка: ${String(error)}`;
   }
 }
 
 async function recalculateAndReload() {
+  const bib = details.value?.participant.participant_id?.trim() || "";
+  const name = details.value?.result?.name || details.value?.participant.name || "";
   await invoke("recalculate_results");
+  if (bib && name) {
+    const newId = await invoke<number | null>("find_result_id", {
+      participantId: bib,
+      name,
+    });
+    if (newId && newId !== resultIdClean.value) {
+      window.location.hash = `#result/${newId}`;
+      return;
+    }
+  }
   await loadDetails();
 }
 
 async function addPersonalCp() {
-  const pid = participantIdClean.value;
+  const pid = finishKeyClean.value;
   if (!pid || !addCpNumber.value) {
-    status.value = "Укажите ID участника и номер КП.";
+    status.value = "Нет связи с финишным дампом или не указан номер КП.";
     return;
   }
   busy.value = true;
@@ -216,9 +347,9 @@ async function addPersonalCp() {
 }
 
 async function removePersonalCp() {
-  const pid = participantIdClean.value;
+  const pid = finishKeyClean.value;
   if (!pid || !removeCpNumber.value) {
-    status.value = "Укажите ID участника и номер КП.";
+    status.value = "Нет связи с финишным дампом или не указан номер КП.";
     return;
   }
   busy.value = true;
@@ -255,7 +386,7 @@ async function undoCorrection(correctionId: number, sourceTable: string) {
 }
 
 async function applyAnomalyDayShiftCorrection() {
-  const pid = participantIdClean.value;
+  const pid = finishKeyClean.value;
   if (!pid) return;
   busy.value = true;
   try {
@@ -269,7 +400,7 @@ async function applyAnomalyDayShiftCorrection() {
   }
 }
 
-watch(participantIdClean, () => {
+watch(resultIdClean, () => {
   void loadDetails();
 });
 
@@ -277,8 +408,87 @@ onMounted(() => {
   void loadDetails();
 });
 
-function goBackToResults() {
-  window.location.hash = "";
+async function goBackToResults() {
+  markReturnToResultsTab();
+  await closeAuxiliaryWindowOrClearHash(["participant-card"]);
+}
+
+function openAddToProtocol() {
+  addToProtocolOpen.value = true;
+}
+
+function closeAddToProtocol() {
+  addToProtocolOpen.value = false;
+}
+
+async function onAddedToProtocol() {
+  status.value = "Участник добавлен в стартовый протокол. Обновляю карточку...";
+  await loadDetails();
+}
+
+async function openPathWindow() {
+  const resultId = resultIdClean.value;
+  if (!resultId || !details.value?.result) {
+    status.value = "Нет результата для отображения пути.";
+    return;
+  }
+  if (!details.value.corrected_marks.length) {
+    status.value = "Нет отметок КП для построения пути.";
+    return;
+  }
+
+  busy.value = true;
+  try {
+    const [mapInfo, legends] = await Promise.all([
+      invoke<{ has_map: boolean }>("get_course_map_info"),
+      invoke<{ map_x: number | null; map_y: number | null }[]>("get_cp_legends"),
+    ]);
+    if (!mapInfo.has_map) {
+      status.value = "Сначала загрузите карту на вкладке «Легенды КП».";
+      return;
+    }
+    const placed = legends.some((l) => l.map_x != null && l.map_y != null);
+    let specialPlaced = false;
+    try {
+      const special = await invoke<{
+        start_map_x: number | null;
+        start_map_y: number | null;
+        finish_map_x: number | null;
+        finish_map_y: number | null;
+      }>("get_course_map_special_points");
+      specialPlaced =
+        (special.start_map_x != null && special.start_map_y != null) ||
+        (special.finish_map_x != null && special.finish_map_y != null);
+    } catch {
+      // ignore
+    }
+    if (!placed && !specialPlaced) {
+      status.value = "На карте ещё нет размещённых КП. Отметьте точки в окне карты.";
+      return;
+    }
+
+    const targetHash = `#course-path/${resultId}`;
+    const name = details.value.participant.name;
+    const bib = details.value.participant.participant_id;
+    const opened = await openAuxWebviewWindow({
+      label: "course-path",
+      title: `Путь — ${bib} ${name}`,
+      width: 1280,
+      height: 900,
+      url: targetHash,
+    });
+    if (opened.ok) {
+      status.value = "Путь открыт в отдельном окне.";
+    } else {
+      status.value = "Не удалось открыть отдельное окно пути, открыл в текущем окне.";
+      window.location.hash = targetHash;
+      console.error(opened.error);
+    }
+  } catch (error) {
+    status.value = `Ошибка открытия пути: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
 }
 </script>
 
@@ -287,6 +497,23 @@ function goBackToResults() {
     <section class="native-tools">
       <div class="native-row">
         <button type="button" @click="goBackToResults">← Назад к результатам</button>
+        <button
+          v-if="canAddToProtocol"
+          type="button"
+          :disabled="busy"
+          @click="openAddToProtocol"
+        >
+          Добавить в протокол
+        </button>
+        <button
+          v-if="details?.result"
+          type="button"
+          :disabled="busy || !details.corrected_marks.length"
+          title="Показать путь на карте по взятым КП"
+          @click="openPathWindow"
+        >
+          Показать путь
+        </button>
       </div>
       <h2>Карточка участника</h2>
       <p class="status">{{ status }}</p>
@@ -299,7 +526,7 @@ function goBackToResults() {
           Добавить КП (номер)
           <input v-model.number="addCpNumber" type="number" min="1" />
         </label>
-        <button :disabled="busy" @click="addPersonalCp">Добавить корректировку</button>
+        <button :disabled="busy || !finishKeyClean" @click="addPersonalCp">Добавить корректировку</button>
       </div>
       <div class="native-settings">
         <label>
@@ -313,7 +540,7 @@ function goBackToResults() {
             <option value="points_only">Удалить только очки</option>
           </select>
         </label>
-        <button :disabled="busy" @click="removePersonalCp">Добавить корректировку</button>
+        <button :disabled="busy || !finishKeyClean" @click="removePersonalCp">Добавить корректировку</button>
       </div>
     </section>
 
@@ -322,6 +549,7 @@ function goBackToResults() {
       <table class="native-results">
         <tbody>
           <tr><th>ID</th><td>{{ details.participant.participant_id }}</td></tr>
+          <tr><th>Chip raw id</th><td>{{ details.participant.chip_raw_id || "—" }}</td></tr>
           <tr><th>Имя</th><td>{{ details.participant.name }}</td></tr>
           <tr><th>Старт КП</th><td>{{ details.participant.start_station_id }}</td></tr>
           <tr><th>Старт</th><td>{{ details.participant.start_time }}</td></tr>
@@ -333,9 +561,73 @@ function goBackToResults() {
             <th>Время</th>
             <td>{{ details.result ? fmtHms(details.result.elapsed_seconds) : "-" }}</td>
           </tr>
+          <template v-if="pathMetrics">
+            <tr>
+              <th>Километраж</th>
+              <td>
+                {{ fmtNum(pathMetrics.distanceKm) }} км
+                <span
+                  v-if="pathMetrics.legsMissing > 0"
+                  class="subtitle"
+                  :title="pathMetrics.status"
+                >
+                  (часть КП без координат)
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <th>Скорость</th>
+              <td>{{ pathMetrics.speedKmh != null ? `${fmtNum(pathMetrics.speedKmh)} км/ч` : "—" }}</td>
+            </tr>
+            <tr>
+              <th>Темп</th>
+              <td>{{ fmtPace(pathMetrics.paceSecPerKm) }}</td>
+            </tr>
+            <tr>
+              <th>Очков на 1 км</th>
+              <td>{{ fmtNum(pathMetrics.pointsPerKm, 1) }}</td>
+            </tr>
+            <tr>
+              <th>Очков в час</th>
+              <td>{{ fmtNum(pathMetrics.pointsPerHour, 1) }}</td>
+            </tr>
+          </template>
           <tr><th>Диагностика</th><td>{{ diagnosticsText() }}</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section v-if="details" class="native-tools nested-card">
+      <h3>Корректировки</h3>
+      <div class="native-results-wrap">
+        <table class="native-results">
+          <thead>
+            <tr><th>ID</th><th>Область</th><th>Тип</th><th>Параметры</th><th>Создано</th><th>Действие</th></tr>
+          </thead>
+          <tbody>
+            <tr v-if="!details.corrections.length">
+              <td colspan="6">Корректировок нет</td>
+            </tr>
+            <tr v-for="c in details.corrections" :key="`${c.source_table}-${c.id}`">
+              <td>{{ c.id }}</td>
+              <td>{{ c.scope === "global" ? "общая" : "персональная" }}</td>
+              <td>{{ correctionTypeText(c.correction_type) }}</td>
+              <td class="correction-text-cell">{{ correctionPayloadText(c) }}</td>
+              <td>{{ c.created_at }}</td>
+              <td>
+                <IconActionButton
+                  v-if="c.scope === 'personal'"
+                  variant="undo"
+                  label="Отменить"
+                  :disabled="busy"
+                  @click="undoCorrection(c.id, c.source_table)"
+                />
+                <span v-else class="subtitle">только на главной</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section v-if="details" class="native-tools nested-card">
@@ -361,13 +653,13 @@ function goBackToResults() {
                 >
                   Применить -24ч
                 </button>
-                <button
+                <IconActionButton
                   v-else-if="a.anomaly_type === 'start_time_day_shift' && anomalyDayShiftCorrection"
+                  variant="undo"
+                  label="Отменить -24ч"
                   :disabled="busy"
                   @click="undoCorrection(anomalyDayShiftCorrection.id, anomalyDayShiftCorrection.source_table)"
-                >
-                  Отменить -24ч
-                </button>
+                />
                 <span v-else>-</span>
               </td>
             </tr>
@@ -454,63 +746,38 @@ function goBackToResults() {
       </section>
     </div>
 
-    <div v-if="details" class="participant-grid two-col">
-      <section class="native-tools nested-card">
-        <h3>Исключенные перегоны</h3>
-        <div class="native-results-wrap">
-          <table class="native-results">
-            <thead>
-              <tr><th>От</th><th>До</th><th>Направление</th><th>Режим</th><th>Макс (сек)</th><th>Источник</th></tr>
-            </thead>
-            <tbody>
-              <tr v-if="!details.excluded_legs.length">
-                <td colspan="6">Нет исключенных перегонов</td>
-              </tr>
-              <tr v-for="(x, i) in details.excluded_legs" :key="`${x.source}-${i}`">
-                <td>{{ x.from_cp }}</td>
-                <td>{{ x.to_cp }}</td>
-                <td>{{ directionText(x.direction) }}</td>
-                <td>{{ applyModeText(x.apply_mode) }}</td>
-                <td>{{ x.max_leg_seconds ?? "" }}</td>
-                <td>{{ legSourceText(x.source) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="native-tools nested-card">
-        <h3>Корректировки</h3>
-        <div class="native-results-wrap">
-          <table class="native-results">
+    <section v-if="details" class="native-tools nested-card">
+      <h3>Исключенные перегоны</h3>
+      <div class="native-results-wrap">
+        <table class="native-results">
           <thead>
-            <tr><th>ID</th><th>Область</th><th>Тип</th><th>Параметры</th><th>Создано</th><th>Действие</th></tr>
+            <tr><th>От</th><th>До</th><th>Направление</th><th>Режим</th><th>Макс (сек)</th><th>Источник</th></tr>
           </thead>
           <tbody>
-            <tr v-if="!details.corrections.length">
-              <td colspan="6">Корректировок нет</td>
+            <tr v-if="!details.excluded_legs.length">
+              <td colspan="6">Нет исключенных перегонов</td>
             </tr>
-            <tr v-for="c in details.corrections" :key="`${c.source_table}-${c.id}`">
-              <td>{{ c.id }}</td>
-              <td>{{ c.scope === "global" ? "общая" : "персональная" }}</td>
-              <td>{{ correctionTypeText(c.correction_type) }}</td>
-              <td class="correction-text-cell">{{ correctionPayloadText(c) }}</td>
-              <td>{{ c.created_at }}</td>
-              <td>
-                <button
-                  v-if="c.scope === 'personal'"
-                  :disabled="busy"
-                  @click="undoCorrection(c.id, c.source_table)"
-                >
-                  Отменить
-                </button>
-                <span v-else class="subtitle">только на главной</span>
-              </td>
+            <tr v-for="(x, i) in details.excluded_legs" :key="`${x.source}-${i}`">
+              <td>{{ x.from_cp }}</td>
+              <td>{{ x.to_cp }}</td>
+              <td>{{ directionText(x.direction) }}</td>
+              <td>{{ applyModeText(x.apply_mode) }}</td>
+              <td>{{ x.max_leg_seconds ?? "" }}</td>
+              <td>{{ legSourceText(x.source) }}</td>
             </tr>
           </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
+        </table>
+      </div>
+    </section>
+
+    <AddToStartProtocolDialog
+      :open="addToProtocolOpen"
+      :busy="busy"
+      :initial="addToProtocolDraft"
+      title="Добавить в протокол"
+      @close="closeAddToProtocol"
+      @saved="onAddedToProtocol"
+      @status="status = $event"
+    />
   </main>
 </template>

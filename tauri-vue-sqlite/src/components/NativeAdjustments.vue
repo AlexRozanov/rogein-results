@@ -1,21 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-
-type ExclusionRuleRow = {
-  id: number;
-  participant_id: string | null;
-  from_cp: number;
-  to_cp: number;
-  direction: "forward" | "reverse" | "both";
-  apply_mode: "once" | "always";
-  max_leg_seconds: number | null;
-  created_at: string;
-};
+import IconActionButton from "./IconActionButton.vue";
 
 type CorrectionRow = {
   id: number;
-  participant_id: string | null;
+  finish_participant_id: number | null;
   scope: "global" | "personal";
   source_table: "manual_corrections" | "legacy_corrections";
   correction_type: string;
@@ -33,18 +23,9 @@ const emit = defineEmits<{
 
 const globalRemoveCpNumber = ref<number | null>(null);
 const globalRemoveMode = ref<"remove_legs" | "points_only">("remove_legs");
-
-const rules = ref<ExclusionRuleRow[]>([]);
 const globalCorrections = ref<CorrectionRow[]>([]);
-const editRuleId = ref<number | null>(null);
-const fromCp = ref<number | null>(null);
-const toCp = ref<number | null>(null);
-const direction = ref<"forward" | "reverse" | "both">("forward");
-const applyMode = ref<"once" | "always">("once");
-const maxLegSeconds = ref<number | null>(null);
 
 onMounted(() => {
-  void refreshRules();
   void refreshGlobalCorrections();
 });
 
@@ -53,6 +34,7 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "remove_cp") return "Удаление КП";
   if (correctionType === "exclude_leg_time") return "Исключение перегона";
   if (correctionType === "anomaly_day_shift_24h") return "Коррекция аномалии: -24ч";
+  if (correctionType === "remap_cp") return "Замена КП (станция)";
   return correctionType;
 }
 
@@ -83,18 +65,14 @@ function correctionPayloadText(row: CorrectionRow) {
     return `Коррекция времени: -${Number.isFinite(seconds) ? seconds : 86400} сек (-24ч)`;
   }
 
+  if (row.correction_type === "remap_cp") {
+    const fromText = Number.isFinite(fromCp) ? fromCp : "-";
+    const toText = Number.isFinite(toCp) ? toCp : "-";
+    const when = String(row.payload?.mark_time || "-");
+    return `Замена: ${fromText} → ${toText} @ ${when}`;
+  }
+
   return JSON.stringify(row.payload);
-}
-
-function directionText(directionValue: ExclusionRuleRow["direction"]) {
-  if (directionValue === "forward") return "Прямое (от -> до)";
-  if (directionValue === "reverse") return "Обратное (до -> от)";
-  return "Оба направления";
-}
-
-function applyModeText(applyModeValue: ExclusionRuleRow["apply_mode"]) {
-  if (applyModeValue === "once") return "Один раз";
-  return "Всегда";
 }
 
 async function addGlobalRemoveCp() {
@@ -116,38 +94,6 @@ async function addGlobalRemoveCp() {
   }
 }
 
-async function saveRule() {
-  const payload = {
-    participantScope: "all",
-    participantId: null,
-    fromCp: Number(fromCp.value),
-    toCp: Number(toCp.value),
-    direction: direction.value,
-    applyMode: applyMode.value,
-    maxLegSeconds: maxLegSeconds.value,
-  };
-  if (!payload.fromCp || !payload.toCp) {
-    emit("status", "Для правила исключения заполните От/До КП.");
-    return;
-  }
-  try {
-    if (editRuleId.value) {
-      await invoke("update_exclusion_rule", {
-        ruleId: editRuleId.value,
-        ...payload,
-      });
-      emit("status", `Правило #${editRuleId.value} обновлено. Нажмите Пересчитать.`);
-    } else {
-      await invoke("add_exclusion_rule", payload);
-      emit("status", "Правило исключения добавлено. Нажмите Пересчитать.");
-    }
-    resetRuleForm();
-    await refreshRules();
-  } catch (error) {
-    emit("status", `Ошибка сохранения правила: ${String(error)}`);
-  }
-}
-
 async function refreshGlobalCorrections() {
   try {
     globalCorrections.value = await invoke<CorrectionRow[]>("get_manual_corrections", {
@@ -155,36 +101,6 @@ async function refreshGlobalCorrections() {
     });
   } catch (error) {
     emit("status", `Ошибка загрузки общих корректировок: ${String(error)}`);
-  }
-}
-
-async function refreshRules() {
-  try {
-    const rows = await invoke<ExclusionRuleRow[]>("get_exclusion_rules", {
-      participantId: null,
-    });
-    rules.value = rows.filter((x) => x.participant_id === null);
-  } catch (error) {
-    emit("status", `Ошибка загрузки правил: ${String(error)}`);
-  }
-}
-
-function beginEditRule(rule: ExclusionRuleRow) {
-  editRuleId.value = rule.id;
-  fromCp.value = rule.from_cp;
-  toCp.value = rule.to_cp;
-  direction.value = rule.direction;
-  applyMode.value = rule.apply_mode;
-  maxLegSeconds.value = rule.max_leg_seconds;
-}
-
-async function deleteRule(ruleId: number) {
-  try {
-    await invoke("delete_exclusion_rule", { ruleId });
-    emit("status", `Правило #${ruleId} удалено. Нажмите Пересчитать.`);
-    await refreshRules();
-  } catch (error) {
-    emit("status", `Ошибка удаления правила: ${String(error)}`);
   }
 }
 
@@ -199,15 +115,6 @@ async function undoCorrection(row: CorrectionRow) {
   } catch (error) {
     emit("status", `Ошибка отмены корректировки: ${String(error)}`);
   }
-}
-
-function resetRuleForm() {
-  editRuleId.value = null;
-  fromCp.value = null;
-  toCp.value = null;
-  direction.value = "forward";
-  applyMode.value = "once";
-  maxLegSeconds.value = null;
 }
 </script>
 
@@ -258,85 +165,12 @@ function resetRuleForm() {
               <td>{{ correctionPayloadText(c) }}</td>
               <td>{{ c.created_at }}</td>
               <td>
-                <button :disabled="props.busy" @click="undoCorrection(c)">Отменить</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="native-tools nested-card">
-      <h2>Исключить перегон</h2>
-      <div class="native-settings">
-        <label>
-          От КП
-          <input v-model.number="fromCp" type="number" min="1" />
-        </label>
-        <label>
-          До КП
-          <input v-model.number="toCp" type="number" min="1" />
-        </label>
-        <span class="subtitle">Для всех участников</span>
-      </div>
-      <div class="native-settings">
-        <label>
-          Направление
-          <select v-model="direction">
-            <option value="forward">Прямое (from -> to)</option>
-            <option value="reverse">Обратное (to -> from)</option>
-            <option value="both">Оба направления</option>
-          </select>
-        </label>
-        <label>
-          Режим
-          <select v-model="applyMode">
-            <option value="once">Исключить 1 раз</option>
-            <option value="always">Исключать всегда</option>
-          </select>
-        </label>
-        <label>
-          Макс. время перегона (сек, пусто = без лимита)
-          <input v-model.number="maxLegSeconds" type="number" min="0" placeholder="например 600" />
-        </label>
-      </div>
-      <div class="native-settings">
-        <button :disabled="props.busy" @click="saveRule">
-          {{ editRuleId ? `Сохранить правило #${editRuleId}` : "Добавить правило" }}
-        </button>
-        <button :disabled="props.busy" @click="resetRuleForm">Сбросить форму</button>
-      </div>
-    </section>
-
-    <section class="native-tools nested-card">
-      <h2>Существующие правила исключения</h2>
-      <button :disabled="props.busy" @click="refreshRules">Обновить список правил</button>
-      <div class="native-results-wrap">
-        <table class="native-results">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Область</th>
-              <th>От</th>
-              <th>До</th>
-              <th>Направление</th>
-              <th>Режим</th>
-              <th>Макс (сек)</th>
-              <th>Действие</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="rule in rules" :key="rule.id">
-              <td>{{ rule.id }}</td>
-              <td>все</td>
-              <td>{{ rule.from_cp }}</td>
-              <td>{{ rule.to_cp }}</td>
-              <td>{{ directionText(rule.direction) }}</td>
-              <td>{{ applyModeText(rule.apply_mode) }}</td>
-              <td>{{ rule.max_leg_seconds ?? "" }}</td>
-              <td>
-                <button :disabled="props.busy" @click="beginEditRule(rule)">Изменить</button>
-                <button :disabled="props.busy" @click="deleteRule(rule.id)">Удалить</button>
+                <IconActionButton
+                  variant="undo"
+                  label="Отменить"
+                  :disabled="props.busy"
+                  @click="undoCorrection(c)"
+                />
               </td>
             </tr>
           </tbody>

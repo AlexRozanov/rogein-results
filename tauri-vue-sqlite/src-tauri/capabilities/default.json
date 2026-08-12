@@ -3,10 +3,21 @@
   "identifier": "default",
   "description": "enables the default permissions",
   "windows": [
-    "main"
+    "main",
+    "participant-card",
+    "errors-list",
+    "course-map",
+    "course-path",
+    "cp-remap"
   ],
   "permissions": [
     "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen",
     "sql:default",
     "sql:allow-execute"
   ]
