@@ -203,6 +203,7 @@ const activeLabel = computed(() => {
       : "Старт (номер не задан в настройках)";
   }
   if (t.kind === "finish") return `Финиш (КП ${special.value.finish_cp})`;
+  if (t.kind !== "legend") return null;
   const row = legends.value.find((l) => l.id === t.id);
   return row ? `${row.cp_number} — ${row.name}` : null;
 });
@@ -507,14 +508,6 @@ function startPlaceNewGps() {
     cp_number: null,
   });
   status.value = "Кликните на карте, затем введите широту и долготу.";
-}
-
-async function attachGpsToSpecial(kind: SpecialKind) {
-  await focusFeatureWithGps({ kind }, { preferGpsEdit: true });
-}
-
-async function attachGpsToLegend(row: CpLegendRow) {
-  await focusFeatureWithGps({ kind: "legend", id: row.id }, { preferGpsEdit: true });
 }
 
 function onMarkupModeToggle() {
@@ -883,6 +876,7 @@ async function placeActiveAt(clientX: number, clientY: number) {
     return;
   }
 
+  if (target.kind !== "legend") return;
   await saveLegendPosition(target.id, norm.x, norm.y, true);
   selectedTarget.value = target;
   if (autoNext.value) selectNextUnplaced(target.id);
@@ -1019,11 +1013,12 @@ function onMarkerPointerMove(event: PointerEvent) {
   if (markerDragPointerId != null && event.pointerId !== markerDragPointerId) return;
   const norm = clientToMapNorm(event.clientX, event.clientY);
   if (!norm) return;
-  if (markerDragTarget.kind === "legend") {
-    const idx = legends.value.findIndex((l) => l.id === markerDragTarget!.id);
+  const dragTarget = markerDragTarget;
+  if (dragTarget.kind === "legend") {
+    const idx = legends.value.findIndex((l) => l.id === dragTarget.id);
     if (idx < 0) return;
     legends.value[idx] = { ...legends.value[idx], map_x: norm.x, map_y: norm.y };
-  } else if (markerDragTarget.kind === "start") {
+  } else if (dragTarget.kind === "start") {
     special.value = { ...special.value, start_map_x: norm.x, start_map_y: norm.y };
   } else {
     special.value = { ...special.value, finish_map_x: norm.x, finish_map_y: norm.y };
