@@ -16,6 +16,8 @@ type NativeResultRow = {
   team_id?: number | null;
   team_size?: number;
   teammates?: string;
+  gender?: string | null;
+  age?: number | null;
   has_personal_corrections: boolean;
   has_anomalies: boolean;
   anomaly_count: number;
@@ -52,6 +54,16 @@ function fmtHms(totalSeconds: number) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
+}
+
+function genderText(value: string | null | undefined) {
+  const raw = String(value || "").trim();
+  return raw || "—";
+}
+
+function ageText(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value) || value < 0) return "—";
+  return String(value);
 }
 
 function sortMark(column: SortBy) {
@@ -110,6 +122,8 @@ function onSaved() {
           <th class="sortable-col" @click="emit('sortChanged', 'participant_id')">ID{{ sortMark("participant_id") }}</th>
           <th class="sortable-col" @click="emit('sortChanged', 'name')">Имя{{ sortMark("name") }}</th>
           <th>Формат</th>
+          <th>Пол</th>
+          <th>Возраст</th>
           <th>Статус</th>
           <th class="sortable-col" @click="emit('sortChanged', 'points_raw')">Очки{{ sortMark("points_raw") }}</th>
           <th>Штраф</th>
@@ -172,6 +186,8 @@ function onSaved() {
             </span>
           </td>
           <td>{{ row.format_name || "—" }}</td>
+          <td>{{ genderText(row.gender) }}</td>
+          <td>{{ ageText(row.age) }}</td>
           <td>{{ row.status }}</td>
           <td>{{ row.points_raw }}</td>
           <td>{{ row.penalty_points }}</td>

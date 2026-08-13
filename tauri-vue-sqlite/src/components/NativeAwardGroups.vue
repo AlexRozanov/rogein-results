@@ -12,12 +12,20 @@ type AwardGroupRow = {
   id: number;
   name: string;
   gender_mode: string;
+  min_age: number | null;
   sort_order: number;
   format_ids: number[];
   format_names: string[];
 };
 
 type GenderMode = "any" | "male" | "female" | "mixed";
+type AgePresetKey = "" | "45" | "55" | "65" | "custom";
+
+const AGE_PRESETS: { key: Exclude<AgePresetKey, "" | "custom">; age: number; label: string }[] = [
+  { key: "45", age: 45, label: "Ветераны — 45 и старше" },
+  { key: "55", age: 55, label: "Суперветераны — 55 и старше" },
+  { key: "65", age: 65, label: "Ультраветераны — 65 и старше" },
+];
 
 const props = defineProps<{
   busy: boolean;
@@ -36,6 +44,8 @@ const formMode = ref<"create" | "edit">("create");
 const editId = ref<number | null>(null);
 const name = ref("");
 const genderMode = ref<GenderMode>("any");
+const agePreset = ref<AgePresetKey>("");
+const customMinAge = ref<string>("");
 const selectedFormatIds = ref<string[]>([]);
 
 const formTitle = computed(() =>
@@ -71,10 +81,45 @@ function genderModeText(mode: string) {
   return "Без ограничения по полу";
 }
 
+function ageText(age: number | null | undefined) {
+  if (age == null || age <= 0) return "Без ограничения";
+  if (age === 45) return "Ветераны (45+)";
+  if (age === 55) return "Суперветераны (55+)";
+  if (age === 65) return "Ультраветераны (65+)";
+  return `${age} и старше`;
+}
+
+function resolvedMinAge(): number | null {
+  if (agePreset.value === "") return null;
+  if (agePreset.value === "custom") {
+    const n = Number(customMinAge.value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  const n = Number(agePreset.value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function applyMinAgeToForm(age: number | null | undefined) {
+  if (age == null || age <= 0) {
+    agePreset.value = "";
+    customMinAge.value = "";
+    return;
+  }
+  if (age === 45 || age === 55 || age === 65) {
+    agePreset.value = String(age) as AgePresetKey;
+    customMinAge.value = "";
+    return;
+  }
+  agePreset.value = "custom";
+  customMinAge.value = String(age);
+}
+
 function resetForm() {
   editId.value = null;
   name.value = "";
   genderMode.value = "any";
+  agePreset.value = "";
+  customMinAge.value = "";
   selectedFormatIds.value = [];
 }
 
@@ -94,6 +139,7 @@ function openEdit(group: AwardGroupRow) {
     group.gender_mode === "mixed"
       ? group.gender_mode
       : "any";
+  applyMinAgeToForm(group.min_age);
   selectedFormatIds.value = group.format_ids.map(String);
   formOpen.value = true;
 }
@@ -124,6 +170,13 @@ async function saveForm() {
     emit("status", "Выберите хотя бы один формат.");
     return;
   }
+  if (agePreset.value === "custom") {
+    const n = Number(customMinAge.value);
+    if (!Number.isFinite(n) || n < 1 || n > 120) {
+      emit("status", "Укажите минимальный возраст числом от 1 до 120.");
+      return;
+    }
+  }
   localBusy.value = true;
   try {
     await invoke("upsert_award_group", {
@@ -131,6 +184,7 @@ async function saveForm() {
       name: trimmed,
       genderMode: genderMode.value,
       formatIds: selectedFormatIds.value.map(Number),
+      minAge: resolvedMinAge(),
       sortOrder: null,
     });
     emit(
@@ -174,7 +228,10 @@ defineExpose({ refresh });
       <button :disabled="props.busy || localBusy" @click="openCreate">Добавить группу</button>
     </div>
     <p class="subtitle">
-      Группа = набор форматов и правило пола (мужчины / женщины / смешанные команды / без ограничения).
+      Группа = набор форматов, правило пола и опционально возраст
+      (ветераны 45+, суперветераны 55+, ультраветераны 65+ или свой порог).
+      Возраст считается на 31 декабря года соревнования; в команде — по самому младшему.
+      Без даты рождения участник не попадает в возрастные группы.
       В результатах можно фильтровать финишный протокол по группе.
     </p>
 
@@ -185,17 +242,19 @@ defineExpose({ refresh });
             <th>Название</th>
             <th>Форматы</th>
             <th>Пол</th>
+            <th>Возраст</th>
             <th>Действие</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!groups.length">
-            <td colspan="4">Групп награждения пока нет</td>
+            <td colspan="5">Групп награждения пока нет</td>
           </tr>
           <tr v-for="g in groups" :key="g.id">
             <td>{{ g.name }}</td>
             <td>{{ g.format_names.join(", ") || "—" }}</td>
             <td>{{ genderModeText(g.gender_mode) }}</td>
+            <td>{{ ageText(g.min_age) }}</td>
             <td>
               <IconActionButton
                 variant="edit"
@@ -255,7 +314,27 @@ defineExpose({ refresh });
               <option value="mixed">Только смешанные команды</option>
             </select>
           </label>
+          <label>
+            Возраст
+            <select v-model="agePreset">
+              <option value="">Без ограничения по возрасту</option>
+              <option v-for="preset in AGE_PRESETS" :key="preset.key" :value="preset.key">
+                {{ preset.label }}
+              </option>
+              <option value="custom">Свой минимальный возраст</option>
+            </select>
+          </label>
+          <label v-if="agePreset === 'custom'">
+            Минимальный возраст
+            <input v-model="customMinAge" type="number" min="1" max="120" placeholder="Например: 50" />
+          </label>
         </div>
+        <p class="subtitle">
+          Возраст — на 31 декабря года соревнования. В команде берётся возраст самого младшего;
+          если у кого-то из команды нет даты рождения, команда не входит в возрастную группу.
+          Участник (или команда) старше сразу нескольких порогов входит во все такие группы
+          и в группу без возраста.
+        </p>
 
         <p class="subtitle">Форматы в группе (логическое ИЛИ):</p>
         <div class="award-format-list">

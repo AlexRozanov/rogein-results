@@ -32,6 +32,11 @@ type NativeParticipantDetails = {
     participant_id: string;
     name: string;
     status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "Нет в протоколе";
+    format_name?: string;
+    team_id?: number | null;
+    team_size?: number;
+    gender?: string | null;
+    age?: number | null;
     has_anomalies: boolean;
     anomaly_count: number;
     points_raw: number;
@@ -551,6 +556,19 @@ async function openPathWindow() {
           <tr><th>ID</th><td>{{ details.participant.participant_id }}</td></tr>
           <tr><th>Chip raw id</th><td>{{ details.participant.chip_raw_id || "—" }}</td></tr>
           <tr><th>Имя</th><td>{{ details.participant.name }}</td></tr>
+          <tr><th>Пол</th><td>{{ details.result?.gender?.trim() || "—" }}</td></tr>
+          <tr>
+            <th>Возраст</th>
+            <td>
+              {{ details.result?.age != null ? details.result.age : "—" }}
+              <span
+                v-if="(details.result?.team_size ?? 0) > 1"
+                class="subtitle"
+              >
+                (для награждения в команде — возраст самого младшего)
+              </span>
+            </td>
+          </tr>
           <tr><th>Старт КП</th><td>{{ details.participant.start_station_id }}</td></tr>
           <tr><th>Старт</th><td>{{ details.participant.start_time }}</td></tr>
           <tr><th>Статус</th><td>{{ details.result?.status ?? "-" }}</td></tr>

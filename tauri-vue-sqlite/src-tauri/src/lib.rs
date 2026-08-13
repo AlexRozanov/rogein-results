@@ -518,6 +518,7 @@ fn upsert_award_group(
     name: String,
     gender_mode: String,
     format_ids: Vec<i64>,
+    min_age: Option<i64>,
     sort_order: Option<i64>,
 ) -> Result<AwardGroupRow, String> {
     let _guard = state
@@ -525,7 +526,7 @@ fn upsert_award_group(
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::upsert_award_group(&conn, group_id, name, gender_mode, format_ids, sort_order)
+    domain::upsert_award_group(&conn, group_id, name, gender_mode, format_ids, min_age, sort_order)
 }
 
 #[tauri::command]

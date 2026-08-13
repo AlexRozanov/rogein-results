@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use csv::StringRecord;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use rusqlite::functions::FunctionFlags;
@@ -112,6 +112,8 @@ pub struct ResultRow {
     pub team_id: Option<i64>,
     pub team_size: i64,
     pub teammates: String,
+    pub gender: Option<String>,
+    pub age: Option<i64>,
     pub has_personal_corrections: bool,
     pub has_anomalies: bool,
     pub anomaly_count: i64,
@@ -168,6 +170,8 @@ pub struct AwardGroupRow {
     pub id: i64,
     pub name: String,
     pub gender_mode: String,
+    /// Minimum age as of 31 Dec of the competition year. `None` = no age restriction.
+    pub min_age: Option<i64>,
     pub sort_order: i64,
     pub format_ids: Vec<i64>,
     pub format_names: Vec<String>,
@@ -241,6 +245,62 @@ fn normalize_award_gender_mode(raw: &str) -> Result<String, String> {
             "Неизвестный режим пола «{raw}». Допустимо: any, male, female, mixed"
         )),
     }
+}
+
+fn normalize_award_min_age(raw: Option<i64>) -> Result<Option<i64>, String> {
+    match raw {
+        None | Some(0) => Ok(None),
+        Some(age) if (1..=120).contains(&age) => Ok(Some(age)),
+        Some(age) => Err(format!(
+            "Минимальный возраст {age} недопустим. Укажите значение от 1 до 120 или оставьте пустым."
+        )),
+    }
+}
+
+/// Birth year of a start_protocol alias, or NULL if unknown.
+fn sql_birth_year(alias: &str) -> String {
+    format!(
+        r#"CASE
+            WHEN TRIM(IFNULL({alias}.birth_date_iso, '')) <> ''
+              THEN CAST(strftime('%Y', {alias}.birth_date_iso) AS INTEGER)
+            WHEN TRIM(IFNULL({alias}.birth_date_raw, '')) GLOB '[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]'
+              THEN CAST(substr(TRIM({alias}.birth_date_raw), -4) AS INTEGER)
+            ELSE NULL
+          END"#
+    )
+}
+
+/// Personal age on 31 December of the competition year.
+fn sql_person_age(alias: &str, competition_year: i64) -> String {
+    let birth_year = sql_birth_year(alias);
+    format!("({competition_year} - {birth_year})")
+}
+
+/// Award age: personal, or youngest teammate. NULL if any teammate has no birth date.
+fn sql_award_age(competition_year: i64) -> String {
+    let person = sql_person_age("sp", competition_year);
+    let teammate = sql_person_age("tm", competition_year);
+    format!(
+        r#"(CASE
+            WHEN sp.team_id IS NULL THEN {person}
+            WHEN EXISTS (
+                SELECT 1 FROM start_protocol tm
+                WHERE tm.team_id = sp.team_id AND ({teammate}) IS NULL
+            ) THEN NULL
+            ELSE (
+                SELECT MIN({teammate})
+                FROM start_protocol tm
+                WHERE tm.team_id = sp.team_id
+            )
+          END)"#
+    )
+}
+
+fn competition_year(conn: &Connection) -> Option<i64> {
+    let settings = get_settings(conn).ok()?;
+    NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d")
+        .ok()
+        .map(|d| i64::from(d.year()))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -555,6 +615,13 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("ensure award_groups schema: {e}"))?;
+    if !table_has_column(conn, "award_groups", "min_age")? {
+        conn.execute(
+            "ALTER TABLE award_groups ADD COLUMN min_age INTEGER NULL",
+            [],
+        )
+        .map_err(|e| format!("add award_groups.min_age: {e}"))?;
+    }
     migrate_cp_legends_type_dictionary(conn)?;
     migrate_cp_legends_map_positions(conn)?;
     ensure_map_georef_schema(conn)?;
@@ -839,6 +906,7 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
             gender_mode TEXT NOT NULL DEFAULT 'any',
+            min_age INTEGER NULL,
             sort_order INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS award_group_formats (
@@ -2580,7 +2648,11 @@ pub fn query_results(
 ) -> Result<(Vec<ResultRow>, i64), String> {
     let safe_limit = limit.clamp(1, 2000);
     let safe_offset = offset.max(0);
-    let mut query = String::from(
+    let age_sql = match competition_year(conn) {
+        Some(year) => sql_person_age("sp", year),
+        None => "NULL".to_string(),
+    };
+    let mut query = format!(
         r#"
         SELECT
                results.id,
@@ -2611,6 +2683,8 @@ pub fn query_results(
                          )
                    ), '')
                END AS teammates,
+               sp.gender,
+               {age_sql} AS age,
                EXISTS(
                  SELECT 1 FROM corrections c
                  WHERE c.finish_participant_id = results.finish_participant_id
@@ -2640,7 +2714,7 @@ pub fn query_results(
             GROUP BY finish_participant_id
         ) a ON a.finish_participant_id = results.finish_participant_id
         WHERE 1=1
-        "#,
+        "#
     );
     let mut params_dyn: Vec<String> = Vec::new();
     let mut int_params: Vec<i64> = Vec::new();
@@ -2778,7 +2852,7 @@ pub fn query_results(
     bind_values.push(rusqlite::types::Value::Integer(values[1]));
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bind_values), |r| {
-            let anomaly_count: i64 = r.get(12)?;
+            let anomaly_count: i64 = r.get(14)?;
             Ok(ResultRow {
                 id: r.get(0)?,
                 finish_participant_id: r.get(1)?,
@@ -2791,17 +2865,19 @@ pub fn query_results(
                 team_id: r.get(8)?,
                 team_size: r.get(9)?,
                 teammates: r.get(10)?,
-                has_personal_corrections: r.get(11)?,
+                gender: r.get(11)?,
+                age: r.get(12)?,
+                has_personal_corrections: r.get(13)?,
                 has_anomalies: anomaly_count > 0,
                 anomaly_count,
-                points_raw: r.get(13)?,
-                penalty_points: r.get(14)?,
-                points_final: r.get(15)?,
-                elapsed_seconds: r.get(16)?,
-                delay_seconds: r.get(17)?,
-                penalty_minutes: r.get(18)?,
-                diagnostics_json: r.get(19)?,
-                computed_at: r.get(20)?,
+                points_raw: r.get(15)?,
+                penalty_points: r.get(16)?,
+                points_final: r.get(17)?,
+                elapsed_seconds: r.get(18)?,
+                delay_seconds: r.get(19)?,
+                penalty_minutes: r.get(20)?,
+                diagnostics_json: r.get(21)?,
+                computed_at: r.get(22)?,
             })
         })
         .map_err(|e| format!("query results: {e}"))?;
@@ -3614,16 +3690,17 @@ fn append_award_group_sql_filter(
     int_params: &mut Vec<i64>,
     award_group_id: i64,
 ) -> Result<(), String> {
-    let gender_mode_raw: String = conn
+    let (gender_mode_raw, min_age_raw): (String, Option<i64>) = conn
         .query_row(
-            "SELECT gender_mode FROM award_groups WHERE id = ? LIMIT 1",
+            "SELECT gender_mode, min_age FROM award_groups WHERE id = ? LIMIT 1",
             params![award_group_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(|e| format!("load award group: {e}"))?
         .ok_or_else(|| format!("Группа награждения id={award_group_id} не найдена"))?;
     let mode = normalize_award_gender_mode(&gender_mode_raw)?;
+    let min_age = normalize_award_min_age(min_age_raw)?;
 
     query.push_str(
         " AND sp.format_id IN (SELECT format_id FROM award_group_formats WHERE award_group_id = ?) ",
@@ -3687,15 +3764,27 @@ fn append_award_group_sql_filter(
         }
         _ => {}
     }
+
+    if let Some(age) = min_age {
+        if let Some(year) = competition_year(conn) {
+            let age_expr = sql_award_age(year);
+            query.push_str(&format!(
+                " AND {age_expr} IS NOT NULL AND {age_expr} >= ? "
+            ));
+            int_params.push(age);
+        } else {
+            query.push_str(" AND 1=0 ");
+        }
+    }
     Ok(())
 }
 
 fn load_award_group_row(conn: &Connection, group_id: i64) -> Result<AwardGroupRow, String> {
-    let (id, name, gender_mode, sort_order): (i64, String, String, i64) = conn
+    let (id, name, gender_mode, min_age, sort_order): (i64, String, String, Option<i64>, i64) = conn
         .query_row(
-            "SELECT id, name, gender_mode, sort_order FROM award_groups WHERE id = ? LIMIT 1",
+            "SELECT id, name, gender_mode, min_age, sort_order FROM award_groups WHERE id = ? LIMIT 1",
             params![group_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|e| format!("load award group row: {e}"))?;
     let mut stmt = conn
@@ -3725,6 +3814,7 @@ fn load_award_group_row(conn: &Connection, group_id: i64) -> Result<AwardGroupRo
         id,
         name,
         gender_mode,
+        min_age: normalize_award_min_age(min_age)?,
         sort_order,
         format_ids,
         format_names,
@@ -3754,6 +3844,7 @@ pub fn upsert_award_group(
     name: String,
     gender_mode: String,
     format_ids: Vec<i64>,
+    min_age: Option<i64>,
     sort_order: Option<i64>,
 ) -> Result<AwardGroupRow, String> {
     let name = name.trim().to_string();
@@ -3761,6 +3852,7 @@ pub fn upsert_award_group(
         return Err("Название группы награждения обязательно".to_string());
     }
     let mode = normalize_award_gender_mode(&gender_mode)?;
+    let min_age = normalize_award_min_age(min_age)?;
     let mut unique_formats: Vec<i64> = format_ids
         .into_iter()
         .filter(|id| *id > 0)
@@ -3795,8 +3887,8 @@ pub fn upsert_award_group(
             .unwrap_or(0)
         });
         conn.execute(
-            "UPDATE award_groups SET name = ?, gender_mode = ?, sort_order = ? WHERE id = ?",
-            params![name, mode, order, existing_id],
+            "UPDATE award_groups SET name = ?, gender_mode = ?, min_age = ?, sort_order = ? WHERE id = ?",
+            params![name, mode, min_age, order, existing_id],
         )
         .map_err(|e| {
             let msg = e.to_string();
@@ -3827,8 +3919,8 @@ pub fn upsert_award_group(
             .map_err(|e| format!("allocate award sort_order: {e}"))?
         };
         conn.execute(
-            "INSERT INTO award_groups(name, gender_mode, sort_order) VALUES(?, ?, ?)",
-            params![name, mode, order],
+            "INSERT INTO award_groups(name, gender_mode, min_age, sort_order) VALUES(?, ?, ?, ?)",
+            params![name, mode, min_age, order],
         )
         .map_err(|e| {
             let msg = e.to_string();
@@ -6125,9 +6217,14 @@ pub fn query_participant_details(
         .transaction()
         .map_err(|e| format!("start participant details transaction: {e}"))?;
 
+    let age_sql = match competition_year(&tx) {
+        Some(year) => sql_person_age("sp", year),
+        None => "NULL".to_string(),
+    };
     let mut result = tx
         .query_row(
-            r#"
+            &format!(
+                r#"
             SELECT
                    results.id,
                    results.finish_participant_id,
@@ -6157,6 +6254,8 @@ pub fn query_participant_details(
                              )
                        ), '')
                    END AS teammates,
+                   sp.gender,
+                   {age_sql} AS age,
                    EXISTS(
                      SELECT 1 FROM corrections c
                      WHERE c.finish_participant_id = results.finish_participant_id
@@ -6172,7 +6271,8 @@ pub fn query_participant_details(
               ON sp.participant_id = results.participant_id
              AND sp.name = results.name
             WHERE results.id = ?
-            "#,
+            "#
+            ),
             params![result_id],
             |r| {
                 Ok(ResultRow {
@@ -6187,17 +6287,19 @@ pub fn query_participant_details(
                     team_id: r.get(8)?,
                     team_size: r.get(9)?,
                     teammates: r.get(10)?,
-                    has_personal_corrections: r.get(11)?,
+                    gender: r.get(11)?,
+                    age: r.get(12)?,
+                    has_personal_corrections: r.get(13)?,
                     has_anomalies: false,
                     anomaly_count: 0,
-                    points_raw: r.get(12)?,
-                    penalty_points: r.get(13)?,
-                    points_final: r.get(14)?,
-                    elapsed_seconds: r.get(15)?,
-                    delay_seconds: r.get(16)?,
-                    penalty_minutes: r.get(17)?,
-                    diagnostics_json: r.get(18)?,
-                    computed_at: r.get(19)?,
+                    points_raw: r.get(14)?,
+                    penalty_points: r.get(15)?,
+                    points_final: r.get(16)?,
+                    elapsed_seconds: r.get(17)?,
+                    delay_seconds: r.get(18)?,
+                    penalty_minutes: r.get(19)?,
+                    diagnostics_json: r.get(20)?,
+                    computed_at: r.get(21)?,
                 })
             },
         )

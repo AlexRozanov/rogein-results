@@ -46,6 +46,8 @@ type NativeResultRow = {
   team_id: number | null;
   team_size: number;
   teammates: string;
+  gender: string | null;
+  age: number | null;
   has_personal_corrections: boolean;
   has_anomalies: boolean;
   anomaly_count: number;
