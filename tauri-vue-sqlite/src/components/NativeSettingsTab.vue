@@ -7,6 +7,8 @@ import NativeFormatCpTypeRules from "./NativeFormatCpTypeRules.vue";
 import NativeExclusionRules from "./NativeExclusionRules.vue";
 import NativeAwardGroups from "./NativeAwardGroups.vue";
 import NativeStartArchives from "./NativeStartArchives.vue";
+import NativeSitePublish from "./NativeSitePublish.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type NativeSettings = {
   control_minutes: number;
@@ -38,6 +40,7 @@ const globalSettings = ref<NativeSettings | null>(null);
 const formats = ref<FormatOption[]>([]);
 const localBusy = ref(false);
 const formatOverridesRef = ref<{ refresh: () => Promise<void> } | null>(null);
+const sitePublishRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
 onMounted(() => {
   void refresh();
@@ -47,6 +50,7 @@ async function refresh() {
   try {
     globalSettings.value = await invoke<NativeSettings>("get_settings");
     await formatOverridesRef.value?.refresh();
+    await sitePublishRef.value?.refresh();
   } catch (error) {
     emit("status", `Ошибка загрузки настроек: ${String(error)}`);
   }
@@ -85,55 +89,58 @@ async function onWorkspaceReset() {
 </script>
 
 <template>
-  <div>
+  <div class="settings-tab">
     <NativeStartArchives
       :busy="props.busy || localBusy"
       @status="emit('status', $event)"
       @workspace-reset="onWorkspaceReset"
     />
 
-    <section class="native-tools nested-card">
-      <h2>Настройки</h2>
+    <NativeSitePublish
+      ref="sitePublishRef"
+      :busy="props.busy || localBusy"
+      @status="emit('status', $event)"
+    />
+
+    <CollapsiblePanel panel-id="general" title="Общие настройки">
       <p class="subtitle">
         Общие значения используются по умолчанию. Для формата можно задать только отличия.
       </p>
-
-      <h3>Общие настройки</h3>
       <NativeSettingsForm
         :settings="globalSettings"
         :busy="props.busy || localBusy"
         @save="saveGlobal"
       />
+    </CollapsiblePanel>
 
-      <NativeFormatOverrides
-        ref="formatOverridesRef"
-        :busy="props.busy || localBusy"
-        :global-settings="globalSettings"
-        @status="emit('status', $event)"
-        @saved="emit('saved')"
-        @formats-loaded="formats = $event"
-      />
+    <NativeFormatOverrides
+      ref="formatOverridesRef"
+      :busy="props.busy || localBusy"
+      :global-settings="globalSettings"
+      @status="emit('status', $event)"
+      @saved="emit('saved')"
+      @formats-loaded="formats = $event"
+    />
 
-      <NativeFormatCpTypeRules
-        :busy="props.busy || localBusy"
-        :formats="formats"
-        @status="emit('status', $event)"
-        @saved="emit('saved')"
-      />
+    <NativeFormatCpTypeRules
+      :busy="props.busy || localBusy"
+      :formats="formats"
+      @status="emit('status', $event)"
+      @saved="emit('saved')"
+    />
 
-      <NativeExclusionRules
-        :busy="props.busy || localBusy"
-        :formats="formats"
-        @status="emit('status', $event)"
-        @saved="emit('saved')"
-      />
+    <NativeExclusionRules
+      :busy="props.busy || localBusy"
+      :formats="formats"
+      @status="emit('status', $event)"
+      @saved="emit('saved')"
+    />
 
-      <NativeAwardGroups
-        :busy="props.busy || localBusy"
-        :formats="formats"
-        @status="emit('status', $event)"
-        @saved="emit('saved')"
-      />
-    </section>
+    <NativeAwardGroups
+      :busy="props.busy || localBusy"
+      :formats="formats"
+      @status="emit('status', $event)"
+      @saved="emit('saved')"
+    />
   </div>
 </template>

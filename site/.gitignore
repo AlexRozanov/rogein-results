@@ -1,0 +1,6 @@
+media/**
+!media/.gitkeep
+api/target
+api/.env
+web/node_modules
+web/dist

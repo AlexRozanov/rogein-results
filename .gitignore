@@ -12,3 +12,10 @@ __pycache__/
 
 csv/.~lock*
 csv/
+
+site/api/.env
+site/api/target
+site/web/node_modules
+site/web/dist
+site/media/events
+

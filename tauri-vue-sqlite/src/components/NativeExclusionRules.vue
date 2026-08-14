@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IconActionButton from "./IconActionButton.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type ExclusionRuleRow = {
   id: number;
@@ -235,13 +236,12 @@ defineExpose({ refreshRules });
 </script>
 
 <template>
-  <section class="native-tools nested-card">
-    <div class="modal-header" style="margin-bottom: 8px">
-      <h3 style="margin: 0">Исключение перегонов</h3>
+  <CollapsiblePanel panel-id="exclusion-rules" title="Исключение перегонов">
+    <template #actions>
       <button :disabled="props.busy || localBusy" @click="openCreateForm">
         Добавить исключение
       </button>
-    </div>
+    </template>
     <p class="subtitle">
       «Для всех» — ко всем участникам. Правило формата дополняет общие при расчёте.
     </p>
@@ -295,6 +295,7 @@ defineExpose({ refreshRules });
       </table>
     </div>
 
+    <template #overlay>
     <div
       v-if="formOpen"
       class="modal-backdrop"
@@ -390,5 +391,6 @@ defineExpose({ refreshRules });
         </div>
       </div>
     </div>
-  </section>
+    </template>
+  </CollapsiblePanel>
 </template>

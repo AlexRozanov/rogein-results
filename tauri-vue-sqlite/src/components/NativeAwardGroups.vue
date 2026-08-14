@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IconActionButton from "./IconActionButton.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type FormatOption = {
   format_id: number;
@@ -222,11 +223,10 @@ defineExpose({ refresh });
 </script>
 
 <template>
-  <section class="native-tools nested-card">
-    <div class="modal-header" style="margin-bottom: 8px">
-      <h3 style="margin: 0">Группы награждения</h3>
+  <CollapsiblePanel panel-id="award-groups" title="Группы награждения">
+    <template #actions>
       <button :disabled="props.busy || localBusy" @click="openCreate">Добавить группу</button>
-    </div>
+    </template>
     <p class="subtitle">
       Группа = набор форматов, правило пола и опционально возраст
       (ветераны 45+, суперветераны 55+, ультраветераны 65+ или свой порог).
@@ -274,6 +274,7 @@ defineExpose({ refresh });
       </table>
     </div>
 
+    <template #overlay>
     <div v-if="formOpen" class="modal-backdrop" @click.self="closeForm">
       <div
         class="modal-card"
@@ -374,5 +375,6 @@ defineExpose({ refresh });
         </div>
       </div>
     </div>
-  </section>
+    </template>
+  </CollapsiblePanel>
 </template>

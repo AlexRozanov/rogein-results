@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod domain;
+pub mod site_publish;
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use domain::{
     StartProtocolImportSummary, StartProtocolRow, DataPresenceCounts,
 };
 use serde::Serialize;
+use site_publish::{SitePublishResult, SitePublishSettings};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct AppState {
@@ -120,6 +122,95 @@ fn suggest_finish_start_name(state: State<'_, AppState>) -> Result<String, Strin
     let conn = domain::open_and_init_db(&state.db_path)?;
     let settings = domain::get_settings(&conn)?;
     Ok(archive::default_archive_title(&settings.competition_date))
+}
+
+#[tauri::command]
+fn get_site_publish_settings(state: State<'_, AppState>) -> Result<SitePublishSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let active_title = archive::get_active_archive(&state.app_data_dir).map(|a| a.title);
+    site_publish::get_settings(
+        &state.app_data_dir,
+        &conn,
+        active_title.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn save_site_publish_settings(
+    state: State<'_, AppState>,
+    api_base_url: String,
+    publish_token: String,
+    slug: String,
+    title: String,
+) -> Result<SitePublishSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    site_publish::save_connection(
+        &state.app_data_dir,
+        &site_publish::SiteConnection {
+            api_base_url,
+            publish_token,
+        },
+    )?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    if !slug.trim().is_empty() || !title.trim().is_empty() {
+        let settings = domain::get_settings(&conn)?;
+        let active_title = archive::get_active_archive(&state.app_data_dir).map(|a| a.title);
+        let slug_value = if slug.trim().is_empty() {
+            site_publish::suggested_slug(&settings.competition_date)
+        } else {
+            slug
+        };
+        let title_value = if title.trim().is_empty() {
+            site_publish::suggested_title(&settings.competition_date, active_title.as_deref())
+        } else {
+            title
+        };
+        if !slug_value.is_empty() && !title_value.is_empty() {
+            site_publish::save_event_meta(&conn, &slug_value, &title_value)?;
+        }
+    }
+    let active_title = archive::get_active_archive(&state.app_data_dir).map(|a| a.title);
+    site_publish::get_settings(
+        &state.app_data_dir,
+        &conn,
+        active_title.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn test_site_publish_connection(api_base_url: String) -> Result<String, String> {
+    site_publish::test_connection(&api_base_url)
+}
+
+#[tauri::command]
+fn publish_current_start(
+    state: State<'_, AppState>,
+    api_base_url: String,
+    publish_token: String,
+    slug: String,
+    title: String,
+) -> Result<SitePublishResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let map_path = course_map_path(&state);
+    site_publish::publish_current_start(
+        &state.app_data_dir,
+        &state.db_path,
+        &map_path,
+        &api_base_url,
+        &publish_token,
+        &slug,
+        &title,
+    )
 }
 
 #[tauri::command]
@@ -1428,6 +1519,10 @@ pub fn run() {
             finish_current_start,
             open_start_archive,
             pick_start_archive_file,
+            get_site_publish_settings,
+            save_site_publish_settings,
+            test_site_publish_connection,
+            publish_current_start,
             recalculate_results,
             get_settings,
             set_settings,

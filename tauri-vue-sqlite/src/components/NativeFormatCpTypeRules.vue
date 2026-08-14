@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IconActionButton from "./IconActionButton.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type FormatOption = {
   format_id: number;
@@ -226,11 +227,10 @@ defineExpose({ refresh });
 </script>
 
 <template>
-  <section class="native-tools nested-card">
-    <div class="modal-header" style="margin-bottom: 8px">
-      <h3 style="margin: 0">Типы КП по форматам</h3>
+  <CollapsiblePanel panel-id="format-cp-types" title="Типы КП по форматам">
+    <template #actions>
       <button :disabled="props.busy || localBusy" @click="openCreate">Задать для формата</button>
-    </div>
+    </template>
     <p class="subtitle">
       Если типы не заданы — засчитываются все КП. Если заданы — только выбранные типы;
       для типа можно ограничить максимум (считаются первые взятые КП этого типа).
@@ -271,6 +271,7 @@ defineExpose({ refresh });
       </table>
     </div>
 
+    <template #overlay>
     <div v-if="formOpen" class="modal-backdrop" @click.self="closeForm">
       <div class="modal-card" role="dialog" aria-modal="true" :aria-label="formTitle">
         <div class="modal-header">
@@ -359,5 +360,6 @@ defineExpose({ refresh });
         </div>
       </div>
     </div>
-  </section>
+    </template>
+  </CollapsiblePanel>
 </template>

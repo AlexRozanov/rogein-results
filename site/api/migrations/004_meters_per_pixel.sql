@@ -1,0 +1,2 @@
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS meters_per_pixel DOUBLE PRECISION NULL;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type ArchiveListItem = {
   file_name: string;
@@ -186,8 +187,7 @@ defineExpose({ refresh });
 </script>
 
 <template>
-  <section class="native-tools nested-card">
-    <h2>Архивы стартов</h2>
+  <CollapsiblePanel panel-id="archives" title="Архивы стартов">
     <p class="subtitle">
       «Завершить старт» сохраняет все данные в файл
       <code>.rogein</code>
@@ -232,7 +232,7 @@ defineExpose({ refresh });
       </button>
     </div>
     <p v-else class="subtitle">В папке программы пока нет архивов `.rogein`.</p>
-  </section>
+  </CollapsiblePanel>
 
   <div
     v-if="finishOpen"

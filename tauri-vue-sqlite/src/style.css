@@ -68,6 +68,11 @@ button:disabled {
   background: #111c33;
 }
 
+.native-tools h3 {
+  margin: 16px 0 8px;
+  font-size: 15px;
+}
+
 .native-row {
   margin-top: 10px;
   display: flex;
@@ -246,6 +251,25 @@ button:disabled {
 .native-settings select option {
   color: #0f172a;
   background: #ffffff;
+}
+
+.site-publish-settings {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.site-publish-settings label {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.site-publish-settings input {
+  width: 100%;
+  max-width: 520px;
+}
+
+.site-publish-wide input {
+  max-width: 720px;
 }
 
 .native-results-wrap {
@@ -967,6 +991,74 @@ select.row-edit-input option {
 
 .nested-card {
   margin-top: 0;
+}
+
+.settings-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-tab > .native-tools {
+  margin-top: 0;
+}
+
+.settings-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-panel-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 4px 2px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-panel-toggle:hover {
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.settings-panel-toggle h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-panel-chevron {
+  display: inline-block;
+  width: 16px;
+  flex-shrink: 0;
+  color: #94a3b8;
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.settings-panel-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.settings-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-panel.collapsed {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 h3 {

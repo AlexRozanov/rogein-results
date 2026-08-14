@@ -1,0 +1,2 @@
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS map_points JSONB NOT NULL DEFAULT '[]'::jsonb;

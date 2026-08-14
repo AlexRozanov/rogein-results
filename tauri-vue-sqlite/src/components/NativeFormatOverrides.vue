@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IconActionButton from "./IconActionButton.vue";
+import CollapsiblePanel from "./CollapsiblePanel.vue";
 
 type NativeSettings = {
   control_minutes: number;
@@ -301,13 +302,12 @@ defineExpose({ refresh, allFormatOptions });
 </script>
 
 <template>
-  <section class="native-tools nested-card">
-    <div class="modal-header" style="margin-bottom: 8px">
-      <h3 style="margin: 0">Настройки форматов</h3>
+  <CollapsiblePanel panel-id="format-overrides" title="Настройки форматов">
+    <template #actions>
       <button :disabled="props.busy || localBusy" @click="openCreateForm">
         Добавить для формата
       </button>
-    </div>
+    </template>
     <p class="subtitle">
       Показываются только форматы с переопределениями. Пустое поле = взять из общих.
       Тип старта и стартовая станция — только в общих. Стартовое время можно задать для формата.
@@ -362,6 +362,7 @@ defineExpose({ refresh, allFormatOptions });
       </table>
     </div>
 
+    <template #overlay>
     <div v-if="formOpen" class="modal-backdrop" @click.self="closeForm">
       <div
         class="modal-card"
@@ -481,5 +482,6 @@ defineExpose({ refresh, allFormatOptions });
         </div>
       </div>
     </div>
-  </section>
+    </template>
+  </CollapsiblePanel>
 </template>
