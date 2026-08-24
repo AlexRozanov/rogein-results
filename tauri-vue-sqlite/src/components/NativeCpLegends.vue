@@ -5,6 +5,7 @@ import FilePickerButton from "./FilePickerButton.vue";
 import IconActionButton from "./IconActionButton.vue";
 import ImportExistingDataDialog from "./ImportExistingDataDialog.vue";
 import { openAuxWebviewWindow } from "../workspaceUiState";
+import { cpTypeColor } from "../cpTypeColor";
 
 type CpLegendRow = {
   id: number;
@@ -568,7 +569,11 @@ async function deleteType(typeId: number, name: string, usageCount: number) {
       При импорте типы добавляются в справочник автоматически.
     </p>
     <div class="native-row">
-      <FilePickerButton @file-selected="onFileSelected" />
+      <FilePickerButton
+        button-label="Выбрать легенды КП"
+        empty-label="Файл не выбран"
+        @file-selected="onFileSelected"
+      />
       <button :disabled="props.busy || localBusy" @click="importLegends">
         Импорт легенд
       </button>
@@ -666,15 +671,21 @@ async function deleteType(typeId: number, name: string, usageCount: number) {
             @click="beginEdit(row)"
           >
             <td>
-              <input
-                v-if="isEditingRow(row.id)"
-                v-model.number="editNumber"
-                class="row-edit-input"
-                type="number"
-                step="1"
-                @click.stop
-              />
-              <span v-else>{{ row.cp_number }}</span>
+              <span class="legend-cp-cell">
+                <span
+                  class="course-map-cp-dot"
+                  :style="{ background: cpTypeColor(row.cp_type_name) }"
+                ></span>
+                <input
+                  v-if="isEditingRow(row.id)"
+                  v-model.number="editNumber"
+                  class="row-edit-input"
+                  type="number"
+                  step="1"
+                  @click.stop
+                />
+                <span v-else class="course-map-cp-num">{{ row.cp_number }}</span>
+              </span>
             </td>
             <td class="cell-wrap">
               <textarea

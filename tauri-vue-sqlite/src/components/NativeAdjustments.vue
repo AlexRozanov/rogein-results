@@ -49,8 +49,11 @@ function correctionPayloadText(row: CorrectionRow) {
   }
 
   if (row.correction_type === "remove_cp") {
-    const modeText = removeMode === "points_only" ? "только очки" : "очки + перегоны";
     const cpText = Number.isFinite(cp) ? cp : "-";
+    if (removeMode === "from_course") {
+      return `КП ${cpText}: снят с дистанции для всех`;
+    }
+    const modeText = removeMode === "points_only" ? "только очки" : "очки + перегоны";
     return `Номер КП: ${cpText}; действие: ${modeText}`;
   }
 
@@ -87,7 +90,7 @@ async function addGlobalRemoveCp() {
       removeMode: globalRemoveMode.value,
       participantScope: "all",
     });
-    emit("status", "Общая корректировка удаления КП добавлена. Нажмите Пересчитать.");
+    emit("status", "Общая корректировка удаления КП добавлена, выполнен пересчёт.");
     await refreshGlobalCorrections();
   } catch (error) {
     emit("status", `Ошибка общей корректировки: ${String(error)}`);
@@ -110,7 +113,7 @@ async function undoCorrection(row: CorrectionRow) {
       sourceTable: row.source_table,
       correctionId: row.id,
     });
-    emit("status", `Корректировка #${row.id} отменена. Нажмите Пересчитать.`);
+    emit("status", `Корректировка #${row.id} отменена, выполнен пересчёт.`);
     await refreshGlobalCorrections();
   } catch (error) {
     emit("status", `Ошибка отмены корректировки: ${String(error)}`);

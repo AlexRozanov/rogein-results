@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import FilePickerButton from "./FilePickerButton.vue";
 import NativeSettingsForm from "./NativeSettingsForm.vue";
 
+type SportKind = "rogaine" | "orient";
+
 type NativeSettings = {
   control_minutes: number;
   penalty_per_minute: number;
@@ -13,32 +15,12 @@ type NativeSettings = {
   start_cp: number | null;
   competition_date: string;
   competition_start_time: string;
+  sport_kind: SportKind;
 };
 
-type StepId = "start" | "legends" | "settings" | "finish";
+type StepId = "sport" | "start" | "legends" | "settings" | "courses" | "finish";
 
-const STEPS: { id: StepId; title: string; hint: string }[] = [
-  {
-    id: "start",
-    title: "Стартовый протокол",
-    hint: "Выберите CSV со стартовым протоколом или пропустите шаг.",
-  },
-  {
-    id: "legends",
-    title: "Легенды КП",
-    hint: "Выберите CSV с легендами контрольных пунктов или пропустите шаг.",
-  },
-  {
-    id: "settings",
-    title: "Общие настройки",
-    hint: "Проверьте параметры соревнования. Их можно изменить позже во вкладке «Настройки».",
-  },
-  {
-    id: "finish",
-    title: "Финишный протокол",
-    hint: "Выберите CSV финишного дампа или пропустите и загрузите позже во вкладке «Результаты».",
-  },
-];
+type WizardStep = { id: StepId; title: string; hint: string };
 
 const props = defineProps<{
   busy: boolean;
@@ -56,16 +38,65 @@ const settings = ref<NativeSettings | null>(null);
 const startFile = ref<File | null>(null);
 const legendsFile = ref<File | null>(null);
 const finishFile = ref<File | null>(null);
+const coursesFile = ref<File | null>(null);
+const sportKind = ref<SportKind>("rogaine");
 const stepDone = ref<Record<StepId, boolean>>({
+  sport: false,
   start: false,
   legends: false,
   settings: false,
+  courses: false,
   finish: false,
 });
 
 const isBusy = computed(() => props.busy || localBusy.value);
-const current = computed(() => STEPS[stepIndex.value]);
-const isLast = computed(() => stepIndex.value >= STEPS.length - 1);
+const isOrient = computed(() => sportKind.value === "orient");
+const steps = computed<WizardStep[]>(() => {
+  const sport: WizardStep = {
+    id: "sport",
+    title: "Вид соревнования",
+    hint: "Рогейн считает очки за КП. Заданное направление — порядок КП и время.",
+  };
+  const finish: WizardStep = {
+    id: "finish",
+    title: "Финишный протокол",
+    hint: "Выберите CSV финишного дампа или пропустите и загрузите позже во вкладке «Результаты».",
+  };
+  const settingsStep: WizardStep = {
+    id: "settings",
+    title: "Общие настройки",
+    hint: "Проверьте параметры соревнования. Их можно изменить позже во вкладке «Настройки».",
+  };
+  if (isOrient.value) {
+    return [
+      sport,
+      settingsStep,
+      {
+        id: "courses",
+        title: "Дистанции",
+        hint: "Выберите CSV дистанций (название и номера КП) или пропустите и загрузите позже во вкладке «Дистанции».",
+      },
+      finish,
+    ];
+  }
+  return [
+    sport,
+    {
+      id: "start",
+      title: "Стартовый протокол",
+      hint: "Выберите CSV со стартовым протоколом или пропустите шаг.",
+    },
+    {
+      id: "legends",
+      title: "Легенды КП",
+      hint: "Выберите CSV с легендами контрольных пунктов или пропустите шаг.",
+    },
+    settingsStep,
+    finish,
+  ];
+});
+const current = computed(() => steps.value[stepIndex.value]);
+const isLast = computed(() => stepIndex.value >= steps.value.length - 1);
 
 onMounted(() => {
   void loadSettings();
@@ -74,6 +105,7 @@ onMounted(() => {
 async function loadSettings() {
   try {
     settings.value = await invoke<NativeSettings>("get_settings");
+    sportKind.value = settings.value.sport_kind === "orient" ? "orient" : "rogaine";
   } catch (error) {
     emit("status", `Ошибка загрузки настроек: ${String(error)}`);
   }
@@ -93,6 +125,30 @@ function skipStep() {
 
 function skipWizard() {
   emit("dismissed");
+}
+
+async function chooseSport(kind: SportKind) {
+  localBusy.value = true;
+  try {
+    settings.value = await invoke<NativeSettings>("set_settings", {
+      sportKind: kind,
+    });
+    sportKind.value = kind;
+    stepDone.value.sport = true;
+    emit(
+      "status",
+      kind === "orient"
+        ? "Выбрано заданное направление."
+        : "Выбран рогейн.",
+    );
+    if (current.value?.id === "sport") {
+      goNext();
+    }
+  } catch (error) {
+    emit("status", `Ошибка выбора вида соревнования: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
 }
 
 async function importStart() {
@@ -145,6 +201,31 @@ async function importLegends() {
   }
 }
 
+async function importCourses() {
+  if (!coursesFile.value) {
+    emit("status", "Выберите CSV с дистанциями.");
+    return;
+  }
+  localBusy.value = true;
+  try {
+    const csvContent = await coursesFile.value.text();
+    const summary = await invoke<{ imported_rows: number; total_rows: number }>(
+      "import_courses_content",
+      { csvContent, reset: true },
+    );
+    stepDone.value.courses = true;
+    emit(
+      "status",
+      `Дистанции загружены: ${summary.imported_rows}, всего ${summary.total_rows}.`,
+    );
+    goNext();
+  } catch (error) {
+    emit("status", `Ошибка импорта дистанций: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
 async function saveSettings(form: NativeSettings) {
   localBusy.value = true;
   try {
@@ -157,6 +238,7 @@ async function saveSettings(form: NativeSettings) {
       startCp: form.start_cp,
       competitionDate: String(form.competition_date || "").trim(),
       competitionStartTime: String(form.competition_start_time || "").trim(),
+      sportKind: sportKind.value,
     });
     stepDone.value.settings = true;
     emit("status", "Общие настройки сохранены.");
@@ -223,7 +305,7 @@ async function importFinish() {
 
       <ol class="wizard-steps">
         <li
-          v-for="(step, index) in STEPS"
+          v-for="(step, index) in steps"
           :key="step.id"
           :class="{
             active: index === stepIndex,
@@ -239,7 +321,30 @@ async function importFinish() {
         <h4>{{ current.title }}</h4>
         <p class="subtitle">{{ current.hint }}</p>
 
-        <template v-if="current.id === 'start'">
+        <template v-if="current.id === 'sport'">
+          <div class="sport-kind-row">
+            <button
+              type="button"
+              class="sport-kind-btn"
+              :class="{ active: sportKind === 'rogaine' }"
+              :disabled="isBusy"
+              @click="chooseSport('rogaine')"
+            >
+              Рогейн
+            </button>
+            <button
+              type="button"
+              class="sport-kind-btn"
+              :class="{ active: sportKind === 'orient' }"
+              :disabled="isBusy"
+              @click="chooseSport('orient')"
+            >
+              Заданное направление
+            </button>
+          </div>
+        </template>
+
+        <template v-else-if="current.id === 'start'">
           <FilePickerButton
             button-label="Выбрать стартовый протокол"
             empty-label="Файл не выбран"
@@ -275,9 +380,25 @@ async function importFinish() {
             :settings="settings"
             :busy="isBusy"
             @save="saveSettings"
+            @request-sport-kind="chooseSport"
           />
           <div class="native-row" style="margin-top: 12px">
             <button type="button" :disabled="isBusy" @click="skipStep">Пропустить</button>
+          </div>
+        </template>
+
+        <template v-else-if="current.id === 'courses'">
+          <FilePickerButton
+            button-label="Выбрать CSV дистанций"
+            empty-label="Файл не выбран"
+            :disabled="isBusy"
+            @file-selected="coursesFile = $event"
+          />
+          <div class="native-row" style="margin-top: 12px">
+            <button type="button" :disabled="isBusy" @click="skipStep">Пропустить</button>
+            <button type="button" :disabled="isBusy || !coursesFile" @click="importCourses">
+              Загрузить и далее
+            </button>
           </div>
         </template>
 

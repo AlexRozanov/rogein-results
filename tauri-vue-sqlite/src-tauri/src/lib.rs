@@ -10,7 +10,8 @@ use archive::{ActiveArchiveInfo, ArchiveActionResult, ArchiveListItem};
 use domain::{
     AnomalyBulkActionsState, AnomalyListResponse, AnomalyScanSummary, AwardGroupRow,
     BulkAnomalyCorrectionSummary, BulkAnomalyRollbackSummary, CorrectionRow,
-    CourseMapSpecialPoints, CpLegendImportSummary, CpLegendRow, CpLegendTypeRow,
+    CourseMapSpecialPoints, CourseRow, CoursesImportSummary, CpLegendImportSummary, CpLegendRow,
+    CpLegendTypeRow,
     CpRemapAnalyzeSummary, CpRemapApplyItem, CpRemapApplySummary, ErrorRow, ExclusionRuleRow,
     FormatCpTypeRuleInput, FormatCpTypeRulesBundle, FormatSettings, ImportSummary,
     MapGeorefInfo, MapGpsAnchor, MapGpsAnchorUpsert, ParticipantDetails, ParticipantPathDistance,
@@ -19,7 +20,7 @@ use domain::{
 };
 use serde::Serialize;
 use site_publish::{SitePublishResult, SitePublishSettings};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct AppState {
     app_data_dir: PathBuf,
@@ -47,6 +48,12 @@ struct CourseMapPayload {
 
 fn course_map_path(state: &AppState) -> PathBuf {
     state.app_data_dir.join(COURSE_MAP_FILE)
+}
+
+fn recalculate_and_notify(app: &AppHandle, conn: &mut rusqlite::Connection) -> Result<(), String> {
+    domain::recalculate(conn)?;
+    let _ = app.emit("results-updated", ());
+    Ok(())
 }
 
 fn guess_image_mime(file_name: &str) -> String {
@@ -386,6 +393,7 @@ fn set_settings(
     start_cp: Option<i64>,
     competition_date: Option<String>,
     competition_start_time: Option<String>,
+    sport_kind: Option<String>,
 ) -> Result<Settings, String> {
     let _guard = state
         .db_lock
@@ -402,7 +410,84 @@ fn set_settings(
         start_cp,
         competition_date,
         competition_start_time,
+        sport_kind,
     )
+}
+
+#[derive(Debug, Serialize)]
+struct SwitchSportKindResult {
+    settings: Settings,
+    archived: bool,
+    archive_title: Option<String>,
+}
+
+#[tauri::command]
+fn switch_sport_kind(
+    state: State<'_, AppState>,
+    sport_kind: String,
+    archive_current_first: Option<bool>,
+    archive_name: Option<String>,
+    overwrite: Option<bool>,
+) -> Result<SwitchSportKindResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let kind = domain::normalize_sport_kind(&sport_kind)?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let current = domain::get_settings(&conn)?;
+    if current.sport_kind == kind {
+        return Ok(SwitchSportKindResult {
+            settings: current,
+            archived: false,
+            archive_title: None,
+        });
+    }
+    let has_data = domain::working_start_has_data(&conn)?;
+    drop(conn);
+
+    let mut next = current.clone();
+    next.sport_kind = kind.clone();
+    if kind == "orient" {
+        next.start_mode = "station".to_string();
+    }
+
+    let mut archived = false;
+    let mut archive_title = None;
+    let map_path = course_map_path(&state);
+    if archive_current_first.unwrap_or(false) {
+        if !has_data {
+            return Err("Нечего сохранять в архив: рабочая база пуста.".into());
+        }
+        let name = archive_name.unwrap_or_default();
+        let stem = archive::sanitize_archive_stem(&name)?;
+        let archives = archive::ensure_archives_dir(&state.app_data_dir)?;
+        let archive_path = archives.join(format!("{stem}.rogein"));
+        if archive_path.exists() && !overwrite.unwrap_or(false) {
+            return Err(format!(
+                "Архив уже существует: {}. Укажите другое имя или подтвердите перезапись.",
+                archive_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("archive.rogein")
+            ));
+        }
+        let manifest =
+            archive::create_start_archive(&state.db_path, &map_path, &archive_path, &stem)?;
+        archived = true;
+        archive_title = Some(manifest.title);
+        archive::wipe_working_start(&state.app_data_dir, &state.db_path, &map_path)?;
+    } else if has_data {
+        archive::wipe_working_start(&state.app_data_dir, &state.db_path, &map_path)?;
+    }
+
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let settings = domain::put_settings(&conn, &next)?;
+    Ok(SwitchSportKindResult {
+        settings,
+        archived,
+        archive_title,
+    })
 }
 
 #[tauri::command]
@@ -415,6 +500,7 @@ fn get_results(
     format_id: Option<i64>,
     only_missing_format: Option<bool>,
     award_group_id: Option<i64>,
+    course_name: Option<String>,
     sort_by: Option<String>,
     sort_dir: Option<String>,
 ) -> Result<ResultsResponse, String> {
@@ -435,10 +521,17 @@ fn get_results(
         format_id,
         missing,
         award_group_id,
+        course_name.clone(),
         sort_by,
         sort_dir,
     )?;
-    let counts = domain::query_status_counts(&conn, format_id, missing, award_group_id)?;
+    let counts = domain::query_status_counts(
+        &conn,
+        format_id,
+        missing,
+        award_group_id,
+        course_name,
+    )?;
     Ok(ResultsResponse {
         rows,
         counts,
@@ -770,6 +863,59 @@ fn import_cp_legends_content(
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::import_cp_legends_content(&conn, &csv_content, reset)
+}
+
+#[tauri::command]
+fn import_courses_content(
+    state: State<'_, AppState>,
+    csv_content: String,
+    reset: bool,
+) -> Result<CoursesImportSummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::import_courses_content(&conn, &csv_content, reset)
+}
+
+#[tauri::command]
+fn get_courses(state: State<'_, AppState>) -> Result<Vec<CourseRow>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::list_courses(&conn)
+}
+
+#[tauri::command]
+fn save_course(
+    state: State<'_, AppState>,
+    course_id: Option<i64>,
+    name: String,
+    controls: Vec<i64>,
+) -> Result<CourseRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let row = domain::save_course(&conn, course_id, name, controls)?;
+    domain::recalculate(&mut conn)?;
+    Ok(row)
+}
+
+#[tauri::command]
+fn delete_course(state: State<'_, AppState>, course_id: i64) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_course(&conn, course_id)?;
+    domain::recalculate(&mut conn)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1170,6 +1316,7 @@ fn find_result_id(
 
 #[tauri::command]
 fn add_cp_correction(
+    app: AppHandle,
     state: State<'_, AppState>,
     participant_id: String,
     cp_number: i64,
@@ -1179,17 +1326,35 @@ fn add_cp_correction(
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
     domain::add_cp_correction(
         &conn,
         &participant_id,
         cp_number,
         mark_time.unwrap_or_default().as_str(),
-    )
+    )?;
+    recalculate_and_notify(&app, &mut conn)
+}
+
+#[tauri::command]
+fn set_start_mark_correction(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    participant_id: String,
+    mark_time: String,
+) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::set_start_mark_correction(&conn, &participant_id, mark_time)?;
+    recalculate_and_notify(&app, &mut conn)
 }
 
 #[tauri::command]
 fn add_anomaly_day_shift_correction(
+    app: AppHandle,
     state: State<'_, AppState>,
     participant_id: String,
 ) -> Result<(), String> {
@@ -1197,32 +1362,39 @@ fn add_anomaly_day_shift_correction(
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::add_anomaly_day_shift_correction(&conn, &participant_id)
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::add_anomaly_day_shift_correction(&conn, &participant_id)?;
+    recalculate_and_notify(&app, &mut conn)
 }
 
 #[tauri::command]
 fn add_anomaly_day_shift_corrections_for_all(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BulkAnomalyCorrectionSummary, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::add_anomaly_day_shift_corrections_for_all(&conn)
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary = domain::add_anomaly_day_shift_corrections_for_all(&conn)?;
+    recalculate_and_notify(&app, &mut conn)?;
+    Ok(summary)
 }
 
 #[tauri::command]
 fn rollback_anomaly_day_shift_corrections_for_all(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BulkAnomalyRollbackSummary, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::rollback_anomaly_day_shift_corrections_for_all(&conn)
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary = domain::rollback_anomaly_day_shift_corrections_for_all(&conn)?;
+    recalculate_and_notify(&app, &mut conn)?;
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -1239,6 +1411,7 @@ fn get_anomaly_bulk_actions_state(
 
 #[tauri::command]
 fn remove_cp_correction(
+    app: AppHandle,
     state: State<'_, AppState>,
     participant_id: Option<String>,
     cp_number: i64,
@@ -1249,14 +1422,15 @@ fn remove_cp_correction(
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
     domain::remove_cp_correction(
         &conn,
         participant_id,
         cp_number,
         remove_mode.unwrap_or_else(|| "remove_legs".to_string()),
         participant_scope.unwrap_or_else(|| "one".to_string()),
-    )
+    )?;
+    recalculate_and_notify(&app, &mut conn)
 }
 
 #[tauri::command]
@@ -1265,6 +1439,7 @@ fn add_exclusion_rule(
     participant_scope: String,
     participant_id: Option<String>,
     format_id: Option<i64>,
+    course_id: Option<i64>,
     from_cp: i64,
     to_cp: i64,
     direction: String,
@@ -1281,6 +1456,7 @@ fn add_exclusion_rule(
         participant_scope,
         participant_id,
         format_id,
+        course_id,
         from_cp,
         to_cp,
         direction,
@@ -1296,6 +1472,7 @@ fn update_exclusion_rule(
     participant_scope: String,
     participant_id: Option<String>,
     format_id: Option<i64>,
+    course_id: Option<i64>,
     from_cp: i64,
     to_cp: i64,
     direction: String,
@@ -1313,6 +1490,7 @@ fn update_exclusion_rule(
         participant_scope,
         participant_id,
         format_id,
+        course_id,
         from_cp,
         to_cp,
         direction,
@@ -1384,6 +1562,7 @@ fn analyze_cp_station_remap(
 
 #[tauri::command]
 fn apply_cp_remap_corrections(
+    app: AppHandle,
     state: State<'_, AppState>,
     items: Vec<CpRemapApplyItem>,
 ) -> Result<CpRemapApplySummary, String> {
@@ -1391,8 +1570,10 @@ fn apply_cp_remap_corrections(
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::apply_cp_remap_corrections(&conn, &items)
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary = domain::apply_cp_remap_corrections(&conn, &items)?;
+    recalculate_and_notify(&app, &mut conn)?;
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -1467,6 +1648,7 @@ fn scan_anomalies(state: State<'_, AppState>) -> Result<AnomalyScanSummary, Stri
 
 #[tauri::command]
 fn delete_correction_entry(
+    app: AppHandle,
     state: State<'_, AppState>,
     source_table: String,
     correction_id: i64,
@@ -1475,8 +1657,9 @@ fn delete_correction_entry(
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::delete_correction_entry(&conn, source_table, correction_id)
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_correction_entry(&conn, source_table, correction_id)?;
+    recalculate_and_notify(&app, &mut conn)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1526,6 +1709,7 @@ pub fn run() {
             recalculate_results,
             get_settings,
             set_settings,
+            switch_sport_kind,
             get_results,
             get_error_list,
             get_participants,
@@ -1551,6 +1735,10 @@ pub fn run() {
             set_course_map_special_position,
             delete_cp_legend,
             import_cp_legends_content,
+            import_courses_content,
+            get_courses,
+            save_course,
+            delete_course,
             get_course_map_info,
             get_course_map_payload,
             save_course_map,
@@ -1575,6 +1763,7 @@ pub fn run() {
             get_participant_details,
             find_result_id,
             add_cp_correction,
+            set_start_mark_correction,
             add_anomaly_day_shift_correction,
             add_anomaly_day_shift_corrections_for_all,
             rollback_anomaly_day_shift_corrections_for_all,

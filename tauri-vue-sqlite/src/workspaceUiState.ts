@@ -1,10 +1,11 @@
-export type WorkspaceMainTab = "results" | "start_protocol" | "cp_legends" | "settings";
+export type WorkspaceMainTab = "results" | "start_protocol" | "cp_legends" | "courses" | "settings";
 export type WorkspaceSortBy =
   | "participant_id"
   | "name"
   | "points_raw"
   | "points_final"
-  | "elapsed_seconds";
+  | "elapsed_seconds"
+  | "place";
 export type WorkspaceSortDir = "asc" | "desc";
 
 export type WorkspaceUiState = {
@@ -13,6 +14,7 @@ export type WorkspaceUiState = {
   filterSearch: string;
   filterFormatId: string;
   filterAwardGroupId: string;
+  filterCourseName: string;
   pageSize: number;
   pageOffset: number;
   sortBy: WorkspaceSortBy;
@@ -40,6 +42,7 @@ export function loadWorkspaceUiState(): WorkspaceUiState | null {
         parsed.activeTab === "results" ||
         parsed.activeTab === "start_protocol" ||
         parsed.activeTab === "cp_legends" ||
+        parsed.activeTab === "courses" ||
         parsed.activeTab === "settings"
           ? parsed.activeTab
           : "results",
@@ -47,6 +50,7 @@ export function loadWorkspaceUiState(): WorkspaceUiState | null {
       filterSearch: String(parsed.filterSearch ?? ""),
       filterFormatId: String(parsed.filterFormatId ?? ""),
       filterAwardGroupId: String(parsed.filterAwardGroupId ?? ""),
+      filterCourseName: String(parsed.filterCourseName ?? ""),
       pageSize: Number.isFinite(Number(parsed.pageSize)) ? Number(parsed.pageSize) : 50,
       pageOffset: Number.isFinite(Number(parsed.pageOffset))
         ? Math.max(0, Number(parsed.pageOffset))
@@ -56,7 +60,8 @@ export function loadWorkspaceUiState(): WorkspaceUiState | null {
         parsed.sortBy === "name" ||
         parsed.sortBy === "points_raw" ||
         parsed.sortBy === "points_final" ||
-        parsed.sortBy === "elapsed_seconds"
+        parsed.sortBy === "elapsed_seconds" ||
+        parsed.sortBy === "place"
           ? parsed.sortBy
           : "points_final",
       sortDir: parsed.sortDir === "asc" || parsed.sortDir === "desc" ? parsed.sortDir : "desc",
@@ -75,6 +80,7 @@ export function markReturnToResultsTab(): void {
     filterSearch: current?.filterSearch ?? "",
     filterFormatId: current?.filterFormatId ?? "",
     filterAwardGroupId: current?.filterAwardGroupId ?? "",
+    filterCourseName: current?.filterCourseName ?? "",
     pageSize: current?.pageSize ?? 50,
     pageOffset: current?.pageOffset ?? 0,
     sortBy: current?.sortBy ?? "points_final",

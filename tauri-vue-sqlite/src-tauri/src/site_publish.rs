@@ -476,6 +476,7 @@ fn load_group_rows(conn: &Connection, group: &AwardGroupRow) -> Result<Vec<Resul
             None,
             false,
             Some(group.id),
+            None,
             Some("points_final".into()),
             Some("desc".into()),
         )?;

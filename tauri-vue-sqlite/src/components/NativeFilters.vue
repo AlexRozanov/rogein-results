@@ -11,14 +11,22 @@ type AwardGroupOption = {
   name: string;
 };
 
+type CourseOption = {
+  id: number;
+  name: string;
+};
+
 const props = defineProps<{
   busy: boolean;
   status: string;
   search: string;
   formatId: string;
   awardGroupId: string;
+  courseName: string;
   formats: FormatOption[];
   awardGroups: AwardGroupOption[];
+  courses: CourseOption[];
+  isOrient?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +34,7 @@ const emit = defineEmits<{
   "update:search": [value: string];
   "update:formatId": [value: string];
   "update:awardGroupId": [value: string];
+  "update:courseName": [value: string];
   apply: [];
 }>();
 
@@ -49,6 +58,11 @@ const selectedAwardLabel = computed(() => {
   if (!props.awardGroupId) return "Все";
   const found = props.awardGroups.find((g) => String(g.id) === props.awardGroupId);
   return found?.name ?? "Все";
+});
+
+const selectedCourseLabel = computed(() => {
+  if (!props.courseName) return props.courses[0]?.name ?? "—";
+  return props.courses.find((c) => c.name === props.courseName)?.name ?? props.courseName;
 });
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -80,7 +94,7 @@ onBeforeUnmount(() => {
         @input="onSearchInput"
       />
     </label>
-    <label>
+    <label v-if="!isOrient">
       Группа награждения:
       <select
         :value="awardGroupId"
@@ -92,7 +106,7 @@ onBeforeUnmount(() => {
         </option>
       </select>
     </label>
-    <span class="subtitle">Группа: {{ selectedAwardLabel }}</span>
+    <span v-if="!isOrient" class="subtitle">Группа: {{ selectedAwardLabel }}</span>
     <label>
       Статус:
       <select
@@ -104,11 +118,11 @@ onBeforeUnmount(() => {
         <option value="Дисквалификация">Дисквалификация</option>
         <option value="Ошибка">Ошибка</option>
         <option value="Не стартовал">Не стартовал</option>
-        <option value="Нет в протоколе">Нет в протоколе</option>
+        <option v-if="!isOrient" value="Нет в протоколе">Нет в протоколе</option>
       </select>
     </label>
     <span class="subtitle">Выбрано: {{ selectedStatusLabel }}</span>
-    <label>
+    <label v-if="!isOrient">
       Формат:
       <select
         :value="formatId"
@@ -121,7 +135,20 @@ onBeforeUnmount(() => {
         </option>
       </select>
     </label>
-    <span class="subtitle">Формат: {{ selectedFormatLabel }}</span>
+    <span v-if="!isOrient" class="subtitle">Формат: {{ selectedFormatLabel }}</span>
+    <label v-if="isOrient">
+      Дистанция:
+      <select
+        :value="courseName"
+        :disabled="busy || !courses.length"
+        @change="emit('update:courseName', ($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="c in courses" :key="c.id" :value="c.name">
+          {{ c.name }}
+        </option>
+      </select>
+    </label>
+    <span v-if="isOrient" class="subtitle">Дистанция: {{ selectedCourseLabel }}</span>
     <button :disabled="busy" @click="emit('apply')">Применить фильтр</button>
   </div>
 </template>

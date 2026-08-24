@@ -26,9 +26,10 @@ type NativeResultRow = {
   points_final: number;
   elapsed_seconds: number;
   diagnostics_json?: string;
+  place?: number | null;
 };
 
-type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds";
+type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds" | "place";
 type SortDir = "asc" | "desc";
 type TeamGroupPos = "none" | "start" | "mid" | "end" | "only";
 
@@ -37,6 +38,7 @@ const props = defineProps<{
   sortBy: SortBy;
   sortDir: SortDir;
   busy?: boolean;
+  isOrient?: boolean;
 }>();
 const emit = defineEmits<{
   resultSelected: [resultId: number];
@@ -118,18 +120,24 @@ function onSaved() {
     <table class="native-results">
       <thead>
         <tr>
-          <th class="team-brace-col" title="Группировка команды"></th>
+          <th v-if="isOrient" class="sortable-col place-col" @click="emit('sortChanged', 'place')">
+            Место{{ sortMark("place") }}
+          </th>
+          <th v-if="!isOrient" class="team-brace-col" title="Группировка команды"></th>
           <th class="sortable-col" @click="emit('sortChanged', 'participant_id')">ID{{ sortMark("participant_id") }}</th>
           <th class="sortable-col" @click="emit('sortChanged', 'name')">Имя{{ sortMark("name") }}</th>
-          <th>Формат</th>
-          <th>Пол</th>
-          <th>Возраст</th>
+          <th>{{ isOrient ? "Дистанция" : "Формат" }}</th>
+          <th v-if="!isOrient">Пол</th>
+          <th v-if="!isOrient">Возраст</th>
           <th>Статус</th>
-          <th class="sortable-col" @click="emit('sortChanged', 'points_raw')">Очки{{ sortMark("points_raw") }}</th>
-          <th>Штраф</th>
-          <th class="sortable-col" @click="emit('sortChanged', 'points_final')">Итог{{ sortMark("points_final") }}</th>
+          <th v-if="isOrient" class="sortable-col" @click="emit('sortChanged', 'points_raw')">
+            КП{{ sortMark("points_raw") }}
+          </th>
+          <th v-else class="sortable-col" @click="emit('sortChanged', 'points_raw')">Очки{{ sortMark("points_raw") }}</th>
+          <th v-if="!isOrient">Штраф</th>
+          <th v-if="!isOrient" class="sortable-col" @click="emit('sortChanged', 'points_final')">Итог{{ sortMark("points_final") }}</th>
           <th class="sortable-col" @click="emit('sortChanged', 'elapsed_seconds')">Время{{ sortMark("elapsed_seconds") }}</th>
-          <th>Действие</th>
+          <th v-if="!isOrient">Действие</th>
         </tr>
       </thead>
       <tbody>
@@ -141,7 +149,8 @@ function onSaved() {
             'row-team-block-start': isTeamBlockStart(row, rowIndex),
           }"
         >
-          <td class="team-brace-col" aria-hidden="true">
+          <td v-if="isOrient" class="place-col">{{ row.place ?? "—" }}</td>
+          <td v-if="!isOrient" class="team-brace-col" aria-hidden="true">
             <span
               v-if="teamGroupPos(row, rowIndex) !== 'none'"
               class="team-brace"
@@ -186,14 +195,14 @@ function onSaved() {
             </span>
           </td>
           <td>{{ row.format_name || "—" }}</td>
-          <td>{{ genderText(row.gender) }}</td>
-          <td>{{ ageText(row.age) }}</td>
+          <td v-if="!isOrient">{{ genderText(row.gender) }}</td>
+          <td v-if="!isOrient">{{ ageText(row.age) }}</td>
           <td>{{ row.status }}</td>
           <td>{{ row.points_raw }}</td>
-          <td>{{ row.penalty_points }}</td>
-          <td>{{ row.points_final }}</td>
+          <td v-if="!isOrient">{{ row.penalty_points }}</td>
+          <td v-if="!isOrient">{{ row.points_final }}</td>
           <td>{{ fmtHms(row.elapsed_seconds) }}</td>
-          <td>
+          <td v-if="!isOrient">
             <button
               v-if="notInStartProtocol(row)"
               type="button"

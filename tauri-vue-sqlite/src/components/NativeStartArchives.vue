@@ -22,6 +22,7 @@ type DataPresenceCounts = {
   finish_participants: number;
   start_protocol: number;
   cp_legends: number;
+  courses: number;
 };
 
 type ArchiveActionResult = {
@@ -131,7 +132,8 @@ async function hasWorkingData(): Promise<boolean> {
   return (
     counts.finish_participants > 0 ||
     counts.start_protocol > 0 ||
-    counts.cp_legends > 0
+    counts.cp_legends > 0 ||
+    counts.courses > 0
   );
 }
 

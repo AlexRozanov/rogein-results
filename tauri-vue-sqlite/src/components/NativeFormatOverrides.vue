@@ -13,6 +13,7 @@ type NativeSettings = {
   start_cp: number | null;
   competition_date: string;
   competition_start_time: string;
+  sport_kind: string;
 };
 
 type FormatSettings = {
