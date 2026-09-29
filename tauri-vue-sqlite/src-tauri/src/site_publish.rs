@@ -64,6 +64,7 @@ struct PublishPayload {
     results: Vec<PublishResultRow>,
     map_points: Vec<PublishMapPoint>,
     meters_per_pixel: Option<f64>,
+    sport_kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -460,6 +461,7 @@ fn build_payload(
         results,
         map_points,
         meters_per_pixel: map_metric.as_ref().map(|m| m.meters_per_pixel),
+        sport_kind: settings.sport_kind,
     })
 }
 

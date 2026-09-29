@@ -19,6 +19,20 @@ pub struct PublishPayload {
     pub map_points: Vec<PublishMapPoint>,
     #[serde(default)]
     pub meters_per_pixel: Option<f64>,
+    #[serde(default = "default_sport_kind")]
+    pub sport_kind: String,
+}
+
+fn default_sport_kind() -> String {
+    "rogaine".to_string()
+}
+
+fn normalize_sport_kind(raw: &str) -> String {
+    if raw.trim().eq_ignore_ascii_case("orient") {
+        "orient".to_string()
+    } else {
+        "rogaine".to_string()
+    }
 }
 
 pub async fn publish_event(
@@ -44,8 +58,8 @@ pub async fn publish_event(
     let map_points = serde_json::to_value(&payload.map_points)?;
     let event_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel)
-        VALUES ($1, $2, $3, 'published', $4, $5)
+        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind)
+        VALUES ($1, $2, $3, 'published', $4, $5, $6)
         RETURNING id
         "#,
     )
@@ -54,6 +68,7 @@ pub async fn publish_event(
     .bind(payload.competition_date)
     .bind(map_points)
     .bind(payload.meters_per_pixel)
+    .bind(normalize_sport_kind(&payload.sport_kind))
     .fetch_one(&mut *tx)
     .await?;
 
@@ -163,7 +178,32 @@ pub async fn publish_event(
         save_map_from_base64(&mut tx, media_dir, slug, event_id, map).await?;
     }
 
+    complete_matching_upcoming(&mut tx, slug, event_id).await?;
+
     tx.commit().await?;
+    Ok(())
+}
+
+/// Same slug as the announcement: calendar drops it, results list picks it up.
+async fn complete_matching_upcoming(
+    tx: &mut Transaction<'_, Postgres>,
+    slug: &str,
+    event_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE upcoming_events
+        SET status = 'completed',
+            published_event_id = $1,
+            completed_at = now()
+        WHERE slug = $2
+          AND status <> 'cancelled'
+        "#,
+    )
+    .bind(event_id)
+    .bind(slug)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

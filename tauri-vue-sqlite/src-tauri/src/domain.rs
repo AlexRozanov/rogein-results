@@ -1226,7 +1226,9 @@ pub fn import_csv_content(
         return Err(CsvFormatError("CSV has no valid participants".into()).to_string());
     }
 
-    {
+    // Orient: one bib per course is required. Rogaine: same bib on two chips is an
+    // anomaly after scoring (`duplicate_bib_in_finish`), not an import reject.
+    if get_settings(conn)?.sport_kind == "orient" {
         let mut first_row_by_entry: BTreeMap<(String, String), i64> = BTreeMap::new();
         for (_chip_raw_id, bib, _name, course, _st, _st_time, source_row, _) in &rows_to_insert {
             let key = (bib.clone(), course_key(course));
@@ -9374,10 +9376,25 @@ fn payload_str(payload: &Value, key: &str) -> Result<String, String> {
 mod tests {
     use super::{
         apply_orient_exclusion_rules, calculate_orient_result, course_subsequence_taken,
-        filter_course_cps, first_course_mark, orient_course_legs, orient_start_punch_kind,
-        parse_time, resolve_orient_leg_to, suggested_start_time, ExclusionRule, Mark, Settings,
+        ensure_schema_extras, filter_course_cps, first_course_mark, import_csv_content, init_db,
+        orient_course_legs, orient_start_punch_kind, parse_time, resolve_orient_leg_to,
+        set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
     };
+    use rusqlite::Connection;
     use std::collections::{HashMap, HashSet};
+
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("memory db");
+        init_db(&conn).expect("init db");
+        ensure_schema_extras(&conn).expect("schema extras");
+        conn
+    }
+
+    fn finish_csv_duplicate_bib() -> &'static str {
+        "system,chip raw id,id,team name,course,result,brief,start st id,Start time,st1,time1\n\
+         sfr,AA 11,4,Ермаченков Филипп,1,OK,ok,241,2026-08-02 12:00:00,241,2026-08-02 12:00:00\n\
+         sfr,BB 22,4,Гапунич Ксения,1,OK,ok,241,2026-08-02 12:00:01,241,2026-08-02 12:00:01\n"
+    }
 
     fn mark(cp: i64, time: &str) -> Mark {
         Mark {
@@ -9561,5 +9578,38 @@ mod tests {
         assert!(!with.diagnostics.iter().any(|d| d == "overtime"));
         assert_eq!(with.elapsed_seconds, 55 * 60);
         assert_eq!(with.status, "OK");
+    }
+
+    #[test]
+    fn rogaine_import_keeps_duplicate_bib_as_anomaly() {
+        let mut conn = memory_db();
+        let summary = import_csv_content(&mut conn, finish_csv_duplicate_bib(), true)
+            .expect("rogaine import must accept duplicate bib");
+        assert_eq!(summary.participants_count, 2);
+        let statuses: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT name, status, diagnostics_json FROM results WHERE participant_id = '4' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses.iter().all(|(_, status, diag)| {
+            status == "Ошибка" && diag.contains("duplicate_bib_in_finish")
+        }));
+    }
+
+    #[test]
+    fn orient_import_rejects_duplicate_bib_on_same_course() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        let err = import_csv_content(&mut conn, finish_csv_duplicate_bib(), true)
+            .expect_err("orient import must reject duplicate bib");
+        assert!(
+            err.contains("повторяется id '4'"),
+            "unexpected import error: {err}"
+        );
     }
 }

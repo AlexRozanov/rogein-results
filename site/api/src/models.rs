@@ -10,7 +10,26 @@ pub struct EventListItem {
     pub competition_date: Option<NaiveDate>,
     pub status: String,
     pub published_at: DateTime<Utc>,
+    pub sport_kind: String,
     pub participant_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventListPage {
+    pub items: Vec<EventListItem>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct UpcomingListItem {
+    pub slug: String,
+    pub title: String,
+    pub competition_date: Option<NaiveDate>,
+    pub sport_kind: String,
+    pub status: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -68,6 +87,7 @@ pub struct EventDetail {
     pub slug: String,
     pub title: String,
     pub competition_date: Option<NaiveDate>,
+    pub sport_kind: String,
     pub status: String,
     pub published_at: DateTime<Utc>,
     pub map_url: Option<String>,
@@ -86,6 +106,7 @@ pub struct EventRow {
     pub slug: String,
     pub title: String,
     pub competition_date: Option<NaiveDate>,
+    pub sport_kind: String,
     pub status: String,
     pub published_at: DateTime<Utc>,
     pub map_file_name: Option<String>,

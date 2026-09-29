@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import { sportKindLabel } from "../content/site";
 
 type AwardGroup = {
   id: number;
@@ -29,6 +30,7 @@ type EventDetail = {
   slug: string;
   title: string;
   competition_date: string | null;
+  sport_kind?: string;
   map_url: string | null;
   award_groups: AwardGroup[];
   results: ResultRow[];
@@ -179,8 +181,14 @@ onBeforeUnmount(() => {
 <template>
   <p v-if="error" class="err">{{ error }}</p>
   <template v-else-if="event">
+    <p class="back-link">
+      <router-link to="/results">← Все результаты</router-link>
+    </p>
     <h1>{{ event.title }}</h1>
-    <p class="muted event-date">{{ event.competition_date || "дата не указана" }}</p>
+    <p class="muted event-date">
+      {{ event.competition_date || "дата не указана" }}
+      · {{ sportKindLabel(event.sport_kind) }}
+    </p>
 
     <nav
       v-if="event.award_groups.length"
