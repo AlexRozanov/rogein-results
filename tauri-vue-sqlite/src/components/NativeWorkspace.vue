@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import NativeResultsTable from "./NativeResultsTable.vue";
 import FilePickerButton from "./FilePickerButton.vue";
 import NativeFilters from "./NativeFilters.vue";
@@ -8,6 +9,7 @@ import NativeAdjustments from "./NativeAdjustments.vue";
 import NativeStartProtocol from "./NativeStartProtocol.vue";
 import NativeCpLegends from "./NativeCpLegends.vue";
 import NativeSettingsTab from "./NativeSettingsTab.vue";
+import NativeCourses from "./NativeCourses.vue";
 import ImportExistingDataDialog from "./ImportExistingDataDialog.vue";
 import IconActionButton from "./IconActionButton.vue";
 import NewStartWizard from "./NewStartWizard.vue";
@@ -32,6 +34,7 @@ type NativeSettings = {
   start_cp: number | null;
   competition_date: string;
   competition_start_time: string;
+  sport_kind: string;
 };
 
 type NativeResultRow = {
@@ -59,6 +62,7 @@ type NativeResultRow = {
   penalty_minutes: number;
   diagnostics_json: string;
   computed_at: string;
+  place?: number | null;
 };
 
 type NativeResultsResponse = {
@@ -118,6 +122,11 @@ type AnomalyBulkActionsState = {
   applied_count: number;
 };
 
+type CourseOption = {
+  id: number;
+  name: string;
+};
+
 type FormatOption = {
   id: number;
   format_name: string;
@@ -128,9 +137,9 @@ type AwardGroupOption = {
   name: string;
 };
 
-type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds";
+type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds" | "place";
 type SortDir = "asc" | "desc";
-type MainTab = "results" | "start_protocol" | "cp_legends" | "settings";
+type MainTab = "results" | "start_protocol" | "cp_legends" | "courses" | "settings";
 
 const nativeStatus = ref("");
 const csvFile = ref<File | null>(null);
@@ -142,6 +151,7 @@ const wizardDismissed = ref(false);
 const workspaceWasEmpty = ref(true);
 
 const nativeSettings = ref<NativeSettings | null>(null);
+const isOrient = computed(() => nativeSettings.value?.sport_kind === "orient");
 const nativeResults = ref<NativeResultRow[]>([]);
 const nativeCounts = ref<Record<string, number>>({
   OK: 0,
@@ -154,8 +164,10 @@ const nativeFilterStatus = ref<string>("");
 const nativeFilterSearch = ref<string>("");
 const nativeFilterFormatId = ref<string>("");
 const nativeFilterAwardGroupId = ref<string>("");
+const nativeFilterCourseName = ref<string>("");
 const formatOptions = ref<FormatOption[]>([]);
 const awardGroupOptions = ref<AwardGroupOption[]>([]);
+const courseOptions = ref<CourseOption[]>([]);
 const pageSize = ref(50);
 const pageOffset = ref(0);
 const totalCount = ref(0);
@@ -193,6 +205,7 @@ function snapshotWorkspaceUi(): WorkspaceUiState {
     filterSearch: nativeFilterSearch.value,
     filterFormatId: nativeFilterFormatId.value,
     filterAwardGroupId: nativeFilterAwardGroupId.value,
+    filterCourseName: nativeFilterCourseName.value,
     pageSize: pageSize.value,
     pageOffset: pageOffset.value,
     sortBy: sortBy.value,
@@ -204,12 +217,40 @@ function persistWorkspaceUi() {
   saveWorkspaceUiState(snapshotWorkspaceUi());
 }
 
+function applySportWorkspaceUi(orient: boolean, sportChanged: boolean) {
+  if (orient && (activeTab.value === "start_protocol" || activeTab.value === "cp_legends")) {
+    activeTab.value = activeTab.value === "cp_legends" ? "courses" : "results";
+  }
+  if (!orient && activeTab.value === "courses") {
+    activeTab.value = "results";
+  }
+  if (!sportChanged) return;
+  if (orient) {
+    sortBy.value = "place";
+    sortDir.value = "asc";
+    nativeFilterFormatId.value = "";
+    nativeFilterAwardGroupId.value = "";
+    nativeFilterCourseName.value = "";
+    if (nativeFilterStatus.value === "Нет в протоколе") {
+      nativeFilterStatus.value = "";
+    }
+  } else {
+    sortBy.value = "points_final";
+    sortDir.value = "desc";
+  }
+}
+
+watch(isOrient, (orient) => {
+  applySportWorkspaceUi(orient, true);
+});
+
 function applyWorkspaceUi(state: WorkspaceUiState) {
   activeTab.value = state.activeTab;
   nativeFilterStatus.value = state.filterStatus;
   nativeFilterSearch.value = state.filterSearch;
   nativeFilterFormatId.value = state.filterFormatId;
   nativeFilterAwardGroupId.value = state.filterAwardGroupId;
+  nativeFilterCourseName.value = state.filterCourseName ?? "";
   pageSize.value = state.pageSize;
   pageOffset.value = state.pageOffset;
   sortBy.value = state.sortBy;
@@ -286,12 +327,28 @@ async function openCpRemapWindow() {
   }
 }
 
+let unlistenResultsUpdated: UnlistenFn | null = null;
+
 onMounted(() => {
   const restored = loadWorkspaceUiState();
   if (restored) {
     applyWorkspaceUi(restored);
   }
   void refreshNativeData();
+  void listen("results-updated", () => {
+    void refreshNativeData();
+  })
+    .then((unlisten) => {
+      unlistenResultsUpdated = unlisten;
+    })
+    .catch(() => {
+      /* not running inside Tauri */
+    });
+});
+
+onBeforeUnmount(() => {
+  unlistenResultsUpdated?.();
+  unlistenResultsUpdated = null;
 });
 
 async function onCsvSelected(file: File | null) {
@@ -378,14 +435,28 @@ async function recalculateNative() {
 async function refreshNativeData() {
   try {
     const settings = await invoke<NativeSettings>("get_settings");
+    const sportChanged = nativeSettings.value?.sport_kind !== settings.sport_kind;
     nativeSettings.value = settings;
+    applySportWorkspaceUi(settings.sport_kind === "orient", sportChanged);
     formatOptions.value = await invoke<FormatOption[]>("get_start_protocol_format_rows");
     awardGroupOptions.value = await invoke<AwardGroupOption[]>("get_award_groups");
+    courseOptions.value = await invoke<CourseOption[]>("get_courses");
     if (
       nativeFilterAwardGroupId.value &&
       !awardGroupOptions.value.some((g) => String(g.id) === nativeFilterAwardGroupId.value)
     ) {
       nativeFilterAwardGroupId.value = "";
+    }
+    const orient = settings.sport_kind === "orient";
+    if (orient) {
+      const names = courseOptions.value.map((c) => c.name);
+      if (!nativeFilterCourseName.value || !names.includes(nativeFilterCourseName.value)) {
+        nativeFilterCourseName.value = names[0] ?? "";
+      }
+      if (sortBy.value === "points_final") {
+        sortBy.value = "place";
+        sortDir.value = "asc";
+      }
     }
     const onlyMissingFormat = nativeFilterFormatId.value === "missing";
     const formatId =
@@ -395,6 +466,10 @@ async function refreshNativeData() {
     const awardGroupId = nativeFilterAwardGroupId.value
       ? Number(nativeFilterAwardGroupId.value)
       : null;
+    const courseName =
+      settings.sport_kind === "orient" && nativeFilterCourseName.value
+        ? nativeFilterCourseName.value
+        : null;
     const response = await invoke<NativeResultsResponse>("get_results", {
       limit: pageSize.value,
       offset: pageOffset.value,
@@ -403,6 +478,7 @@ async function refreshNativeData() {
       formatId,
       onlyMissingFormat,
       awardGroupId,
+      courseName,
       sortBy: sortBy.value,
       sortDir: sortDir.value,
     });
@@ -429,11 +505,13 @@ async function updateWizardVisibility() {
       finish_participants: number;
       start_protocol: number;
       cp_legends: number;
+      courses: number;
     }>("get_data_presence_counts");
     const empty =
       counts.finish_participants <= 0 &&
       counts.start_protocol <= 0 &&
-      counts.cp_legends <= 0;
+      counts.cp_legends <= 0 &&
+      counts.courses <= 0;
     if (!empty) {
       workspaceWasEmpty.value = false;
       wizardDismissed.value = false;
@@ -451,6 +529,13 @@ async function updateWizardVisibility() {
   }
 }
 
+function onWorkspaceResetFromSettings() {
+  // New working start (sport switch / archive wipe): show the wizard again.
+  wizardDismissed.value = false;
+  workspaceWasEmpty.value = false;
+  void refreshNativeData();
+}
+
 async function onWizardFinished() {
   wizardDismissed.value = true;
   showNewStartWizard.value = false;
@@ -465,6 +550,8 @@ function onWizardDismissed() {
 function anomalyTypeLabel(anomalyType: string) {
   if (anomalyType === "start_time_day_shift") return "Сдвиг даты старта";
   if (anomalyType === "unused_cp_never_taken") return "КП без отметок";
+  if (anomalyType === "start_punch_missing") return "Нет отметки старта";
+  if (anomalyType === "start_punch_after_finish") return "Старт позже финиша";
   return anomalyType;
 }
 
@@ -480,7 +567,7 @@ function onAnomalyClick(item: AnomalyListItem) {
 
 async function scanAnomalies() {
   const settings = nativeSettings.value;
-  if (!settings?.competition_date?.trim()) {
+  if (!isOrient.value && !settings?.competition_date?.trim()) {
     nativeStatus.value =
       "Предупреждение: для поиска аномалии сдвига на сутки заполните 'Дата соревнования'.";
     return;
@@ -613,7 +700,7 @@ async function onSortChanged(column: SortBy) {
     sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
   } else {
     sortBy.value = column;
-    sortDir.value = column === "elapsed_seconds" ? "asc" : "desc";
+    sortDir.value = column === "elapsed_seconds" || column === "place" ? "asc" : "desc";
   }
   pageOffset.value = 0;
   await refreshNativeData();
@@ -624,6 +711,7 @@ async function onSortChanged(column: SortBy) {
   <section class="native-tools">
     <div class="native-tabs">
       <button
+        v-if="!isOrient"
         class="tab-btn"
         :class="{ active: activeTab === 'start_protocol' }"
         :disabled="nativeBusy && activeTab !== 'start_protocol'"
@@ -632,12 +720,22 @@ async function onSortChanged(column: SortBy) {
         Стартовый протокол
       </button>
       <button
+        v-if="!isOrient"
         class="tab-btn"
         :class="{ active: activeTab === 'cp_legends' }"
         :disabled="nativeBusy && activeTab !== 'cp_legends'"
         @click="activeTab = 'cp_legends'"
       >
         Легенды КП
+      </button>
+      <button
+        v-if="isOrient"
+        class="tab-btn"
+        :class="{ active: activeTab === 'courses' }"
+        :disabled="nativeBusy && activeTab !== 'courses'"
+        @click="activeTab = 'courses'"
+      >
+        Дистанции
       </button>
       <button
         class="tab-btn"
@@ -697,7 +795,7 @@ async function onSortChanged(column: SortBy) {
         </button>
         <span v-else>Ошибка: {{ nativeCounts["Ошибка"] ?? 0 }}</span>
         <span>Не стартовал: {{ nativeCounts["Не стартовал"] ?? 0 }}</span>
-        <span>Нет в протоколе: {{ nativeCounts["Нет в протоколе"] ?? 0 }}</span>
+        <span v-if="!isOrient">Нет в протоколе: {{ nativeCounts["Нет в протоколе"] ?? 0 }}</span>
       </div>
 
       <section v-if="hasAnomaliesPanel" class="anomalies-panel">
@@ -770,8 +868,11 @@ async function onSortChanged(column: SortBy) {
         :search="nativeFilterSearch"
         :format-id="nativeFilterFormatId"
         :award-group-id="nativeFilterAwardGroupId"
+        :course-name="nativeFilterCourseName"
         :formats="formatOptions"
         :award-groups="awardGroupOptions"
+        :courses="courseOptions"
+        :is-orient="isOrient"
         @update:status="
           nativeFilterStatus = $event;
           applyFilters();
@@ -785,6 +886,10 @@ async function onSortChanged(column: SortBy) {
           nativeFilterAwardGroupId = $event;
           applyFilters();
         "
+        @update:course-name="
+          nativeFilterCourseName = $event;
+          applyFilters();
+        "
         @apply="applyFilters"
       />
 
@@ -793,6 +898,7 @@ async function onSortChanged(column: SortBy) {
         :sort-by="sortBy"
         :sort-dir="sortDir"
         :busy="nativeBusy"
+        :is-orient="isOrient"
         @result-selected="selectResult"
         @sort-changed="onSortChanged"
         @status="nativeStatus = $event"
@@ -849,7 +955,7 @@ async function onSortChanged(column: SortBy) {
         <span class="subtitle">Страница {{ currentPage }} из {{ totalPages }}</span>
       </div>
 
-      <NativeAdjustments :busy="nativeBusy" @status="nativeStatus = $event" />
+      <NativeAdjustments v-if="!isOrient" :busy="nativeBusy" @status="nativeStatus = $event" />
     </template>
 
     <template v-else-if="activeTab === 'settings'">
@@ -857,20 +963,28 @@ async function onSortChanged(column: SortBy) {
         :busy="nativeBusy"
         @status="nativeStatus = $event"
         @saved="refreshNativeData"
-        @workspace-reset="refreshNativeData"
+        @workspace-reset="onWorkspaceResetFromSettings"
       />
     </template>
 
-    <template v-else-if="activeTab === 'cp_legends'">
+    <template v-else-if="activeTab === 'courses'">
+      <NativeCourses :busy="nativeBusy" @status="nativeStatus = $event" @saved="refreshNativeData" />
+    </template>
+
+    <template v-else-if="activeTab === 'cp_legends' && !isOrient">
       <NativeCpLegends :busy="nativeBusy" @status="nativeStatus = $event" />
     </template>
 
-    <template v-else>
+    <template v-else-if="!isOrient">
       <NativeStartProtocol
         :busy="nativeBusy"
         @status="nativeStatus = $event"
         @teams-changed="refreshNativeData"
       />
+    </template>
+
+    <template v-else>
+      <NativeCourses :busy="nativeBusy" @status="nativeStatus = $event" @saved="refreshNativeData" />
     </template>
 
     <ImportExistingDataDialog

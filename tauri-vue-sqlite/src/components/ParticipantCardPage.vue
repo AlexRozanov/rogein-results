@@ -47,6 +47,7 @@ type NativeParticipantDetails = {
     penalty_minutes: number;
     diagnostics_json: string;
     computed_at: string;
+    place?: number | null;
   } | null;
   anomalies: {
     anomaly_type: string;
@@ -105,6 +106,12 @@ type PathDistanceInfo = {
 };
 
 const pathDistance = ref<PathDistanceInfo | null>(null);
+const sportKind = ref<"rogaine" | "orient">("rogaine");
+const startCp = ref<number | null>(null);
+const finishCp = ref<number>(0);
+const courseControls = ref<number[]>([]);
+
+const isOrient = computed(() => sportKind.value === "orient");
 
 const resultIdClean = computed(() => {
   const id = Number(props.resultId);
@@ -127,6 +134,39 @@ const anomalyDayShiftCorrection = computed(() =>
     (c) => c.scope === "personal" && c.correction_type === "anomaly_day_shift_24h",
   ) ?? null,
 );
+const startMarkCorrection = computed(() =>
+  details.value?.corrections.find(
+    (c) => c.scope === "personal" && c.correction_type === "set_start_mark",
+  ) ?? null,
+);
+const startPunchAnomaly = computed(() => {
+  const list = [
+    ...(details.value?.anomalies ?? []),
+    ...(details.value?.anomalies_history ?? []),
+  ];
+  return (
+    list.find(
+      (a) =>
+        a.anomaly_type === "start_punch_missing" ||
+        a.anomaly_type === "start_punch_after_finish",
+    ) ?? null
+  );
+});
+const startMarkDraft = ref("");
+
+function toDatetimeLocal(sql: string) {
+  const raw = String(sql || "").trim();
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)/);
+  if (!m) return "";
+  const time = m[2].length === 5 ? `${m[2]}:00` : m[2];
+  return `${m[1]}T${time}`;
+}
+
+function fromDatetimeLocal(value: string) {
+  const raw = value.trim().replace("T", " ");
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(raw)) return `${raw}:00`;
+  return raw;
+}
 
 const pathMetrics = computed(() => {
   const distM = pathDistance.value?.distance_m;
@@ -147,8 +187,8 @@ const pathMetrics = computed(() => {
 
   const speedKmh = hours > 0 ? km / hours : null;
   const paceSecPerKm = km > 0 && elapsed > 0 ? elapsed / km : null;
-  const pointsPerKm = km > 0 ? points / km : null;
-  const pointsPerHour = hours > 0 ? points / hours : null;
+  const pointsPerKm = isOrient.value ? null : km > 0 ? points / km : null;
+  const pointsPerHour = isOrient.value ? null : hours > 0 ? points / hours : null;
 
   return {
     distanceKm: km,
@@ -162,11 +202,55 @@ const pathMetrics = computed(() => {
 });
 
 const canAddToProtocol = computed(() => {
+  if (isOrient.value) return false;
   const result = details.value?.result;
   if (!result) return false;
   if (result.status === "Нет в протоколе") return true;
   return String(result.diagnostics_json || "").includes("not_in_start_protocol");
 });
+
+const courseProgress = computed(() => {
+  const required = courseControls.value;
+  if (!required.length) return [];
+  const marks = details.value?.corrected_marks ?? [];
+  const start = startCp.value;
+  const finish = finishCp.value;
+  let startIdx = start != null ? marks.findIndex((m) => m.cp_number === start) : 0;
+  if (startIdx < 0) startIdx = 0;
+  let finishIdx = -1;
+  for (let i = marks.length - 1; i > startIdx; i -= 1) {
+    if (marks[i].cp_number === finish) {
+      finishIdx = i;
+      break;
+    }
+  }
+  const end = finishIdx >= 0 ? finishIdx : marks.length - 1;
+  const punches = marks.slice(startIdx, end + 1).map((m) => m.cp_number);
+  const punched = new Set(punches);
+  let i = 0;
+  let firstMiss = true;
+  return required.map((cp) => {
+    while (i < punches.length && punches[i] !== cp) i += 1;
+    const taken = i < punches.length && punches[i] === cp;
+    if (taken) i += 1;
+    const blocker = !taken && firstMiss;
+    if (!taken) firstMiss = false;
+    return { cp, taken, punched: punched.has(cp), blocker };
+  });
+});
+
+const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
+const addableCourseCps = computed(() =>
+  courseProgress.value.filter((item) => !item.taken && !item.punched),
+);
+const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
+
+function courseCpTitle(item: { taken: boolean; punched: boolean; blocker: boolean }) {
+  if (item.taken) return "взято в порядке дистанции";
+  if (item.punched) return "есть отметка, но не в зачёт: предыдущий КП не взят";
+  if (item.blocker) return "не взято — с этого КП дистанция не засчитана";
+  return "не взято";
+}
 
 const addToProtocolDraft = computed<AddToStartProtocolDraft | null>(() => {
   if (!details.value) return null;
@@ -206,12 +290,27 @@ function diffSeconds(prevMarkTime: string, currentMarkTime: string) {
 function diagnosticsText() {
   const diagRaw = details.value?.result?.diagnostics_json;
   if (!diagRaw) return "-";
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(diagRaw);
-    return Array.isArray(parsed) && parsed.length ? parsed.join(", ") : "-";
+    parsed = JSON.parse(diagRaw);
   } catch {
     return diagRaw;
   }
+  if (!Array.isArray(parsed) || !parsed.length) return "-";
+  return parsed.map((item) => diagnosticLabel(String(item))).join(", ");
+}
+
+function diagnosticLabel(code: string) {
+  if (code === "missing_course") return "Нет дистанции";
+  if (code === "course_empty") return "Дистанция без КП";
+  if (code === "course_unknown") return "Дистанция не найдена";
+  if (code === "start_cp_not_configured") return "Не задана стартовая станция";
+  if (code === "no_marks") return "Нет отметок";
+  if (code === "start_missing") return "Нет отметки старта";
+  if (code === "finish_missing") return "Нет отметки финиша";
+  if (code === "course_incomplete") return "Дистанция пройдена не полностью";
+  if (code === "overtime") return "Превышение контрольного времени";
+  return code;
 }
 
 function correctionTypeText(correctionType: string) {
@@ -219,6 +318,7 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "remove_cp") return "Удаление КП";
   if (correctionType === "exclude_leg_time") return "Исключение перегона";
   if (correctionType === "anomaly_day_shift_24h") return "Коррекция аномалии: -24ч";
+  if (correctionType === "set_start_mark") return "Время стартовой отметки";
   if (correctionType === "remap_cp") return "Замена КП (станция)";
   return correctionType;
 }
@@ -244,6 +344,8 @@ function legSourceText(source: string) {
 
 function anomalyTypeText(anomalyType: string) {
   if (anomalyType === "start_time_day_shift") return "Сдвиг даты старта";
+  if (anomalyType === "start_punch_missing") return "Нет отметки старта";
+  if (anomalyType === "start_punch_after_finish") return "Старт позже финиша";
   return anomalyType;
 }
 
@@ -258,8 +360,11 @@ function correctionPayloadText(c: NativeParticipantDetails["corrections"][number
   }
 
   if (c.correction_type === "remove_cp") {
-    const modeText = removeMode === "points_only" ? "только очки" : "очки + перегоны";
     const cpText = Number.isFinite(cp) ? cp : "-";
+    if (removeMode === "from_course") {
+      return `КП ${cpText}: снят с дистанции для всех`;
+    }
+    const modeText = removeMode === "points_only" ? "только очки" : "очки + перегоны";
     return `Номер КП: ${cpText}; действие: ${modeText}`;
   }
 
@@ -272,6 +377,10 @@ function correctionPayloadText(c: NativeParticipantDetails["corrections"][number
   if (c.correction_type === "anomaly_day_shift_24h") {
     const seconds = Number(c.payload?.seconds);
     return `Коррекция времени: -${Number.isFinite(seconds) ? seconds : 86400} сек (-24ч)`;
+  }
+
+  if (c.correction_type === "set_start_mark") {
+    return `Время старта: ${String(c.payload?.mark_time || "-")}`;
   }
 
   if (c.correction_type === "remap_cp") {
@@ -300,6 +409,42 @@ async function loadDetails() {
     details.value = response;
     status.value = `Загружен результат #${resultId}: ${response.participant.name} (id ${response.participant.participant_id})`;
     try {
+      const settings = await invoke<{
+        sport_kind?: string;
+        start_cp?: number | null;
+        finish_cp?: number;
+      }>("get_settings");
+      sportKind.value = settings.sport_kind === "orient" ? "orient" : "rogaine";
+      startCp.value = settings.start_cp ?? null;
+      finishCp.value = Number(settings.finish_cp || 0);
+    } catch {
+      sportKind.value = "rogaine";
+    }
+    courseControls.value = [];
+    if (sportKind.value === "orient") {
+      try {
+        const [courses, corrections] = await Promise.all([
+          invoke<{ id: number; name: string; controls: number[] }[]>("get_courses"),
+          invoke<{ correction_type: string; payload: Record<string, unknown> }[]>(
+            "get_manual_corrections",
+            { participantId: null },
+          ),
+        ]);
+        const removed = new Set(
+          corrections
+            .filter((row) => row.correction_type === "remove_cp")
+            .map((row) => Number(row.payload?.cp_number))
+            .filter((cp) => Number.isFinite(cp)),
+        );
+        const name = String(response.result?.format_name || "").trim();
+        courseControls.value = (courses.find((c) => c.name === name)?.controls ?? []).filter(
+          (cp) => !removed.has(cp),
+        );
+      } catch {
+        courseControls.value = [];
+      }
+    }
+    try {
       pathDistance.value = await invoke<PathDistanceInfo>("get_participant_path_distance", {
         resultId,
       });
@@ -316,7 +461,6 @@ async function loadDetails() {
 async function recalculateAndReload() {
   const bib = details.value?.participant.participant_id?.trim() || "";
   const name = details.value?.result?.name || details.value?.participant.name || "";
-  await invoke("recalculate_results");
   if (bib && name) {
     const newId = await invoke<number | null>("find_result_id", {
       participantId: bib,
@@ -333,8 +477,17 @@ async function recalculateAndReload() {
 async function addPersonalCp() {
   const pid = finishKeyClean.value;
   if (!pid || !addCpNumber.value) {
-    status.value = "Нет связи с финишным дампом или не указан номер КП.";
+    status.value = isOrient.value
+      ? "Выберите КП из дистанции участника."
+      : "Нет связи с финишным дампом или не указан номер КП.";
     return;
+  }
+  if (isOrient.value) {
+    const allowed = addableCourseCps.value.some((item) => item.cp === Number(addCpNumber.value));
+    if (!allowed) {
+      status.value = "Можно добавить только КП дистанции, которого нет в отметках.";
+      return;
+    }
   }
   busy.value = true;
   try {
@@ -342,7 +495,8 @@ async function addPersonalCp() {
       participantId: pid,
       cpNumber: Number(addCpNumber.value),
     });
-    status.value = "Персональная корректировка добавлена. Пересчитываю...";
+    status.value = "Персональная корректировка добавлена, результат пересчитан.";
+    addCpNumber.value = null;
     await recalculateAndReload();
   } catch (error) {
     status.value = `Ошибка add-cp: ${String(error)}`;
@@ -362,10 +516,10 @@ async function removePersonalCp() {
     await invoke("remove_cp_correction", {
       participantId: pid,
       cpNumber: Number(removeCpNumber.value),
-      removeMode: removeMode.value,
+      removeMode: isOrient.value ? "remove_legs" : removeMode.value,
       participantScope: "one",
     });
-    status.value = "Персональная корректировка удаления добавлена. Пересчитываю...";
+    status.value = "Персональная корректировка удаления добавлена, результат пересчитан.";
     await recalculateAndReload();
   } catch (error) {
     status.value = `Ошибка remove-cp: ${String(error)}`;
@@ -381,7 +535,7 @@ async function undoCorrection(correctionId: number, sourceTable: string) {
       sourceTable,
       correctionId,
     });
-    status.value = `Корректировка #${correctionId} отменена. Пересчитываю...`;
+    status.value = `Корректировка #${correctionId} отменена, результат пересчитан.`;
     await recalculateAndReload();
   } catch (error) {
     status.value = `Ошибка отмены корректировки: ${String(error)}`;
@@ -396,7 +550,7 @@ async function applyAnomalyDayShiftCorrection() {
   busy.value = true;
   try {
     await invoke("add_anomaly_day_shift_correction", { participantId: pid });
-    status.value = "Корректировка аномалии (-24ч) добавлена. Пересчитываю...";
+    status.value = "Корректировка аномалии (-24ч) добавлена, результат пересчитан.";
     await recalculateAndReload();
   } catch (error) {
     status.value = `Ошибка корректировки аномалии: ${String(error)}`;
@@ -405,8 +559,37 @@ async function applyAnomalyDayShiftCorrection() {
   }
 }
 
+async function applyStartMarkCorrection() {
+  const pid = finishKeyClean.value;
+  if (!pid) return;
+  const markTime = fromDatetimeLocal(startMarkDraft.value);
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(markTime)) {
+    status.value = "Укажите время стартовой отметки.";
+    return;
+  }
+  busy.value = true;
+  try {
+    await invoke("set_start_mark_correction", {
+      participantId: pid,
+      markTime,
+    });
+    status.value = "Время стартовой отметки сохранено, результат пересчитан.";
+    await recalculateAndReload();
+  } catch (error) {
+    status.value = `Ошибка времени старта: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
 watch(resultIdClean, () => {
   void loadDetails();
+});
+
+watch([startPunchAnomaly, startMarkCorrection], ([anomaly, correction]) => {
+  const fromCorrection = String(correction?.payload?.mark_time || "");
+  const fromAnomaly = String(anomaly?.payload?.suggested_start_time || "");
+  startMarkDraft.value = toDatetimeLocal(fromCorrection || fromAnomaly);
 });
 
 onMounted(() => {
@@ -511,7 +694,7 @@ async function openPathWindow() {
           Добавить в протокол
         </button>
         <button
-          v-if="details?.result"
+          v-if="details?.result && !isOrient"
           type="button"
           :disabled="busy || !details.corrected_marks.length"
           title="Показать путь на карте по взятым КП"
@@ -527,13 +710,48 @@ async function openPathWindow() {
     <section v-if="details" class="native-tools">
       <h2>Персональные корректировки</h2>
       <div class="native-settings">
-        <label>
+        <label v-if="isOrient">
+          Добавить КП
+          <select
+            :value="addCpNumber == null ? '' : String(addCpNumber)"
+            :disabled="busy || !finishKeyClean || !addableCourseCps.length"
+            @change="
+              addCpNumber = ($event.target as HTMLSelectElement).value
+                ? Number(($event.target as HTMLSelectElement).value)
+                : null
+            "
+          >
+            <option value="">КП без отметки</option>
+            <option
+              v-for="item in addableCourseCps"
+              :key="`add-cp-${item.cp}`"
+              :value="String(item.cp)"
+            >
+              {{ item.cp }}
+            </option>
+          </select>
+        </label>
+        <label v-else>
           Добавить КП (номер)
           <input v-model.number="addCpNumber" type="number" min="1" />
         </label>
-        <button :disabled="busy || !finishKeyClean" @click="addPersonalCp">Добавить корректировку</button>
+        <button
+          :disabled="busy || !finishKeyClean || (isOrient && (addCpNumber == null || !addableCourseCps.length))"
+          :title="
+            isOrient
+              ? 'Если станция не сработала, но участник доказал отметку'
+              : undefined
+          "
+          @click="addPersonalCp"
+        >
+          Добавить корректировку
+        </button>
       </div>
-      <div class="native-settings">
+      <p v-if="isOrient" class="subtitle">
+        Добавление КП — если станция не сработала, но участник доказал, что отмечался.
+        В списке только КП этой дистанции без отметки. Снять КП со всех дистанций можно в настройках.
+      </p>
+      <div v-if="!isOrient" class="native-settings">
         <label>
           Удалить КП (номер)
           <input v-model.number="removeCpNumber" type="number" min="1" />
@@ -556,8 +774,16 @@ async function openPathWindow() {
           <tr><th>ID</th><td>{{ details.participant.participant_id }}</td></tr>
           <tr><th>Chip raw id</th><td>{{ details.participant.chip_raw_id || "—" }}</td></tr>
           <tr><th>Имя</th><td>{{ details.participant.name }}</td></tr>
-          <tr><th>Пол</th><td>{{ details.result?.gender?.trim() || "—" }}</td></tr>
-          <tr>
+          <tr v-if="isOrient">
+            <th>Дистанция</th>
+            <td>{{ details.result?.format_name || "—" }}</td>
+          </tr>
+          <tr v-if="isOrient">
+            <th>Место</th>
+            <td>{{ details.result?.place ?? "—" }}</td>
+          </tr>
+          <tr v-if="!isOrient"><th>Пол</th><td>{{ details.result?.gender?.trim() || "—" }}</td></tr>
+          <tr v-if="!isOrient">
             <th>Возраст</th>
             <td>
               {{ details.result?.age != null ? details.result.age : "—" }}
@@ -572,9 +798,45 @@ async function openPathWindow() {
           <tr><th>Старт КП</th><td>{{ details.participant.start_station_id }}</td></tr>
           <tr><th>Старт</th><td>{{ details.participant.start_time }}</td></tr>
           <tr><th>Статус</th><td>{{ details.result?.status ?? "-" }}</td></tr>
-          <tr><th>Сырые очки</th><td>{{ details.result?.points_raw ?? "-" }}</td></tr>
-          <tr><th>Штраф</th><td>{{ details.result?.penalty_points ?? "-" }}</td></tr>
-          <tr><th>Итог</th><td>{{ details.result?.points_final ?? "-" }}</td></tr>
+          <tr v-if="isOrient">
+            <th>КП</th>
+            <td>
+              {{ details.result?.points_raw ?? 0 }}
+              <template v-if="courseControls.length">
+                / {{ courseControls.length }}
+              </template>
+            </td>
+          </tr>
+          <tr v-if="isOrient && courseProgress.length">
+            <th>Порядок дистанции</th>
+            <td class="course-seq-cell">
+              <div class="course-chip-row">
+                <template v-for="(item, idx) in courseProgress" :key="`cp-${idx}-${item.cp}`">
+                  <span
+                    class="course-chip"
+                    :class="{
+                      muted: !item.taken && !item.punched,
+                      'out-of-order': !item.taken && item.punched,
+                      blocker: item.blocker,
+                    }"
+                    :title="courseCpTitle(item)"
+                  >
+                    <span class="course-chip-num">{{ item.cp }}</span>
+                  </span>
+                  <span v-if="idx < courseProgress.length - 1" class="course-seq-arrow">→</span>
+                </template>
+              </div>
+              <p v-if="firstMissedCp != null" class="subtitle">
+                Дистанция оборвалась на КП {{ firstMissedCp }}
+                <template v-if="missingCourseCps.length > 1">
+                  — следующие КП не в зачёт, пока не взят этот.
+                </template>
+              </p>
+            </td>
+          </tr>
+          <tr v-if="!isOrient"><th>Сырые очки</th><td>{{ details.result?.points_raw ?? "-" }}</td></tr>
+          <tr v-if="!isOrient"><th>Штраф</th><td>{{ details.result?.penalty_points ?? "-" }}</td></tr>
+          <tr v-if="!isOrient"><th>Итог</th><td>{{ details.result?.points_final ?? "-" }}</td></tr>
           <tr>
             <th>Время</th>
             <td>{{ details.result ? fmtHms(details.result.elapsed_seconds) : "-" }}</td>
@@ -601,11 +863,11 @@ async function openPathWindow() {
               <th>Темп</th>
               <td>{{ fmtPace(pathMetrics.paceSecPerKm) }}</td>
             </tr>
-            <tr>
+            <tr v-if="pathMetrics && !isOrient">
               <th>Очков на 1 км</th>
               <td>{{ fmtNum(pathMetrics.pointsPerKm, 1) }}</td>
             </tr>
-            <tr>
+            <tr v-if="pathMetrics && !isOrient">
               <th>Очков в час</th>
               <td>{{ fmtNum(pathMetrics.pointsPerHour, 1) }}</td>
             </tr>
@@ -640,7 +902,7 @@ async function openPathWindow() {
                   :disabled="busy"
                   @click="undoCorrection(c.id, c.source_table)"
                 />
-                <span v-else class="subtitle">только на главной</span>
+                <span v-else class="subtitle">{{ isOrient ? "в настройках" : "только на главной" }}</span>
               </td>
             </tr>
           </tbody>
@@ -678,12 +940,50 @@ async function openPathWindow() {
                   :disabled="busy"
                   @click="undoCorrection(anomalyDayShiftCorrection.id, anomalyDayShiftCorrection.source_table)"
                 />
+                <span
+                  v-else-if="
+                    a.anomaly_type === 'start_punch_missing' ||
+                    a.anomaly_type === 'start_punch_after_finish'
+                  "
+                  class="subtitle"
+                >
+                  время ниже
+                </span>
                 <span v-else>-</span>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+      <div v-if="isOrient && startPunchAnomaly" class="native-settings" style="margin-top: 12px">
+        <label>
+          Время стартовой отметки
+          <input
+            v-model="startMarkDraft"
+            type="datetime-local"
+            step="1"
+            :disabled="busy"
+          />
+        </label>
+        <button
+          type="button"
+          :disabled="busy || !finishKeyClean || !startMarkDraft"
+          @click="applyStartMarkCorrection"
+        >
+          {{ startMarkCorrection ? "Сохранить время старта" : "Поставить отметку старта" }}
+        </button>
+        <IconActionButton
+          v-if="startMarkCorrection"
+          variant="undo"
+          label="Отменить время старта"
+          :disabled="busy"
+          @click="undoCorrection(startMarkCorrection.id, startMarkCorrection.source_table)"
+        />
+      </div>
+      <p v-if="isOrient && startPunchAnomaly" class="subtitle">
+        По умолчанию: время первого КП минус худший перегон «старт → этот КП» среди остальных
+        участников. Можно поправить вручную.
+      </p>
     </section>
 
     <section v-if="details" class="native-tools nested-card">
@@ -764,7 +1064,7 @@ async function openPathWindow() {
       </section>
     </div>
 
-    <section v-if="details" class="native-tools nested-card">
+    <section v-if="details && !isOrient" class="native-tools nested-card">
       <h3>Исключенные перегоны</h3>
       <div class="native-results-wrap">
         <table class="native-results">

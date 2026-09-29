@@ -204,7 +204,6 @@ async function applyOne(s: CpRemapSuggestion) {
         },
       ],
     });
-    await invoke("recalculate_results");
     status.value =
       `${s.participant_id} ${s.name}: ${s.from_cp}→${s.to_cp} — добавлено ${result.inserted}, уже было ${result.skipped_existing}, ошибок ${result.failed}.`;
     await analyze();
@@ -232,7 +231,6 @@ async function applySelected() {
     const result = await invoke<CpRemapApplySummary>("apply_cp_remap_corrections", {
       items,
     });
-    await invoke("recalculate_results");
     status.value =
       `Замены применены: добавлено ${result.inserted}, уже было ${result.skipped_existing}, ошибок ${result.failed}.`;
     await analyze();

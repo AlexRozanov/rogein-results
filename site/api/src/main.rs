@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -17,7 +17,12 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use crate::models::{AwardGroupPublic, EventDetail, EventListItem, EventRow, ParticipantPublic, ResultPublic};
+use chrono::NaiveDate;
+use serde::Deserialize;
+use crate::models::{
+    AwardGroupPublic, EventDetail, EventListItem, EventListPage, EventRow, ParticipantPublic,
+    ResultPublic, UpcomingListItem,
+};
 use crate::publish::{publish_event, publish_map, PublishPayload};
 
 #[derive(Clone)]
@@ -67,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/events", get(list_events))
+        .route("/api/upcoming", get(list_upcoming))
         .route("/api/events/{slug}", get(get_event).put(put_event))
         .route("/api/events/{slug}/map", put(put_event_map))
         .route(
@@ -112,10 +118,67 @@ fn check_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode,
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct EventListQuery {
+    kind: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+fn sport_kind_filter(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim) {
+        Some("orient") => Some("orient".into()),
+        Some("rogaine") => Some("rogaine".into()),
+        _ => None,
+    }
+}
+
+fn parse_date_param(
+    raw: Option<&str>,
+    name: &str,
+) -> Result<Option<NaiveDate>, (StatusCode, String)> {
+    let Some(value) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map(Some).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid {name}, expected YYYY-MM-DD"),
+        )
+    })
+}
+
 async fn list_events(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<EventListItem>>, (StatusCode, String)> {
-    let rows = sqlx::query_as::<_, EventListItem>(
+    Query(query): Query<EventListQuery>,
+) -> Result<Json<EventListPage>, (StatusCode, String)> {
+    let kind = sport_kind_filter(query.kind.as_deref());
+    let from = parse_date_param(query.from.as_deref(), "from")?;
+    let to = parse_date_param(query.to.as_deref(), "to")?;
+    let per_page = query.per_page.unwrap_or(20).clamp(1, 50);
+    let page = query.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * per_page;
+
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM events e
+        WHERE status = 'published'
+          AND ($1::text IS NULL OR sport_kind = $1)
+          AND ($2::date IS NULL OR competition_date >= $2)
+          AND ($3::date IS NULL OR competition_date <= $3)
+        "#,
+    )
+    .bind(&kind)
+    .bind(from)
+    .bind(to)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    let items = sqlx::query_as::<_, EventListItem>(
         r#"
         SELECT
             slug,
@@ -123,10 +186,44 @@ async fn list_events(
             competition_date,
             status,
             published_at,
+            sport_kind,
             (SELECT COUNT(*) FROM participants p WHERE p.event_id = e.id) AS participant_count
         FROM events e
         WHERE status = 'published'
+          AND ($1::text IS NULL OR sport_kind = $1)
+          AND ($2::date IS NULL OR competition_date >= $2)
+          AND ($3::date IS NULL OR competition_date <= $3)
         ORDER BY competition_date DESC NULLS LAST, published_at DESC
+        LIMIT $4 OFFSET $5
+        "#,
+    )
+    .bind(&kind)
+    .bind(from)
+    .bind(to)
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    Ok(Json(EventListPage {
+        items,
+        total,
+        page,
+        per_page,
+    }))
+}
+
+async fn list_upcoming(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<UpcomingListItem>>, (StatusCode, String)> {
+    let rows = sqlx::query_as::<_, UpcomingListItem>(
+        r#"
+        SELECT slug, title, competition_date, sport_kind, status, summary
+        FROM upcoming_events
+        WHERE status = 'announced'
+          AND published_event_id IS NULL
+        ORDER BY competition_date ASC NULLS LAST, created_at ASC
         "#,
     )
     .fetch_all(&state.pool)
@@ -267,7 +364,7 @@ async fn put_event_map(
 async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDetail>, sqlx::Error> {
     let event = sqlx::query_as::<_, EventRow>(
         r#"
-        SELECT id, slug, title, competition_date, status, published_at,
+        SELECT id, slug, title, competition_date, sport_kind, status, published_at,
                map_file_name, map_mime, map_width, map_height, map_points, meters_per_pixel
         FROM events WHERE slug = $1
         "#,
@@ -329,6 +426,7 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
         slug: event.slug,
         title: event.title,
         competition_date: event.competition_date,
+        sport_kind: event.sport_kind,
         status: event.status,
         published_at: event.published_at,
         map_url,

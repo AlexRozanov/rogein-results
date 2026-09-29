@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type ImportExistingKind = "finish" | "start" | "legends";
+export type ImportExistingKind = "finish" | "start" | "legends" | "courses";
 
 const props = defineProps<{
   open: boolean;
@@ -19,6 +19,7 @@ const title = {
   finish: "Финишный протокол уже загружен",
   start: "Стартовый протокол уже загружен",
   legends: "Легенды КП уже загружены",
+  courses: "Дистанции уже загружены",
 } as const;
 
 const mergeHint = {
@@ -26,12 +27,14 @@ const mergeHint = {
   start: "Добавить только новых участников. Существующие не изменяются.",
   legends:
     "Добавить новые КП по номеру; для уже существующих обновить название и тип.",
+  courses: "Обновить дистанции с совпадающим названием и добавить новые.",
 } as const;
 
 const replaceHint = {
   finish: "Удалить текущий финишный дамп и загрузить файл заново.",
   start: "Удалить текущий стартовый протокол и загрузить файл заново.",
   legends: "Удалить текущие легенды КП и загрузить файл заново.",
+  courses: "Удалить текущие дистанции и загрузить файл заново.",
 } as const;
 </script>
 

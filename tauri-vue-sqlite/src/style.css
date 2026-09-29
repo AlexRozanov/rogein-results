@@ -216,6 +216,40 @@ button:disabled {
   align-items: center;
 }
 
+.sport-kind-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  margin: 8px 0 4px;
+}
+
+.sport-kind-btn {
+  flex: 1 1 180px;
+  min-height: 44px;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.sport-kind-btn:hover:not(:disabled) {
+  border-color: #93c5fd;
+}
+
+.sport-kind-btn.active {
+  border-color: #93c5fd;
+  background: #1e3a5f;
+}
+
+.sport-kind-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .native-settings label {
   display: flex;
   align-items: center;
@@ -603,6 +637,13 @@ select.row-edit-input option {
   padding-left: 0 !important;
   padding-right: 0 !important;
   vertical-align: stretch;
+}
+
+.place-col {
+  width: 4.2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .team-brace {
@@ -1352,9 +1393,8 @@ h3 {
   pointer-events: none;
 }
 
+.cp-marker,
 .course-map-marker {
-  position: absolute;
-  transform: translate(-50%, -50%);
   min-width: 28px;
   height: 28px;
   padding: 0 6px;
@@ -1365,9 +1405,22 @@ h3 {
   font-size: 12px;
   font-weight: 700;
   line-height: 24px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+button.cp-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: text;
+}
+
+.course-map-marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
   cursor: grab;
   z-index: 2;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 
 .course-map-marker.special {
@@ -1513,6 +1566,132 @@ button.active {
 
 .muted {
   opacity: 0.55;
+}
+
+.course-table td.course-seq-cell {
+  white-space: normal;
+  min-width: 280px;
+}
+
+.course-name-input {
+  width: 5.5rem;
+  box-sizing: border-box;
+}
+
+.legend-cp-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.course-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0;
+  align-items: center;
+}
+
+.course-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  min-height: 28px;
+  cursor: grab;
+  user-select: none;
+}
+
+.course-chip.dragging {
+  opacity: 0.35;
+}
+
+.course-chip-num {
+  border: none;
+  background: transparent;
+  color: #e2e8f0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  padding: 0 2px;
+  cursor: text;
+}
+
+.course-chip.muted .course-chip-num {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.course-chip.out-of-order .course-chip-num {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.course-chip.blocker .course-chip-num {
+  color: #f87171;
+  font-weight: 700;
+}
+
+.course-chip.voided .course-chip-num {
+  color: #64748b;
+  font-weight: 500;
+  text-decoration: line-through;
+}
+
+.course-seq-arrow {
+  color: #64748b;
+  padding: 0 6px;
+  font-size: 13px;
+  user-select: none;
+  line-height: 1;
+}
+
+.course-seq-arrow.active {
+  color: #38bdf8;
+}
+
+.course-drop-caret {
+  width: 0;
+  align-self: stretch;
+  min-height: 22px;
+  border-radius: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.course-drop-caret.active {
+  width: 4px;
+  margin: 0 3px;
+  background: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.28);
+}
+
+.course-chip-x {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  line-height: 1;
+  font-size: 16px;
+}
+
+.course-chip-x:hover:not(:disabled) {
+  background: #334155;
+  color: #fecaca;
+}
+
+.course-chip-edit,
+.course-add-input {
+  width: 4.2rem;
+  box-sizing: border-box;
+}
+
+.course-chip-edit {
+  width: 3.4rem;
 }
 
 @media (max-width: 900px) {
