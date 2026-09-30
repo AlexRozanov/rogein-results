@@ -40,6 +40,7 @@ pub struct AwardGroupPublic {
     pub gender_mode: String,
     pub min_age: Option<i32>,
     pub sort_order: i32,
+    pub course_cps: JsonValue,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -60,6 +61,7 @@ pub struct ResultPublic {
     pub points_final: i32,
     pub elapsed_seconds: i32,
     pub status: String,
+    pub diagnostics: JsonValue,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -96,6 +98,8 @@ pub struct EventDetail {
     pub map_height: Option<i32>,
     pub meters_per_pixel: Option<f64>,
     pub map_points: JsonValue,
+    pub start_cp: Option<i32>,
+    pub finish_cp: Option<i32>,
     pub award_groups: Vec<AwardGroupPublic>,
     pub results: Vec<ResultPublic>,
 }
@@ -115,6 +119,8 @@ pub struct EventRow {
     pub map_height: Option<i32>,
     pub map_points: JsonValue,
     pub meters_per_pixel: Option<f64>,
+    pub start_cp: Option<i32>,
+    pub finish_cp: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +139,8 @@ pub struct PublishAwardGroup {
     pub gender_mode: Option<String>,
     pub min_age: Option<i32>,
     pub sort_order: Option<i32>,
+    #[serde(default)]
+    pub course_cps: Vec<i32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -189,4 +197,6 @@ pub struct PublishResult {
     pub points_final: Option<i32>,
     pub elapsed_seconds: Option<i32>,
     pub status: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
 }

@@ -46,6 +46,12 @@ const navBarRef = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 let navResizeObserver: ResizeObserver | null = null;
 
+const isOrient = computed(() => event.value?.sport_kind === "orient");
+const groupNavLabel = computed(() => (isOrient.value ? "Дистанции" : "Наградные группы"));
+const groupNavAllLabel = computed(() => (isOrient.value ? "Все дистанции" : "Все группы"));
+const emptyGroupText = computed(() =>
+  isOrient.value ? "На этой дистанции пока нет результатов" : "В этой группе пока нет результатов",
+);
 const groupedResults = computed(() => {
   if (!event.value) return [];
   return event.value.award_groups.map((group) => ({
@@ -195,7 +201,7 @@ onBeforeUnmount(() => {
       ref="navRef"
       class="group-nav"
       :class="{ 'is-open': navOpen }"
-      aria-label="Наградные группы"
+      :aria-label="groupNavLabel"
     >
       <button
         ref="navBarRef"
@@ -205,7 +211,7 @@ onBeforeUnmount(() => {
         aria-controls="group-nav-panel"
         @click="toggleNav"
       >
-        <span>Все группы</span>
+        <span>{{ groupNavAllLabel }}</span>
         <svg class="group-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
           <path
             d="M5 7.5 10 12.5 15 7.5"
@@ -241,28 +247,28 @@ onBeforeUnmount(() => {
     >
       <h2>{{ block.group.name }}</h2>
       <div class="card table-wrap">
-        <table class="results-table">
+        <table class="results-table" :class="{ compact: isOrient }">
           <thead>
             <tr>
               <th>Место</th>
-              <th>Номер</th>
-              <th>Имя</th>
-              <th>Пол</th>
-              <th>Возраст</th>
-              <th>Очки</th>
-              <th>Штраф</th>
-              <th>Итог</th>
+              <th v-if="!isOrient">Номер</th>
+              <th class="col-name">Имя</th>
+              <th v-if="!isOrient">Пол</th>
+              <th v-if="!isOrient">Возраст</th>
+              <th v-if="!isOrient">Очки</th>
+              <th v-if="!isOrient">Штраф</th>
+              <th v-if="!isOrient">Итог</th>
               <th>Время</th>
               <th>Статус</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!block.rows.length">
-              <td colspan="10">В этой группе пока нет результатов</td>
+              <td :colspan="isOrient ? 4 : 10">{{ emptyGroupText }}</td>
             </tr>
             <tr v-for="row in block.rows" :key="row.participant_source_id">
               <td>{{ row.place ?? "—" }}</td>
-              <td>
+              <td v-if="!isOrient">
                 <router-link
                   class="bib"
                   :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
@@ -270,12 +276,19 @@ onBeforeUnmount(() => {
                   {{ row.bib }}
                 </router-link>
               </td>
-              <td>{{ row.name }}</td>
-              <td>{{ row.gender || "—" }}</td>
-              <td>{{ row.age ?? "—" }}</td>
-              <td>{{ row.points_raw }}</td>
-              <td>{{ row.penalty_points }}</td>
-              <td>{{ row.points_final }}</td>
+              <td class="col-name">
+                <router-link
+                  class="bib"
+                  :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
+                >
+                  {{ row.name }}
+                </router-link>
+              </td>
+              <td v-if="!isOrient">{{ row.gender || "—" }}</td>
+              <td v-if="!isOrient">{{ row.age ?? "—" }}</td>
+              <td v-if="!isOrient">{{ row.points_raw }}</td>
+              <td v-if="!isOrient">{{ row.penalty_points }}</td>
+              <td v-if="!isOrient">{{ row.points_final }}</td>
               <td>{{ fmtHms(row.elapsed_seconds) }}</td>
               <td>{{ row.status }}</td>
             </tr>

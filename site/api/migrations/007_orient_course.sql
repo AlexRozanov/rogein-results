@@ -1,0 +1,11 @@
+ALTER TABLE award_groups
+    ADD COLUMN IF NOT EXISTS course_cps JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE results
+    ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS start_cp INTEGER NULL;
+
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS finish_cp INTEGER NULL;

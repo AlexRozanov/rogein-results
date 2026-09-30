@@ -365,7 +365,8 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
     let event = sqlx::query_as::<_, EventRow>(
         r#"
         SELECT id, slug, title, competition_date, sport_kind, status, published_at,
-               map_file_name, map_mime, map_width, map_height, map_points, meters_per_pixel
+               map_file_name, map_mime, map_width, map_height, map_points, meters_per_pixel,
+               start_cp, finish_cp
         FROM events WHERE slug = $1
         "#,
     )
@@ -378,7 +379,7 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
 
     let groups = sqlx::query_as::<_, AwardGroupPublic>(
         r#"
-        SELECT id, source_id, name, gender_mode, min_age, sort_order
+        SELECT id, source_id, name, gender_mode, min_age, sort_order, course_cps
         FROM award_groups
         WHERE event_id = $1
         ORDER BY sort_order ASC, name ASC
@@ -406,7 +407,8 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
             r.penalty_points,
             r.points_final,
             r.elapsed_seconds,
-            r.status
+            r.status,
+            r.diagnostics
         FROM results r
         JOIN participants p ON p.id = r.participant_id
         WHERE r.event_id = $1
@@ -435,6 +437,8 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
         map_height: event.map_height,
         meters_per_pixel: event.meters_per_pixel,
         map_points: event.map_points,
+        start_cp: event.start_cp,
+        finish_cp: event.finish_cp,
         award_groups: groups,
         results,
     }))
