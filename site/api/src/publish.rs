@@ -21,6 +21,10 @@ pub struct PublishPayload {
     pub meters_per_pixel: Option<f64>,
     #[serde(default = "default_sport_kind")]
     pub sport_kind: String,
+    #[serde(default)]
+    pub start_cp: Option<i32>,
+    #[serde(default)]
+    pub finish_cp: Option<i32>,
 }
 
 fn default_sport_kind() -> String {
@@ -58,8 +62,8 @@ pub async fn publish_event(
     let map_points = serde_json::to_value(&payload.map_points)?;
     let event_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind)
-        VALUES ($1, $2, $3, 'published', $4, $5, $6)
+        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind, start_cp, finish_cp)
+        VALUES ($1, $2, $3, 'published', $4, $5, $6, $7, $8)
         RETURNING id
         "#,
     )
@@ -69,6 +73,8 @@ pub async fn publish_event(
     .bind(map_points)
     .bind(payload.meters_per_pixel)
     .bind(normalize_sport_kind(&payload.sport_kind))
+    .bind(payload.start_cp)
+    .bind(payload.finish_cp)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -78,10 +84,11 @@ pub async fn publish_event(
             bail!("award group source_id must be positive");
         }
         let gender = group.gender_mode.as_deref().unwrap_or("any");
+        let course_cps = serde_json::to_value(&group.course_cps)?;
         let id: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO award_groups (event_id, source_id, name, gender_mode, min_age, sort_order)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO award_groups (event_id, source_id, name, gender_mode, min_age, sort_order, course_cps)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id
             "#,
         )
@@ -91,6 +98,7 @@ pub async fn publish_event(
         .bind(gender)
         .bind(group.min_age)
         .bind(group.sort_order.unwrap_or(idx as i32))
+        .bind(course_cps)
         .fetch_one(&mut *tx)
         .await?;
         group_ids.insert(group.source_id, id);
@@ -106,12 +114,13 @@ pub async fn publish_event(
         }
         let marks = serde_json::to_value(person.marks.as_deref().unwrap_or(&[]))?;
         let path = serde_json::to_value(person.path.as_deref().unwrap_or(&[]))?;
+        let added_cps = serde_json::to_value(&person.added_cps)?;
         let id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO participants (
                 event_id, source_id, bib, chip_physical, chip_logical, name,
-                gender, birth_date, age, team_id, format_name, marks, path, distance_m
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                gender, birth_date, age, team_id, format_name, marks, path, distance_m, added_cps
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             RETURNING id
             "#,
         )
@@ -129,6 +138,7 @@ pub async fn publish_event(
         .bind(marks)
         .bind(path)
         .bind(person.distance_m)
+        .bind(added_cps)
         .fetch_one(&mut *tx)
         .await?;
         participant_ids.insert(person.source_id, id);
@@ -153,12 +163,13 @@ pub async fn publish_event(
                     row.award_group_source_id
                 )
             })?;
+        let diagnostics = serde_json::to_value(&row.diagnostics)?;
         sqlx::query(
             r#"
             INSERT INTO results (
                 event_id, participant_id, award_group_id, place,
-                points_raw, penalty_points, points_final, elapsed_seconds, status
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                points_raw, penalty_points, points_final, elapsed_seconds, status, diagnostics
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             "#,
         )
         .bind(event_id)
@@ -170,6 +181,7 @@ pub async fn publish_event(
         .bind(row.points_final.unwrap_or(0))
         .bind(row.elapsed_seconds.unwrap_or(0))
         .bind(row.status.as_deref().unwrap_or("OK"))
+        .bind(diagnostics)
         .execute(&mut *tx)
         .await?;
     }

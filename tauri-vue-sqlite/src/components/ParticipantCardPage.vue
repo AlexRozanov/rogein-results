@@ -24,6 +24,7 @@ type NativeParticipantDetails = {
     start_station_id: number;
     start_time: string;
     source_row: number | null;
+    course_name?: string;
   };
   result: {
     id: number;
@@ -139,6 +140,17 @@ const startMarkCorrection = computed(() =>
     (c) => c.scope === "personal" && c.correction_type === "set_start_mark",
   ) ?? null,
 );
+const originalCourse = computed(() =>
+  String(details.value?.participant.course_name || "").trim(),
+);
+const effectiveCourse = computed(() =>
+  String(details.value?.result?.format_name || "").trim(),
+);
+const courseReassigned = computed(() => {
+  const orig = originalCourse.value.toLowerCase();
+  const eff = effectiveCourse.value.toLowerCase();
+  return Boolean(orig && eff && orig !== eff);
+});
 const startPunchAnomaly = computed(() => {
   const list = [
     ...(details.value?.anomalies ?? []),
@@ -153,6 +165,8 @@ const startPunchAnomaly = computed(() => {
   );
 });
 const startMarkDraft = ref("");
+const courseList = ref<{ id: number; name: string; controls: number[] }[]>([]);
+const courseDraft = ref("");
 
 function toDatetimeLocal(sql: string) {
   const raw = String(sql || "").trim();
@@ -209,6 +223,17 @@ const canAddToProtocol = computed(() => {
   return String(result.diagnostics_json || "").includes("not_in_start_protocol");
 });
 
+const addCpCounts = computed(() => {
+  const remaining = new Map<number, number>();
+  for (const c of details.value?.corrections ?? []) {
+    if (c.correction_type !== "add_cp") continue;
+    const cp = Number(c.payload?.cp_number);
+    if (!Number.isFinite(cp)) continue;
+    remaining.set(cp, (remaining.get(cp) ?? 0) + 1);
+  }
+  return remaining;
+});
+
 const courseProgress = computed(() => {
   const required = courseControls.value;
   if (!required.length) return [];
@@ -227,25 +252,41 @@ const courseProgress = computed(() => {
   const end = finishIdx >= 0 ? finishIdx : marks.length - 1;
   const punches = marks.slice(startIdx, end + 1).map((m) => m.cp_number);
   const punched = new Set(punches);
+  const remaining = new Map(addCpCounts.value);
   let i = 0;
   let firstMiss = true;
   return required.map((cp) => {
-    while (i < punches.length && punches[i] !== cp) i += 1;
-    const taken = i < punches.length && punches[i] === cp;
-    if (taken) i += 1;
+    let q = i;
+    while (q < punches.length && punches[q] !== cp) q += 1;
+    let taken = false;
+    let added = false;
+    if (q < punches.length && punches[q] === cp) {
+      taken = true;
+      i = q + 1;
+    } else if ((remaining.get(cp) ?? 0) > 0) {
+      remaining.set(cp, (remaining.get(cp) ?? 1) - 1);
+      taken = true;
+      added = true;
+    }
     const blocker = !taken && firstMiss;
     if (!taken) firstMiss = false;
-    return { cp, taken, punched: punched.has(cp), blocker };
+    return { cp, taken, punched: punched.has(cp), added, blocker };
   });
 });
 
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
-const addableCourseCps = computed(() =>
-  courseProgress.value.filter((item) => !item.taken && !item.punched),
-);
+const addableCourseCps = computed(() => {
+  const remaining = new Map<number, number>();
+  for (const item of courseProgress.value) {
+    if (item.taken) continue;
+    remaining.set(item.cp, (remaining.get(item.cp) ?? 0) + 1);
+  }
+  return [...remaining.entries()].map(([cp, count]) => ({ cp, count }));
+});
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
 
-function courseCpTitle(item: { taken: boolean; punched: boolean; blocker: boolean }) {
+function courseCpTitle(item: { taken: boolean; punched: boolean; added?: boolean; blocker: boolean }) {
+  if (item.added) return "взято корректировкой «Добавить КП», без времени чипа";
   if (item.taken) return "взято в порядке дистанции";
   if (item.punched) return "есть отметка, но не в зачёт: предыдущий КП не взят";
   if (item.blocker) return "не взято — с этого КП дистанция не засчитана";
@@ -320,6 +361,7 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "anomaly_day_shift_24h") return "Коррекция аномалии: -24ч";
   if (correctionType === "set_start_mark") return "Время стартовой отметки";
   if (correctionType === "remap_cp") return "Замена КП (станция)";
+  if (correctionType === "assign_course") return "Смена дистанции";
   return correctionType;
 }
 
@@ -390,6 +432,12 @@ function correctionPayloadText(c: NativeParticipantDetails["corrections"][number
     return `Замена: ${fromText} → ${toText} @ ${when}`;
   }
 
+  if (c.correction_type === "assign_course") {
+    const fromCourse = String(c.payload?.from || "").trim() || "—";
+    const toCourse = String(c.payload?.to || "").trim() || "—";
+    return `${fromCourse} → ${toCourse}`;
+  }
+
   return JSON.stringify(c.payload);
 }
 
@@ -430,6 +478,7 @@ async function loadDetails() {
             { participantId: null },
           ),
         ]);
+        courseList.value = courses;
         const removed = new Set(
           corrections
             .filter((row) => row.correction_type === "remove_cp")
@@ -437,6 +486,7 @@ async function loadDetails() {
             .filter((cp) => Number.isFinite(cp)),
         );
         const name = String(response.result?.format_name || "").trim();
+        courseDraft.value = name;
         courseControls.value = (courses.find((c) => c.name === name)?.controls ?? []).filter(
           (cp) => !removed.has(cp),
         );
@@ -474,6 +524,31 @@ async function recalculateAndReload() {
   await loadDetails();
 }
 
+async function assignCourse() {
+  const pid = finishKeyClean.value;
+  const next = courseDraft.value.trim();
+  if (!pid || !next) {
+    status.value = "Выберите дистанцию.";
+    return;
+  }
+  busy.value = true;
+  try {
+    await invoke("assign_course_correction", {
+      participantId: pid,
+      courseName: next,
+    });
+    status.value =
+      next.toLowerCase() === originalCourse.value.toLowerCase()
+        ? "Дистанция как в файле, результат пересчитан."
+        : `Дистанция «${next}», результат пересчитан.`;
+    await recalculateAndReload();
+  } catch (error) {
+    status.value = `Ошибка смены дистанции: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function addPersonalCp() {
   const pid = finishKeyClean.value;
   if (!pid || !addCpNumber.value) {
@@ -485,19 +560,22 @@ async function addPersonalCp() {
   if (isOrient.value) {
     const allowed = addableCourseCps.value.some((item) => item.cp === Number(addCpNumber.value));
     if (!allowed) {
-      status.value = "Можно добавить только КП дистанции, которого нет в отметках.";
+      status.value = "Можно добавить только КП дистанции, который ещё не взят нужное число раз.";
       return;
     }
   }
   busy.value = true;
   try {
+    const addedCp = Number(addCpNumber.value);
     await invoke("add_cp_correction", {
       participantId: pid,
-      cpNumber: Number(addCpNumber.value),
+      cpNumber: addedCp,
     });
     status.value = "Персональная корректировка добавлена, результат пересчитан.";
-    addCpNumber.value = null;
     await recalculateAndReload();
+    addCpNumber.value = addableCourseCps.value.some((item) => item.cp === addedCp)
+      ? addedCp
+      : null;
   } catch (error) {
     status.value = `Ошибка add-cp: ${String(error)}`;
   } finally {
@@ -727,7 +805,7 @@ async function openPathWindow() {
               :key="`add-cp-${item.cp}`"
               :value="String(item.cp)"
             >
-              {{ item.cp }}
+              {{ item.cp }}<template v-if="item.count > 1"> (ещё {{ item.count }})</template>
             </option>
           </select>
         </label>
@@ -749,7 +827,27 @@ async function openPathWindow() {
       </div>
       <p v-if="isOrient" class="subtitle">
         Добавление КП — если станция не сработала, но участник доказал, что отмечался.
-        В списке только КП этой дистанции без отметки. Снять КП со всех дистанций можно в настройках.
+        Время на чип не пишется: результат и исключения перегонов считаются только между реальными отметками.
+        Повторяющийся номер можно добавить столько раз, сколько он есть на дистанции и ещё не взят.
+      </p>
+      <div v-if="isOrient" class="native-settings" style="margin-top: 12px">
+        <label>
+          Считать по дистанции
+          <select v-model="courseDraft" :disabled="busy || !finishKeyClean">
+            <option v-if="!courseList.length" value="">Нет дистанций</option>
+            <option v-for="c in courseList" :key="c.id" :value="c.name">{{ c.name }}</option>
+          </select>
+        </label>
+        <button
+          :disabled="busy || !finishKeyClean || !courseDraft || courseDraft === effectiveCourse"
+          @click="assignCourse"
+        >
+          Применить
+        </button>
+      </div>
+      <p v-if="isOrient" class="subtitle">
+        Меняет зачёт этого финиша, не заявку в стартовом протоколе.
+        Если у этого номера уже есть другой финиш на выбранной дистанции, правка не сохранится.
       </p>
       <div v-if="!isOrient" class="native-settings">
         <label>
@@ -776,7 +874,12 @@ async function openPathWindow() {
           <tr><th>Имя</th><td>{{ details.participant.name }}</td></tr>
           <tr v-if="isOrient">
             <th>Дистанция</th>
-            <td>{{ details.result?.format_name || "—" }}</td>
+            <td>
+              {{ details.result?.format_name || "—" }}
+              <span v-if="courseReassigned" class="subtitle">
+                в файле: {{ originalCourse }}
+              </span>
+            </td>
           </tr>
           <tr v-if="isOrient">
             <th>Место</th>
@@ -817,6 +920,7 @@ async function openPathWindow() {
                     :class="{
                       muted: !item.taken && !item.punched,
                       'out-of-order': !item.taken && item.punched,
+                      added: item.added,
                       blocker: item.blocker,
                     }"
                     :title="courseCpTitle(item)"
@@ -1017,6 +1121,9 @@ async function openPathWindow() {
     <div v-if="details" class="participant-grid two-col">
       <section class="native-tools nested-card">
         <h3>Использованные отметки (после корректировок)</h3>
+        <p v-if="isOrient" class="subtitle">
+          Время и перегоны — только по отметкам чипа. КП из «Добавить КП» в эту таблицу не попадают.
+        </p>
         <div class="native-results-wrap">
           <table class="native-results">
           <thead>

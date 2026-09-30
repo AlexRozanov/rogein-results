@@ -425,7 +425,11 @@ th, td {
 
 th { color: #64748b; font-weight: 600; }
 
-.results-table td:nth-child(3) {
+.results-table.compact {
+  min-width: 0;
+}
+
+.results-table .col-name {
   white-space: normal;
   min-width: 10rem;
 }
@@ -544,11 +548,70 @@ th { color: #64748b; font-weight: 600; }
   color: #64748b;
 }
 
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+.stat-grid.is-single {
+  grid-template-columns: minmax(0, 16rem);
+}
+
+.course-error {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  padding: 12px 14px;
   margin-bottom: 16px;
+}
+
+.course-error h2 {
+  margin: 0 0 8px;
+  color: #9a3412;
+  font-size: 1rem;
+}
+
+.course-error-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: #9a3412;
+}
+
+.course-error-list li + li {
+  margin-top: 4px;
+}
+
+.course-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.course-chip-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  padding: 0 2px;
+  color: #166534;
+}
+
+.course-chip.muted .course-chip-num {
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.course-chip.out-of-order .course-chip-num {
+  color: #d97706;
+}
+
+.course-chip.added .course-chip-num {
+  color: #0369a1;
+  font-style: italic;
+}
+
+.course-chip.blocker .course-chip-num {
+  color: #dc2626;
+}
+
+.course-seq-arrow {
+  color: #94a3b8;
+  padding: 0 6px;
 }
 
 .stat {
@@ -812,24 +875,24 @@ th { color: #64748b; font-weight: 600; }
     min-width: 0;
   }
 
-  .person-main {
+  .person-main:not(.is-simple) {
     grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
     align-items: stretch;
     min-height: calc(100dvh - 16rem);
   }
 
-  .person-main .marks-list {
+  .person-main:not(.is-simple) .marks-list {
     column-count: 1;
   }
 
-  .person-marks {
+  .person-main:not(.is-simple) .person-marks {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
 
-  .person-marks .marks-card {
+  .person-main:not(.is-simple) .person-marks .marks-card {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
