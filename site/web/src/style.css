@@ -425,7 +425,11 @@ th, td {
 
 th { color: #64748b; font-weight: 600; }
 
-.results-table td:nth-child(3) {
+.results-table.compact {
+  min-width: 0;
+}
+
+.results-table .col-name {
   white-space: normal;
   min-width: 10rem;
 }
@@ -551,6 +555,10 @@ th { color: #64748b; font-weight: 600; }
   margin-bottom: 16px;
 }
 
+.stat-grid.is-single {
+  grid-template-columns: minmax(0, 16rem);
+}
+
 .stat {
   background: #fff;
   border: 1px solid var(--line);
@@ -612,6 +620,73 @@ th { color: #64748b; font-weight: 600; }
 .mark-seq { color: #94a3b8; }
 .mark-cp { font-weight: 600; }
 .mark-time { color: #334155; }
+
+.mark-row.is-wrong {
+  color: #b91c1c;
+}
+
+.mark-row.is-wrong .mark-seq,
+.mark-row.is-wrong .mark-cp,
+.mark-row.is-wrong .mark-time {
+  color: #b91c1c;
+}
+
+.course-error {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.course-error h2 {
+  margin: 0 0 8px;
+  color: #9a3412;
+  font-size: 1rem;
+}
+
+.course-error-diag,
+.course-error-break {
+  margin: 0;
+  color: #9a3412;
+}
+
+.course-error-break {
+  margin-top: 8px;
+}
+
+.course-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.course-chip-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  padding: 0 2px;
+  color: #166534;
+}
+
+.course-chip.muted .course-chip-num {
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.course-chip.out-of-order .course-chip-num {
+  color: #d97706;
+}
+
+.course-chip.blocker .course-chip-num {
+  color: #dc2626;
+}
+
+.course-seq-arrow {
+  color: #94a3b8;
+  padding: 0 6px;
+}
 
 .meta {
   display: grid;
@@ -812,24 +887,24 @@ th { color: #64748b; font-weight: 600; }
     min-width: 0;
   }
 
-  .person-main {
+  .person-main:not(.is-simple) {
     grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
     align-items: stretch;
     min-height: calc(100dvh - 16rem);
   }
 
-  .person-main .marks-list {
+  .person-main:not(.is-simple) .marks-list {
     column-count: 1;
   }
 
-  .person-marks {
+  .person-main:not(.is-simple) .person-marks {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
 
-  .person-marks .marks-card {
+  .person-main:not(.is-simple) .person-marks .marks-card {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
