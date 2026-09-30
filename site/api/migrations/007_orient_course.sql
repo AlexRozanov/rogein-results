@@ -4,6 +4,9 @@ ALTER TABLE award_groups
 ALTER TABLE results
     ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+ALTER TABLE participants
+    ADD COLUMN IF NOT EXISTS added_cps JSONB NOT NULL DEFAULT '{}'::jsonb;
+
 ALTER TABLE events
     ADD COLUMN IF NOT EXISTS start_cp INTEGER NULL;
 
