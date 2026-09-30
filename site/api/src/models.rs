@@ -80,6 +80,7 @@ pub struct ParticipantPublic {
     pub marks: JsonValue,
     pub path: JsonValue,
     pub distance_m: Option<f64>,
+    pub added_cps: JsonValue,
     pub points_final: Option<i32>,
     pub elapsed_seconds: Option<i32>,
 }
@@ -185,6 +186,8 @@ pub struct PublishParticipant {
     pub path: Option<Vec<PublishPathPoint>>,
     #[serde(default)]
     pub distance_m: Option<f64>,
+    #[serde(default)]
+    pub added_cps: std::collections::BTreeMap<i32, i32>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -114,12 +114,13 @@ pub async fn publish_event(
         }
         let marks = serde_json::to_value(person.marks.as_deref().unwrap_or(&[]))?;
         let path = serde_json::to_value(person.path.as_deref().unwrap_or(&[]))?;
+        let added_cps = serde_json::to_value(&person.added_cps)?;
         let id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO participants (
                 event_id, source_id, bib, chip_physical, chip_logical, name,
-                gender, birth_date, age, team_id, format_name, marks, path, distance_m
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                gender, birth_date, age, team_id, format_name, marks, path, distance_m, added_cps
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             RETURNING id
             "#,
         )
@@ -137,6 +138,7 @@ pub async fn publish_event(
         .bind(marks)
         .bind(path)
         .bind(person.distance_m)
+        .bind(added_cps)
         .fetch_one(&mut *tx)
         .await?;
         participant_ids.insert(person.source_id, id);

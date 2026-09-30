@@ -264,6 +264,7 @@ async fn get_participant(
             p.marks,
             p.path,
             p.distance_m,
+            p.added_cps,
             (
                 SELECT r.points_final
                 FROM results r
