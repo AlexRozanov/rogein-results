@@ -118,6 +118,8 @@ defineExpose({ refresh });
 <template>
   <CollapsiblePanel panel-id="publish" title="Публикация на сайт">
     <p class="subtitle">
+      Адрес — корень сайта, как в браузере: https://malahit-sprint.ru
+      (без :18790). Порт API снаружи не открыт, nginx сам проксирует /api/.
       Адрес и токен хранятся в папке программы на этом компьютере и не сбрасываются
       при завершении старта. Slug и название относятся к текущему старту: повторная
       отправка с тем же slug заменяет публикацию на сайте.
@@ -130,7 +132,7 @@ defineExpose({ refresh });
         <input
           v-model="apiBaseUrl"
           type="url"
-          placeholder="http://127.0.0.1:18790"
+          placeholder="https://malahit-sprint.ru"
           :disabled="isBusy"
         />
       </label>

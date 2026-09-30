@@ -1628,6 +1628,12 @@ button.active {
   font-weight: 600;
 }
 
+.course-chip.added .course-chip-num {
+  color: #7dd3fc;
+  font-weight: 600;
+  font-style: italic;
+}
+
 .course-chip.blocker .course-chip-num {
   color: #f87171;
   font-weight: 700;

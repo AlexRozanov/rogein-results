@@ -1337,6 +1337,22 @@ fn add_cp_correction(
 }
 
 #[tauri::command]
+fn assign_course_correction(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    participant_id: String,
+    course_name: String,
+) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::assign_course_correction(&conn, &participant_id, &course_name)?;
+    recalculate_and_notify(&app, &mut conn)
+}
+
+#[tauri::command]
 fn set_start_mark_correction(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1763,6 +1779,7 @@ pub fn run() {
             get_participant_details,
             find_result_id,
             add_cp_correction,
+            assign_course_correction,
             set_start_mark_correction,
             add_anomaly_day_shift_correction,
             add_anomaly_day_shift_corrections_for_all,

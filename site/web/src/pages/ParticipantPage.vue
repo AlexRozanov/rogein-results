@@ -20,6 +20,7 @@ type Participant = {
   marks: Mark[];
   path: unknown;
   distance_m?: number | null;
+  added_cps?: Record<string, number> | null;
   points_final?: number | null;
   elapsed_seconds?: number | null;
 };
@@ -27,6 +28,7 @@ type Participant = {
 type AwardGroup = {
   id: number;
   name: string;
+  course_cps?: number[] | null;
 };
 
 type ResultRow = {
@@ -34,6 +36,8 @@ type ResultRow = {
   participant_source_id: number;
   points_final: number;
   elapsed_seconds: number;
+  status?: string | null;
+  diagnostics?: string[] | null;
 };
 
 type EventDetail = {
@@ -43,8 +47,19 @@ type EventDetail = {
   map_width?: number | null;
   map_height?: number | null;
   meters_per_pixel?: number | null;
+  sport_kind?: string;
+  start_cp?: number | null;
+  finish_cp?: number | null;
   award_groups: AwardGroup[];
   results: ResultRow[];
+};
+
+type CourseProgressItem = {
+  cp: number;
+  taken: boolean;
+  punched: boolean;
+  added: boolean;
+  blocker: boolean;
 };
 
 const route = useRoute();
@@ -79,7 +94,43 @@ const awardGroupName = computed(() => {
   return names.length ? [...new Set(names)].join(", ") : "—";
 });
 
+const isOrient = computed(() => event.value?.sport_kind === "orient");
 const pathPoints = computed<PathPoint[]>(() => normalizePath(person.value?.path));
+
+const selectedStatus = computed(() => selectedResult.value?.status || "OK");
+const courseError = computed(() => {
+  if (!isOrient.value || selectedStatus.value === "OK") return null;
+  const required = asNumberList(
+    event.value?.award_groups.find((group) => group.id === selectedResult.value?.award_group_id)
+      ?.course_cps,
+  );
+  const marks = person.value?.marks ?? [];
+  const punches = punchWindow(marks, event.value?.start_cp, event.value?.finish_cp);
+  const remaining = asCountMap(person.value?.added_cps);
+  const progress = buildCourseProgress(required, punches, remaining);
+  const missing = progress.filter((item) => !item.taken);
+  const firstMissed = progress.find((item) => item.blocker)?.cp ?? null;
+  const outOfOrder = progress.filter((item) => !item.taken && item.punched).map((item) => item.cp);
+  const messages = [
+    ...asStringList(selectedResult.value?.diagnostics).map(diagnosticLabel),
+    ...fallbackStatusMessage(selectedStatus.value, asStringList(selectedResult.value?.diagnostics)),
+  ];
+  if (firstMissed != null) {
+    messages.push(
+      missing.length > 1
+        ? `Дистанция оборвалась на КП ${firstMissed} — следующие КП не в зачёт, пока не взят этот.`
+        : `Не взят КП ${firstMissed}.`,
+    );
+  }
+  if (outOfOrder.length) {
+    messages.push(`Есть отметки не в порядке дистанции: КП ${uniq(outOfOrder).join(", ")}.`);
+  }
+  return {
+    messages: uniq(messages),
+    progress,
+    showProgress: progress.some((item) => !item.taken),
+  };
+});
 
 const resolvedDistanceM = computed(() => {
   const stored = person.value?.distance_m;
@@ -172,6 +223,106 @@ function fmtMarkTime(raw: string) {
   return (part || raw).slice(0, 8);
 }
 
+function asNumberList(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+}
+
+function asStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((value) => String(value)).filter((value) => value.length > 0);
+}
+
+function asCountMap(raw: unknown): Map<number, number> {
+  const out = new Map<number, number>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const cp = Number(key);
+    const count = Number(value);
+    if (Number.isFinite(cp) && Number.isFinite(count) && count > 0) out.set(cp, count);
+  }
+  return out;
+}
+
+function uniq(values: Array<string | number>): string[] {
+  return [...new Set(values.map((value) => String(value)))];
+}
+
+function punchWindow(marks: Mark[], startCp: number | null | undefined, finishCp: number | null | undefined) {
+  if (!marks.length) return [];
+  let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
+  if (startIdx < 0) startIdx = 0;
+  let finishIdx = -1;
+  if (finishCp != null) {
+    for (let i = marks.length - 1; i > startIdx; i -= 1) {
+      if (marks[i].cp_number === finishCp) {
+        finishIdx = i;
+        break;
+      }
+    }
+  }
+  const end = finishIdx >= 0 ? finishIdx : marks.length - 1;
+  return marks.slice(startIdx, end + 1).map((mark) => mark.cp_number);
+}
+
+function buildCourseProgress(
+  required: number[],
+  punches: number[],
+  addCounts: Map<number, number>,
+): CourseProgressItem[] {
+  const remaining = new Map(addCounts);
+  let i = 0;
+  let firstMiss = true;
+  const punched = new Set(punches);
+  return required.map((cp) => {
+    let q = i;
+    while (q < punches.length && punches[q] !== cp) q += 1;
+    let taken = false;
+    let added = false;
+    if (q < punches.length && punches[q] === cp) {
+      taken = true;
+      i = q + 1;
+    } else if ((remaining.get(cp) ?? 0) > 0) {
+      remaining.set(cp, (remaining.get(cp) ?? 1) - 1);
+      taken = true;
+      added = true;
+    }
+    const blocker = !taken && firstMiss;
+    if (!taken) firstMiss = false;
+    return { cp, taken, punched: punched.has(cp), added, blocker };
+  });
+}
+
+function diagnosticLabel(code: string) {
+  if (code === "missing_course") return "Нет дистанции";
+  if (code === "course_empty") return "Дистанция без КП";
+  if (code === "course_unknown") return "Дистанция не найдена";
+  if (code === "start_cp_not_configured") return "Не задана стартовая станция";
+  if (code === "no_marks") return "Нет отметок";
+  if (code === "start_missing") return "Нет отметки старта";
+  if (code === "finish_missing") return "Нет отметки финиша";
+  if (code === "course_incomplete") return "Дистанция пройдена не полностью";
+  if (code === "overtime") return "Превышение контрольного времени";
+  return code;
+}
+
+function fallbackStatusMessage(status: string, diagnostics: string[]) {
+  if (diagnostics.length) return [];
+  if (status === "Не стартовал") return ["Нет стартовой отметки"];
+  if (status === "Дисквалификация") return ["Дистанция пройдена неправильно"];
+  if (status === "Ошибка") return ["Результат не засчитан"];
+  if (status && status !== "OK") return [status];
+  return [];
+}
+
+function courseCpTitle(item: CourseProgressItem) {
+  if (item.added) return "взято корректировкой «Добавить КП»";
+  if (item.taken) return "взято в порядке дистанции";
+  if (item.punched) return "есть отметка, но не в зачёт: предыдущий КП не взят";
+  if (item.blocker) return "не взято — с этого КП дистанция не засчитана";
+  return "не взято";
+}
+
 async function load() {
   error.value = "";
   try {
@@ -204,13 +355,18 @@ watch(() => [route.params.slug, route.params.sourceId], load);
     <header class="person-head">
       <h1>{{ person.name }}</h1>
       <p class="person-sub">
-        <span>№ {{ person.bib }}</span>
-        <span>{{ awardGroupName }}</span>
+        <template v-if="isOrient">
+          <span>Дистанция: {{ awardGroupName }}</span>
+        </template>
+        <template v-else>
+          <span>№ {{ person.bib }}</span>
+          <span>{{ awardGroupName }}</span>
+        </template>
       </p>
     </header>
 
-    <div class="stat-grid">
-      <div class="stat">
+    <div class="stat-grid" :class="{ 'is-single': isOrient }">
+      <div v-if="!isOrient" class="stat">
         <span class="stat-label">Очки</span>
         <span class="stat-value">{{ metrics.points ?? "—" }}</span>
       </div>
@@ -218,21 +374,45 @@ watch(() => [route.params.slug, route.params.sourceId], load);
         <span class="stat-label">Время</span>
         <span class="stat-value">{{ fmtHms(metrics.elapsed) }}</span>
       </div>
-      <div class="stat">
+      <div v-if="!isOrient" class="stat">
         <span class="stat-label">Очков на км</span>
         <span class="stat-value">{{ fmtNum(metrics.pointsPerKm, 1) }}</span>
       </div>
-      <div class="stat">
+      <div v-if="!isOrient" class="stat">
         <span class="stat-label">Темп</span>
         <span class="stat-value">{{ fmtPace(metrics.pace) }}</span>
       </div>
-      <div class="stat">
+      <div v-if="!isOrient" class="stat">
         <span class="stat-label">Скорость</span>
         <span class="stat-value">{{ metrics.speed != null ? `${fmtNum(metrics.speed, 1)} км/ч` : "—" }}</span>
       </div>
     </div>
 
-    <div class="person-main">
+    <section v-if="courseError" class="course-error">
+      <h2>Ошибка на дистанции</h2>
+      <ul v-if="courseError.messages.length" class="course-error-list">
+        <li v-for="message in courseError.messages" :key="message">{{ message }}</li>
+      </ul>
+      <div v-if="courseError.showProgress" class="course-chip-row">
+        <template v-for="(item, idx) in courseError.progress" :key="`${idx}-${item.cp}`">
+          <span
+            class="course-chip"
+            :class="{
+              muted: !item.taken && !item.punched,
+              'out-of-order': !item.taken && item.punched,
+              added: item.added,
+              blocker: item.blocker,
+            }"
+            :title="courseCpTitle(item)"
+          >
+            <span class="course-chip-num">{{ item.cp }}</span>
+          </span>
+          <span v-if="idx < courseError.progress.length - 1" class="course-seq-arrow">→</span>
+        </template>
+      </div>
+    </section>
+
+    <div class="person-main" :class="{ 'is-simple': isOrient }">
       <section class="person-marks">
         <h2>Финишные отметки</h2>
         <div class="card marks-card">
@@ -247,7 +427,7 @@ watch(() => [route.params.slug, route.params.sourceId], load);
         </div>
       </section>
 
-      <section class="person-map">
+      <section v-if="!isOrient" class="person-map">
         <h2>Путь на карте</h2>
         <div v-if="event.map_url" class="card map-card">
           <CourseMapView :map-url="event.map_url" :path="pathPoints" />

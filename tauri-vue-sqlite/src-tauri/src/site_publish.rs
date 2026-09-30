@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{self, AwardGroupRow, ResultRow};
+use crate::domain::{self, ResultRow};
 use crate::archive;
 
 const CONFIG_FILE: &str = "site_publish.json";
@@ -65,6 +65,10 @@ struct PublishPayload {
     map_points: Vec<PublishMapPoint>,
     meters_per_pixel: Option<f64>,
     sport_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_cp: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_cp: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +78,8 @@ struct PublishAwardGroup {
     gender_mode: String,
     min_age: Option<i32>,
     sort_order: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    course_cps: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +121,8 @@ struct PublishParticipant {
     marks: Vec<PublishMark>,
     path: Vec<PublishPathPoint>,
     distance_m: Option<f64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    added_cps: BTreeMap<i32, i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +135,8 @@ struct PublishResultRow {
     points_final: i32,
     elapsed_seconds: i32,
     status: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
 }
 
 struct MapUpload {
@@ -213,7 +223,8 @@ pub fn get_settings(
     let settings = domain::get_settings(conn)?;
     let (slug, title) = load_event_meta(conn)?;
     Ok(SitePublishSettings {
-        api_base_url: connection.api_base_url,
+        api_base_url: normalize_base_url(&connection.api_base_url)
+            .unwrap_or(connection.api_base_url),
         publish_token: connection.publish_token,
         slug,
         title,
@@ -230,8 +241,15 @@ pub fn test_connection(api_base_url: &str) -> Result<String, String> {
         .call()
         .map_err(|e| map_http_error("проверки связи", e, 0))?;
     let status = response.status();
+    let body = response.into_string().unwrap_or_default();
     if !(200..300).contains(&status) {
         return Err(format!("Сайт ответил кодом {status} на {url}"));
+    }
+    let trimmed = body.trim();
+    if trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<html") {
+        return Err(format!(
+            "По адресу {url} отвечает nginx (HTML), а не API. Укажите корень сайта, например https://malahit-sprint.ru — без порта 18790."
+        ));
     }
     Ok(base)
 }
@@ -322,12 +340,32 @@ fn agent() -> ureq::Agent {
 }
 
 fn normalize_base_url(raw: &str) -> Result<String, String> {
-    let url = raw.trim().trim_end_matches('/').to_string();
+    let mut url = raw.trim().to_string();
     if url.is_empty() {
-        return Err("Укажите адрес сайта (например http://127.0.0.1:18790).".into());
+        return Err("Укажите адрес сайта (например https://malahit-sprint.ru).".into());
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("Адрес сайта должен начинаться с http:// или https://".into());
+    }
+    while url.ends_with('/') {
+        url.pop();
+    }
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        if let Some(slash) = after_scheme.find('/') {
+            let path = after_scheme[slash..].to_string();
+            let origin_end = scheme_end + 3 + slash;
+            let origin = url[..origin_end].trim_end_matches('/').to_string();
+            let portish = path.trim_start_matches("/:");
+            if path.starts_with("/:") && !portish.is_empty() && portish.chars().all(|c| c.is_ascii_digit())
+            {
+                url = origin;
+            } else {
+                return Err(format!(
+                    "Адрес должен быть корнем сайта без пути. Для продакшена: https://malahit-sprint.ru (сейчас лишний путь «{path}»)."
+                ));
+            }
+        }
     }
     Ok(url)
 }
@@ -353,6 +391,11 @@ fn expect_ok(response: ureq::Response, action: &str) -> Result<(), String> {
     }
     let body = response.into_string().unwrap_or_default();
     let body = body.trim();
+    if status == 405 {
+        return Err(format!(
+            "Ошибка {action}: nginx ответил 405 (метод не разрешён). Укажите адрес сайта без порта API, например https://malahit-sprint.ru. Публикация идёт на PUT /api/events/…"
+        ));
+    }
     if body.is_empty() {
         Err(format!("Ошибка {action}: сервер ответил {status}"))
     } else {
@@ -365,6 +408,11 @@ fn map_http_error(action: &str, err: ureq::Error, payload_bytes: usize) -> Strin
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
             let body = body.trim();
+            if code == 405 {
+                return format!(
+                    "Ошибка {action}: nginx ответил 405 (метод не разрешён). Укажите адрес сайта без порта API, например https://malahit-sprint.ru. Публикация идёт на PUT /api/events/…"
+                );
+            }
             if body.is_empty() {
                 format!("Ошибка {action}: сервер ответил {code}")
             } else {
@@ -396,58 +444,26 @@ fn build_payload(
     conn: &mut Connection,
     title: &str,
 ) -> Result<PublishPayload, String> {
-    let groups = domain::query_award_groups(conn)?;
-    if groups.is_empty() {
-        return Err("Сначала создайте хотя бы одну группу награждения.".into());
-    }
-
     let settings = domain::get_settings(conn)?;
     let competition_date = NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d").ok();
     let special = domain::get_course_map_special_points(conn)?;
     let legend_positions = legend_positions(conn)?;
     let map_points = collect_map_points(conn, &special, &legend_positions)?;
     let map_metric = map_metric(conn);
+    let orient = settings.sport_kind == "orient";
 
-    let mut award_groups = Vec::new();
-    let mut results = Vec::new();
-    let mut participants: HashMap<i64, PublishParticipant> = HashMap::new();
-    let mut marks_cache: HashMap<i64, Vec<PublishMark>> = HashMap::new();
-
-    for group in &groups {
-        award_groups.push(PublishAwardGroup {
-            source_id: group.id,
-            name: group.name.clone(),
-            gender_mode: group.gender_mode.clone(),
-            min_age: group.min_age.map(|v| v as i32),
-            sort_order: group.sort_order as i32,
-        });
-        let rows = load_group_rows(conn, group)?;
-        let places = assign_places(&rows);
-        for (row, place) in rows.into_iter().zip(places) {
-            let source_id = upsert_participant(
-                conn,
-                &mut participants,
-                &mut marks_cache,
-                &row,
-                &special,
-                &legend_positions,
-                map_metric.as_ref(),
-            )?;
-            results.push(PublishResultRow {
-                participant_source_id: source_id,
-                award_group_source_id: group.id,
-                place,
-                points_raw: row.points_raw as i32,
-                penalty_points: row.penalty_points as i32,
-                points_final: row.points_final as i32,
-                elapsed_seconds: row.elapsed_seconds as i32,
-                status: row.status,
-            });
-        }
-    }
+    let (award_groups, results, participants) = if orient {
+        collect_orient_publish(conn, &special, &legend_positions, map_metric.as_ref())?
+    } else {
+        collect_rogaine_publish(conn, &special, &legend_positions, map_metric.as_ref())?
+    };
 
     if participants.is_empty() {
-        return Err("В группах награждения нет участников для публикации.".into());
+        return Err(if orient {
+            "Нет результатов для публикации. Импортируйте финиш и задайте дистанции.".into()
+        } else {
+            "В группах награждения нет участников для публикации.".into()
+        });
     }
 
     let mut participants: Vec<PublishParticipant> = participants.into_values().collect();
@@ -462,10 +478,236 @@ fn build_payload(
         map_points,
         meters_per_pixel: map_metric.as_ref().map(|m| m.meters_per_pixel),
         sport_kind: settings.sport_kind,
+        start_cp: settings.start_cp.map(|v| v as i32),
+        finish_cp: Some(settings.finish_cp as i32),
     })
 }
 
-fn load_group_rows(conn: &Connection, group: &AwardGroupRow) -> Result<Vec<ResultRow>, String> {
+fn collect_rogaine_publish(
+    conn: &mut Connection,
+    special: &domain::CourseMapSpecialPoints,
+    legend_positions: &HashMap<i64, (f64, f64, String)>,
+    map_metric: Option<&MapMetric>,
+) -> Result<
+    (
+        Vec<PublishAwardGroup>,
+        Vec<PublishResultRow>,
+        HashMap<i64, PublishParticipant>,
+    ),
+    String,
+> {
+    let groups = domain::query_award_groups(conn)?;
+    if groups.is_empty() {
+        return Err("Сначала создайте хотя бы одну группу награждения.".into());
+    }
+
+    let mut award_groups = Vec::new();
+    let mut results = Vec::new();
+    let mut participants: HashMap<i64, PublishParticipant> = HashMap::new();
+    let mut marks_cache: HashMap<i64, Vec<PublishMark>> = HashMap::new();
+
+    for group in &groups {
+        award_groups.push(PublishAwardGroup {
+            source_id: group.id,
+            name: group.name.clone(),
+            gender_mode: group.gender_mode.clone(),
+            min_age: group.min_age.map(|v| v as i32),
+            sort_order: group.sort_order as i32,
+            course_cps: Vec::new(),
+        });
+        let rows = load_result_rows(
+            conn,
+            Some(group.id),
+            None,
+            Some("points_final".into()),
+            Some("desc".into()),
+        )?;
+        let places = assign_places(&rows);
+        append_publish_rows(
+            conn,
+            &mut participants,
+            &mut marks_cache,
+            &mut results,
+            rows,
+            group.id,
+            &places,
+            special,
+            legend_positions,
+            map_metric,
+        )?;
+    }
+
+    Ok((award_groups, results, participants))
+}
+
+fn collect_orient_publish(
+    conn: &mut Connection,
+    special: &domain::CourseMapSpecialPoints,
+    legend_positions: &HashMap<i64, (f64, f64, String)>,
+    map_metric: Option<&MapMetric>,
+) -> Result<
+    (
+        Vec<PublishAwardGroup>,
+        Vec<PublishResultRow>,
+        HashMap<i64, PublishParticipant>,
+    ),
+    String,
+> {
+    let courses = domain::list_courses(conn)?;
+    if courses.is_empty() {
+        return Err("Сначала создайте хотя бы одну дистанцию.".into());
+    }
+
+    let all_rows = load_result_rows(conn, None, None, Some("place".into()), Some("asc".into()))?;
+    let mut by_course: HashMap<String, Vec<domain::ResultRow>> = HashMap::new();
+    for row in all_rows {
+        by_course
+            .entry(publish_course_key(&row.format_name))
+            .or_default()
+            .push(row);
+    }
+
+    let removed_cps = load_removed_course_cps(conn)?;
+    let mut award_groups = Vec::new();
+    let mut results = Vec::new();
+    let mut participants: HashMap<i64, PublishParticipant> = HashMap::new();
+    let mut marks_cache: HashMap<i64, Vec<PublishMark>> = HashMap::new();
+    let mut used_keys = HashSet::new();
+
+    for (idx, course) in courses.iter().enumerate() {
+        let key = publish_course_key(&course.name);
+        used_keys.insert(key.clone());
+        let rows = by_course.remove(&key).unwrap_or_default();
+        if rows.is_empty() {
+            continue;
+        }
+        award_groups.push(PublishAwardGroup {
+            source_id: course.id,
+            name: course.name.clone(),
+            gender_mode: "any".to_string(),
+            min_age: None,
+            sort_order: idx as i32,
+            course_cps: course
+                .controls
+                .iter()
+                .copied()
+                .filter(|cp| !removed_cps.contains(cp))
+                .map(|cp| cp as i32)
+                .collect(),
+        });
+        let places = orient_places(&rows);
+        append_publish_rows(
+            conn,
+            &mut participants,
+            &mut marks_cache,
+            &mut results,
+            rows,
+            course.id,
+            &places,
+            special,
+            legend_positions,
+            map_metric,
+        )?;
+    }
+
+    let leftovers: BTreeMap<String, Vec<domain::ResultRow>> = by_course
+        .into_iter()
+        .filter(|(key, rows)| !used_keys.contains(key) && !rows.is_empty())
+        .collect();
+    for (extra_idx, (_key, rows)) in leftovers.into_iter().enumerate() {
+        let name = rows
+            .iter()
+            .map(|r| r.format_name.trim())
+            .find(|s| !s.is_empty())
+            .unwrap_or("Без дистанции")
+            .to_string();
+        let source_id = 1_000_000 + extra_idx as i64;
+        award_groups.push(PublishAwardGroup {
+            source_id,
+            name,
+            gender_mode: "any".to_string(),
+            min_age: None,
+            sort_order: 10_000 + extra_idx as i32,
+            course_cps: Vec::new(),
+        });
+        let places = orient_places(&rows);
+        append_publish_rows(
+            conn,
+            &mut participants,
+            &mut marks_cache,
+            &mut results,
+            rows,
+            source_id,
+            &places,
+            special,
+            legend_positions,
+            map_metric,
+        )?;
+    }
+
+    Ok((award_groups, results, participants))
+}
+
+fn publish_course_key(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn orient_places(rows: &[domain::ResultRow]) -> Vec<Option<i32>> {
+    rows.iter()
+        .map(|row| {
+            if row.status != "OK" {
+                None
+            } else {
+                row.place.map(|p| p as i32)
+            }
+        })
+        .collect()
+}
+
+fn append_publish_rows(
+    conn: &mut Connection,
+    participants: &mut HashMap<i64, PublishParticipant>,
+    marks_cache: &mut HashMap<i64, Vec<PublishMark>>,
+    results: &mut Vec<PublishResultRow>,
+    rows: Vec<domain::ResultRow>,
+    group_source_id: i64,
+    places: &[Option<i32>],
+    special: &domain::CourseMapSpecialPoints,
+    legend_positions: &HashMap<i64, (f64, f64, String)>,
+    map_metric: Option<&MapMetric>,
+) -> Result<(), String> {
+    for (row, place) in rows.into_iter().zip(places.iter().copied()) {
+        let source_id = upsert_participant(
+            conn,
+            participants,
+            marks_cache,
+            &row,
+            special,
+            legend_positions,
+            map_metric,
+        )?;
+        results.push(PublishResultRow {
+            participant_source_id: source_id,
+            award_group_source_id: group_source_id,
+            place,
+            points_raw: row.points_raw as i32,
+            penalty_points: row.penalty_points as i32,
+            points_final: row.points_final as i32,
+            elapsed_seconds: row.elapsed_seconds as i32,
+            status: row.status,
+            diagnostics: parse_diagnostics(&row.diagnostics_json),
+        });
+    }
+    Ok(())
+}
+
+fn load_result_rows(
+    conn: &Connection,
+    award_group_id: Option<i64>,
+    course_name: Option<String>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
+) -> Result<Vec<domain::ResultRow>, String> {
     let mut all = Vec::new();
     let mut offset = 0_i64;
     loop {
@@ -477,10 +719,10 @@ fn load_group_rows(conn: &Connection, group: &AwardGroupRow) -> Result<Vec<Resul
             None,
             None,
             false,
-            Some(group.id),
-            None,
-            Some("points_final".into()),
-            Some("desc".into()),
+            award_group_id,
+            course_name.clone(),
+            sort_by.clone(),
+            sort_dir.clone(),
         )?;
         let n = rows.len() as i64;
         all.extend(rows);
@@ -527,6 +769,63 @@ fn public_source_id(
         return PROTOCOL_SOURCE_OFFSET + id;
     }
     RESULT_SOURCE_OFFSET + result_id
+}
+
+fn parse_diagnostics(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn load_removed_course_cps(conn: &Connection) -> Result<HashSet<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT CAST(json_extract(payload_json, '$.cp_number') AS INTEGER)
+            FROM manual_corrections
+            WHERE finish_participant_id IS NULL
+              AND correction_type = 'remove_cp'
+            "#,
+        )
+        .map_err(|e| format!("prepare removed course CPs: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, Option<i64>>(0))
+        .map_err(|e| format!("query removed course CPs: {e}"))?;
+    let mut out = HashSet::new();
+    for row in rows {
+        if let Some(cp) = row.map_err(|e| format!("read removed course CP: {e}"))? {
+            out.insert(cp);
+        }
+    }
+    Ok(out)
+}
+
+fn load_added_cps(
+    conn: &Connection,
+    finish_participant_id: Option<i64>,
+) -> Result<BTreeMap<i32, i32>, String> {
+    let Some(finish_id) = finish_participant_id else {
+        return Ok(BTreeMap::new());
+    };
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT CAST(json_extract(payload_json, '$.cp_number') AS INTEGER)
+            FROM manual_corrections
+            WHERE finish_participant_id = ?
+              AND correction_type = 'add_cp'
+            "#,
+        )
+        .map_err(|e| format!("prepare add_cp counts: {e}"))?;
+    let rows = stmt
+        .query_map(params![finish_id], |r| r.get::<_, Option<i64>>(0))
+        .map_err(|e| format!("query add_cp counts: {e}"))?;
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let Some(cp) = row.map_err(|e| format!("read add_cp: {e}"))? else {
+            continue;
+        };
+        *out.entry(cp as i32).or_insert(0) += 1;
+    }
+    Ok(out)
 }
 
 fn upsert_participant(
@@ -584,6 +883,7 @@ fn upsert_participant(
             marks,
             path,
             distance_m,
+            added_cps: load_added_cps(conn, row.finish_participant_id)?,
         },
     );
     Ok(source_id)
@@ -805,4 +1105,38 @@ fn load_map_upload(
         width: georef.image_width.map(|v| v.round() as i32),
         height: georef.image_height.map(|v| v.round() as i32),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_url;
+
+    #[test]
+    fn strips_mistyped_port_path() {
+        assert_eq!(
+            normalize_base_url("https://malahit-sprint.ru/:18790").unwrap(),
+            "https://malahit-sprint.ru"
+        );
+        assert_eq!(
+            normalize_base_url("https://malahit-sprint.ru/:18790/").unwrap(),
+            "https://malahit-sprint.ru"
+        );
+    }
+
+    #[test]
+    fn keeps_host_port_origin() {
+        assert_eq!(
+            normalize_base_url("http://127.0.0.1:18790/").unwrap(),
+            "http://127.0.0.1:18790"
+        );
+        assert_eq!(
+            normalize_base_url("https://malahit-sprint.ru").unwrap(),
+            "https://malahit-sprint.ru"
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_path() {
+        assert!(normalize_base_url("https://malahit-sprint.ru/api").is_err());
+    }
 }

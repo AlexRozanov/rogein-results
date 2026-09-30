@@ -68,6 +68,7 @@ struct ExclusionRule {
 
 #[derive(Debug, Clone)]
 struct ManualCorrection {
+    finish_participant_id: Option<i64>,
     correction_type: String,
     payload: Value,
 }
@@ -342,6 +343,8 @@ pub struct ParticipantMeta {
     pub start_station_id: i64,
     pub start_time: String,
     pub source_row: Option<i64>,
+    /// Original finish-dump course (CSV). Orienteering scoring may use assign_course instead.
+    pub course_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1672,17 +1675,64 @@ fn course_key(name: &str) -> String {
 }
 
 /// Greedy subsequence: how many required CPs appear in order in `punches`.
+#[cfg(test)]
 fn course_subsequence_taken(punches: &[i64], required: &[i64]) -> usize {
+    course_subsequence_taken_with_adds(punches, required, &HashMap::new())
+}
+
+/// Same as `course_subsequence_taken`, but a missing required CP can be filled
+/// from `add_cp` counts instead of inventing a punch time.
+fn course_subsequence_taken_with_adds(
+    punches: &[i64],
+    required: &[i64],
+    add_counts: &HashMap<i64, usize>,
+) -> usize {
     if required.is_empty() {
         return 0;
     }
-    let mut i = 0usize;
-    for cp in punches {
-        if i < required.len() && *cp == required[i] {
-            i += 1;
+    let mut remaining = add_counts.clone();
+    let mut p = 0usize;
+    let mut taken = 0usize;
+    for &cp in required {
+        let mut q = p;
+        while q < punches.len() && punches[q] != cp {
+            q += 1;
         }
+        if q < punches.len() {
+            p = q + 1;
+            taken += 1;
+            continue;
+        }
+        if let Some(left) = remaining.get_mut(&cp) {
+            if *left > 0 {
+                *left -= 1;
+                taken += 1;
+                continue;
+            }
+        }
+        break;
     }
-    i
+    taken
+}
+
+fn orient_add_cp_counts(
+    corrections: &[ManualCorrection],
+    required: &[i64],
+) -> HashMap<i64, usize> {
+    let mut remaining = HashMap::new();
+    for c in corrections {
+        if c.correction_type != "add_cp" {
+            continue;
+        }
+        let Ok(cp) = payload_int(&c.payload, "cp_number") else {
+            continue;
+        };
+        if !required.contains(&cp) {
+            continue;
+        }
+        *remaining.entry(cp).or_insert(0) += 1;
+    }
+    remaining
 }
 
 fn filter_course_cps(cps: &[i64], removed: &HashSet<i64>) -> Vec<i64> {
@@ -1775,33 +1825,29 @@ fn recalculate_orient_tx(
         let mut marks = load_marks(tx, participant.id)?;
         let manual_corrections = load_manual_corrections(tx, participant.id)?;
         apply_manual_mark_corrections(&mut marks, &manual_corrections);
+        let course_name = effective_course_name(
+            &participant.course_name,
+            participant.id,
+            &manual_corrections,
+        );
         let required = courses
-            .get(&course_key(&participant.course_name))
+            .get(&course_key(&course_name))
             .map(|cps| filter_course_cps(cps, &removed_cps))
             .unwrap_or_default();
-        if let Some(start_cp) = settings.start_cp {
-            apply_orient_add_cp_marks(
-                &mut marks,
-                &manual_corrections,
-                &required,
-                start_cp,
-                settings.finish_cp,
-            );
-        }
+        let add_cp_counts = orient_add_cp_counts(&manual_corrections, &required);
         marks.sort_by_key(|m| (m.mark_time, m.seq));
         let exclusion_rules =
             load_leg_exclusion_rules(tx, participant.id, &participant.participant_id)?;
-        let course_id = course_ids
-            .get(&course_key(&participant.course_name))
-            .copied();
+        let course_id = course_ids.get(&course_key(&course_name)).copied();
         let result = calculate_orient_result(
             &marks,
             settings,
-            &participant.course_name,
+            &course_name,
             course_id,
             &courses,
             &removed_cps,
             &exclusion_rules,
+            &add_cp_counts,
         );
         insert_result_row(
             tx,
@@ -1823,6 +1869,7 @@ fn calculate_orient_result(
     courses: &HashMap<String, Vec<i64>>,
     removed_cps: &HashSet<i64>,
     exclusion_rules: &[ExclusionRule],
+    add_cp_counts: &HashMap<i64, usize>,
 ) -> ResultCalc {
     let mut diagnostics: Vec<String> = Vec::new();
     let course_name = course_name.trim();
@@ -1902,7 +1949,7 @@ fn calculate_orient_result(
     let window = &marks[start_idx..=window_end];
     let punches: Vec<i64> = window.iter().map(|m| m.cp_number).collect();
     let taken = required
-        .map(|cps| course_subsequence_taken(&punches, cps))
+        .map(|cps| course_subsequence_taken_with_adds(&punches, cps, add_cp_counts))
         .unwrap_or(0);
     let complete = required
         .map(|cps| taken == cps.len())
@@ -2833,11 +2880,52 @@ fn resolve_exclusion_scope(
     }
 }
 
+fn sql_effective_course_name(participant_alias: &str) -> String {
+    format!(
+        r#"COALESCE(
+            NULLIF(TRIM(IFNULL((
+                SELECT json_extract(mc.payload_json, '$.to')
+                FROM manual_corrections mc
+                WHERE mc.finish_participant_id = {participant_alias}.id
+                  AND mc.correction_type = 'assign_course'
+                ORDER BY mc.id DESC
+                LIMIT 1
+            ), '')), ''),
+            NULLIF(TRIM(IFNULL({participant_alias}.course_name, '')), '')
+        )"#
+    )
+}
+
+fn assigned_course_from_corrections(
+    finish_id: i64,
+    corrections: &[ManualCorrection],
+) -> Option<String> {
+    corrections
+        .iter()
+        .rev()
+        .filter(|c| {
+            c.correction_type == "assign_course" && c.finish_participant_id == Some(finish_id)
+        })
+        .find_map(|c| {
+            c.payload
+                .get("to")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+}
+
+fn effective_course_name(stored: &str, finish_id: i64, corrections: &[ManualCorrection]) -> String {
+    assigned_course_from_corrections(finish_id, corrections)
+        .unwrap_or_else(|| stored.trim().to_string())
+}
+
 fn load_manual_corrections(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     finish_participant_id: i64,
 ) -> Result<Vec<ManualCorrection>, String> {
-    let mut stmt = tx
+    let mut stmt = conn
         .prepare(
             r#"
             SELECT id, finish_participant_id, correction_type, payload_json
@@ -2858,6 +2946,7 @@ fn load_manual_corrections(
                 )
             })?;
             Ok(ManualCorrection {
+                finish_participant_id: r.get(1)?,
                 correction_type: r.get(2)?,
                 payload,
             })
@@ -2912,75 +3001,6 @@ fn load_course_controls(conn: &Connection, course_name: &str) -> Result<Vec<i64>
         }
     }
     Ok(out)
-}
-
-fn apply_orient_add_cp_marks(
-    marks: &mut Vec<Mark>,
-    corrections: &[ManualCorrection],
-    required: &[i64],
-    start_cp: i64,
-    finish_cp: i64,
-) {
-    if required.is_empty() {
-        return;
-    }
-    let mut to_add: Vec<i64> = corrections
-        .iter()
-        .filter(|c| c.correction_type == "add_cp")
-        .filter_map(|c| payload_int(&c.payload, "cp_number").ok())
-        .filter(|cp| required.contains(cp))
-        .collect();
-    to_add.sort_by_key(|cp| required.iter().position(|x| x == cp).unwrap_or(usize::MAX));
-    to_add.dedup();
-    for (i, cp) in to_add.into_iter().enumerate() {
-        if marks.iter().any(|m| m.cp_number == cp) {
-            continue;
-        }
-        let mark_time = interpolate_course_cp_time(marks, required, cp, start_cp, finish_cp);
-        marks.push(Mark {
-            cp_number: cp,
-            mark_time,
-            seq: 2_000_000 + i as i64,
-        });
-    }
-}
-
-fn interpolate_course_cp_time(
-    marks: &[Mark],
-    required: &[i64],
-    cp: i64,
-    start_cp: i64,
-    finish_cp: i64,
-) -> NaiveDateTime {
-    let req_pos = required.iter().position(|x| *x == cp);
-    let prev_time = req_pos.and_then(|pos| {
-        required[..pos]
-            .iter()
-            .rev()
-            .find_map(|prev| marks.iter().find(|m| m.cp_number == *prev).map(|m| m.mark_time))
-    })
-    .or_else(|| marks.iter().find(|m| m.cp_number == start_cp).map(|m| m.mark_time))
-    .or_else(|| marks.first().map(|m| m.mark_time));
-    let next_time = req_pos.and_then(|pos| {
-        required[pos + 1..]
-            .iter()
-            .find_map(|next| marks.iter().find(|m| m.cp_number == *next).map(|m| m.mark_time))
-    })
-    .or_else(|| {
-        marks
-            .iter()
-            .rev()
-            .find(|m| m.cp_number == finish_cp)
-            .map(|m| m.mark_time)
-    })
-    .or_else(|| marks.last().map(|m| m.mark_time));
-    match (prev_time, next_time) {
-        (Some(a), Some(b)) if b > a => a + (b - a) / 2,
-        (Some(a), Some(_)) => a + Duration::seconds(1),
-        (Some(a), None) => a + Duration::seconds(1),
-        (None, Some(b)) => b - Duration::seconds(1),
-        (None, None) => Utc::now().naive_utc(),
-    }
 }
 
 fn apply_manual_mark_corrections(marks: &mut Vec<Mark>, corrections: &[ManualCorrection]) {
@@ -3411,7 +3431,7 @@ fn append_course_name_filter(
     let Some(name) = course_name.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
     };
-    query.push_str(" AND TRIM(IFNULL(p.course_name, '')) = ? ");
+    query.push_str(&format!(" AND {} = ? ", sql_effective_course_name("p")));
     params_dyn.push(name.to_string());
 }
 
@@ -3470,6 +3490,8 @@ pub fn query_results(
         Some(year) => sql_person_age("sp", year),
         None => "NULL".to_string(),
     };
+    let effective_p = sql_effective_course_name("p");
+    let effective_p2 = sql_effective_course_name("p2");
     let mut query = format!(
         r#"
         SELECT
@@ -3483,7 +3505,7 @@ pub fn query_results(
                COALESCE(
                    CASE
                        WHEN (SELECT value FROM settings WHERE key = 'sport_kind') = 'orient'
-                       THEN NULLIF(TRIM(IFNULL(p.course_name, '')), '')
+                       THEN {effective_p}
                        ELSE NULL
                    END,
                    IFNULL(sp.format_name, '')
@@ -3531,7 +3553,7 @@ pub fn query_results(
             SELECT
                 r.id AS result_id,
                 RANK() OVER (
-                    PARTITION BY TRIM(IFNULL(p2.course_name, ''))
+                        PARTITION BY {effective_p2}
                     ORDER BY r.elapsed_seconds ASC, r.participant_id COLLATE NOCASE ASC
                 ) AS place
             FROM results r
@@ -7421,6 +7443,8 @@ pub fn query_participant_details(
         Some(year) => sql_person_age("sp", year),
         None => "NULL".to_string(),
     };
+    let effective_p = sql_effective_course_name("p");
+    let effective_p2 = sql_effective_course_name("p2");
     let mut result = tx
         .query_row(
             &format!(
@@ -7436,7 +7460,7 @@ pub fn query_participant_details(
                    COALESCE(
                        CASE
                            WHEN (SELECT value FROM settings WHERE key = 'sport_kind') = 'orient'
-                           THEN NULLIF(TRIM(IFNULL(p.course_name, '')), '')
+                           THEN {effective_p}
                            ELSE NULL
                        END,
                        IFNULL(sp.format_name, '')
@@ -7484,7 +7508,7 @@ pub fn query_participant_details(
                 SELECT
                     r.id AS result_id,
                     RANK() OVER (
-                        PARTITION BY TRIM(IFNULL(p2.course_name, ''))
+                        PARTITION BY {effective_p2}
                         ORDER BY r.elapsed_seconds ASC, r.participant_id COLLATE NOCASE ASC
                     ) AS place
                 FROM results r
@@ -7537,7 +7561,7 @@ pub fn query_participant_details(
     let finish_participant = if let Some(fid) = finish_id {
         tx.query_row(
             r#"
-            SELECT id, participant_id, chip_raw_id, name, start_station_id, start_time, source_row
+            SELECT id, participant_id, chip_raw_id, name, start_station_id, start_time, source_row, IFNULL(course_name, '')
             FROM participants
             WHERE id = ?
             "#,
@@ -7551,6 +7575,7 @@ pub fn query_participant_details(
                     start_station_id: r.get(4)?,
                     start_time: r.get(5)?,
                     source_row: r.get(6)?,
+                    course_name: r.get(7)?,
                 })
             },
         )
@@ -7584,6 +7609,7 @@ pub fn query_participant_details(
                 String::new()
             },
             source_row: if owns_chip_marks { fp.source_row } else { None },
+            course_name: fp.course_name.clone(),
         }
     } else {
         ParticipantMeta {
@@ -7594,6 +7620,7 @@ pub fn query_participant_details(
             start_station_id: 0,
             start_time: String::new(),
             source_row: None,
+            course_name: String::new(),
         }
     };
 
@@ -7633,24 +7660,6 @@ pub fn query_participant_details(
         apply_legacy_corrections(&tx, fid, &mut corrected_marks, &mut exclusion_rules)?;
         let manual_corrections = load_manual_corrections(&tx, fid)?;
         apply_manual_mark_corrections(&mut corrected_marks, &manual_corrections);
-        let orient_settings = get_settings_tx(&tx)?;
-        if orient_settings.sport_kind == "orient" {
-            if let Some(start_cp) = orient_settings.start_cp {
-                let courses = load_courses_map_tx(&tx)?;
-                let removed_cps = load_global_removed_course_cps(&tx)?;
-                let required = courses
-                    .get(&course_key(&result.format_name))
-                    .map(|cps| filter_course_cps(cps, &removed_cps))
-                    .unwrap_or_default();
-                apply_orient_add_cp_marks(
-                    &mut corrected_marks,
-                    &manual_corrections,
-                    &required,
-                    start_cp,
-                    orient_settings.finish_cp,
-                );
-            }
-        }
         corrected_marks.sort_by_key(|m| (m.mark_time, m.seq));
         (raw_marks, corrected_marks, exclusion_rules)
     } else {
@@ -7918,6 +7927,24 @@ fn prepare_orient_exclusion_fields(
     ))
 }
 
+fn participant_effective_course(
+    conn: &Connection,
+    finish_id: i64,
+) -> Result<(String, String), String> {
+    let stored: String = conn
+        .query_row(
+            "SELECT TRIM(IFNULL(course_name, '')) FROM participants WHERE id = ?",
+            params![finish_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("load participant course: {e}"))?;
+    let corrections = load_manual_corrections(conn, finish_id)?;
+    Ok((
+        stored.clone(),
+        effective_course_name(&stored, finish_id, &corrections),
+    ))
+}
+
 pub fn add_cp_correction(
     conn: &Connection,
     participant_id: &str,
@@ -7928,13 +7955,7 @@ pub fn add_cp_correction(
     require_finish_participant(conn, finish_id)?;
     let settings = get_settings(conn)?;
     if settings.sport_kind == "orient" {
-        let course_name: String = conn
-            .query_row(
-                "SELECT IFNULL(course_name, '') FROM participants WHERE id = ?",
-                params![finish_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| format!("load participant course: {e}"))?;
+        let course_name = participant_effective_course(conn, finish_id)?.1;
         let removed_cps = load_global_removed_course_cps(conn)?;
         let controls = filter_course_cps(
             &load_course_controls(conn, &course_name)?,
@@ -7943,37 +7964,54 @@ pub fn add_cp_correction(
         if controls.is_empty() {
             return Err("У участника нет дистанции или в ней нет КП".to_string());
         }
-        if !controls.contains(&cp_number) {
+        let on_course = controls.iter().filter(|cp| **cp == cp_number).count();
+        if on_course == 0 {
             return Err(format!(
                 "КП {cp_number} не входит в дистанцию «{course_name}»"
             ));
         }
         let marks = load_marks(conn, finish_id)?;
-        if marks.iter().any(|m| m.cp_number == cp_number) {
+        let punched = marks.iter().filter(|m| m.cp_number == cp_number).count();
+        let already_added: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM manual_corrections
+                WHERE finish_participant_id = ?
+                  AND correction_type = 'add_cp'
+                  AND json_extract(payload_json, '$.cp_number') = ?
+                "#,
+                params![finish_id, cp_number],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("count add_cp corrections: {e}"))?;
+        let used = punched + already_added as usize;
+        if used >= on_course {
             return Err(format!(
-                "КП {cp_number} уже есть в отметках. Добавить можно только КП без отметки."
+                "КП {cp_number} на дистанции «{course_name}» встречается {on_course} раз, уже учтено {used}."
             ));
         }
-    }
-    let duplicate: Option<i64> = conn
-        .query_row(
-            r#"
-            SELECT id
-            FROM manual_corrections
-            WHERE finish_participant_id = ?
-              AND correction_type = 'add_cp'
-              AND json_extract(payload_json, '$.cp_number') = ?
-            LIMIT 1
-            "#,
-            params![finish_id, cp_number],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("check duplicate add_cp correction: {e}"))?;
-    if duplicate.is_some() {
-        return Err(format!(
-            "Для участника {finish_id} корректировка добавления КП {cp_number} уже существует"
-        ));
+    } else {
+        let duplicate: Option<i64> = conn
+            .query_row(
+                r#"
+                SELECT id
+                FROM manual_corrections
+                WHERE finish_participant_id = ?
+                  AND correction_type = 'add_cp'
+                  AND json_extract(payload_json, '$.cp_number') = ?
+                LIMIT 1
+                "#,
+                params![finish_id, cp_number],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("check duplicate add_cp correction: {e}"))?;
+        if duplicate.is_some() {
+            return Err(format!(
+                "Для участника {finish_id} корректировка добавления КП {cp_number} уже существует"
+            ));
+        }
     }
     conn.execute(
         r#"
@@ -7989,6 +8027,109 @@ pub fn add_cp_correction(
         ],
     )
     .map_err(|e| format!("insert personal add_cp correction: {e}"))?;
+    Ok(())
+}
+
+pub fn assign_course_correction(
+    conn: &Connection,
+    participant_id: &str,
+    course_name: &str,
+) -> Result<(), String> {
+    let settings = get_settings(conn)?;
+    if settings.sport_kind != "orient" {
+        return Err("Смена дистанции доступна только в ориентировании".to_string());
+    }
+    let finish_id = parse_finish_participant_id(participant_id)?;
+    require_finish_participant(conn, finish_id)?;
+    let target_raw = course_name.trim();
+    if target_raw.is_empty() {
+        return Err("Укажите дистанцию".to_string());
+    }
+    let courses = list_courses(conn)?;
+    let Some(canonical) = courses
+        .iter()
+        .find(|c| course_key(&c.name) == course_key(target_raw))
+        .map(|c| c.name.clone())
+    else {
+        return Err(format!("Дистанция «{target_raw}» не найдена"));
+    };
+    let bib: String = conn
+        .query_row(
+            "SELECT participant_id FROM participants WHERE id = ?",
+            params![finish_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("load finish bib: {e}"))?;
+    let (stored, current) = participant_effective_course(conn, finish_id)?;
+    if course_key(&canonical) == course_key(&stored) {
+        conn.execute(
+            r#"
+            DELETE FROM manual_corrections
+            WHERE finish_participant_id = ?
+              AND correction_type = 'assign_course'
+            "#,
+            params![finish_id],
+        )
+        .map_err(|e| format!("clear assign_course: {e}"))?;
+        return Ok(());
+    }
+    if course_key(&canonical) == course_key(&current) {
+        return Ok(());
+    }
+    let others: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT id, IFNULL(name, '')
+                FROM participants
+                WHERE participant_id = ?
+                  AND id != ?
+                "#,
+            )
+            .map_err(|e| format!("prepare course conflict query: {e}"))?;
+        let rows = stmt
+            .query_map(params![bib, finish_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query course conflicts: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("read course conflict: {e}"))?);
+        }
+        out
+    };
+    for (other_id, other_name) in others {
+        let other_effective = participant_effective_course(conn, other_id)?.1;
+        if course_key(&other_effective) == course_key(&canonical) {
+            return Err(format!(
+                "У номера {bib} уже есть финиш на дистанции «{canonical}» ({other_name}). Оставьте оба результата или сначала разберите дубль."
+            ));
+        }
+    }
+    conn.execute(
+        r#"
+        DELETE FROM manual_corrections
+        WHERE finish_participant_id = ?
+          AND correction_type = 'assign_course'
+        "#,
+        params![finish_id],
+    )
+    .map_err(|e| format!("replace assign_course: {e}"))?;
+    conn.execute(
+        r#"
+        INSERT INTO manual_corrections(finish_participant_id, correction_type, payload_json)
+        VALUES(?, 'assign_course', ?)
+        "#,
+        params![
+            finish_id,
+            json!({
+                "from": stored,
+                "to": canonical
+            })
+            .to_string()
+        ],
+    )
+    .map_err(|e| format!("insert assign_course: {e}"))?;
     Ok(())
 }
 
@@ -9375,10 +9516,13 @@ fn payload_str(payload: &Value, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_orient_exclusion_rules, calculate_orient_result, course_subsequence_taken,
-        ensure_schema_extras, filter_course_cps, first_course_mark, import_csv_content, init_db,
-        orient_course_legs, orient_start_punch_kind, parse_time, resolve_orient_leg_to,
-        set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
+        apply_orient_exclusion_rules, assign_course_correction,
+        add_cp_correction, calculate_orient_result, ManualCorrection,
+        course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
+        ensure_schema_extras, filter_course_cps, first_course_mark,
+        import_csv_content, init_db, orient_course_legs, orient_start_punch_kind, parse_time,
+        query_participant_details, recalculate, resolve_orient_leg_to, set_setting_value,
+        suggested_start_time, ExclusionRule, Mark, Settings,
     };
     use rusqlite::Connection;
     use std::collections::{HashMap, HashSet};
@@ -9562,6 +9706,7 @@ mod tests {
             &courses,
             &HashSet::new(),
             &[],
+            &HashMap::new(),
         );
         assert!(without.diagnostics.iter().any(|d| d == "overtime"));
         assert_eq!(without.elapsed_seconds, 70 * 60);
@@ -9574,6 +9719,7 @@ mod tests {
             &courses,
             &HashSet::new(),
             &[orient_rule(241, None)],
+            &HashMap::new(),
         );
         assert!(!with.diagnostics.iter().any(|d| d == "overtime"));
         assert_eq!(with.elapsed_seconds, 55 * 60);
@@ -9611,5 +9757,249 @@ mod tests {
             err.contains("повторяется id '4'"),
             "unexpected import error: {err}"
         );
+    }
+
+    fn seed_two_orient_courses(conn: &Connection) {
+        conn.execute("INSERT INTO courses(name) VALUES ('D1')", [])
+            .unwrap();
+        let d1 = conn.last_insert_rowid();
+        conn.execute("INSERT INTO courses(name) VALUES ('D2')", [])
+            .unwrap();
+        let d2 = conn.last_insert_rowid();
+        for (cid, cps) in [(d1, [241_i64, 31, 240]), (d2, [241, 45, 240])] {
+            for (i, cp) in cps.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO course_controls(course_id, seq, cp_number) VALUES (?, ?, ?)",
+                    rusqlite::params![cid, (i as i64) + 1, *cp],
+                )
+                .unwrap();
+            }
+        }
+        set_setting_value(conn, "sport_kind", "orient").unwrap();
+        set_setting_value(conn, "start_cp", "241").unwrap();
+        set_setting_value(conn, "finish_cp", "240").unwrap();
+        set_setting_value(conn, "start_mode", "station").unwrap();
+    }
+
+    #[test]
+    fn assign_course_scores_against_new_course_and_keeps_csv() {
+        let mut conn = memory_db();
+        seed_two_orient_courses(&conn);
+        import_csv_content(
+            &mut conn,
+            "system,chip raw id,id,team name,course,result,brief,start st id,Start time,st1,time1,st2,time2,st3,time3\n\
+             sfr,,3,Андреева Софья,D1,OK,ok,241,2026-08-02 12:00:00,241,2026-08-02 12:00:00,45,2026-08-02 12:10:00,240,2026-08-02 12:20:00\n",
+            true,
+        )
+        .unwrap();
+        let finish_id: i64 = conn
+            .query_row("SELECT id FROM participants WHERE participant_id = '3'", [], |r| r.get(0))
+            .unwrap();
+        assign_course_correction(&conn, &finish_id.to_string(), "D2").unwrap();
+        recalculate(&mut conn).unwrap();
+        let result_id: i64 = conn
+            .query_row(
+                "SELECT id FROM results WHERE finish_participant_id = ?",
+                rusqlite::params![finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let details = query_participant_details(&mut conn, result_id).unwrap();
+        assert_eq!(details.participant.course_name, "D1");
+        assert_eq!(details.result.as_ref().unwrap().format_name, "D2");
+        let stored: String = conn
+            .query_row(
+                "SELECT course_name FROM participants WHERE id = ?",
+                rusqlite::params![finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "D1");
+        assign_course_correction(&conn, &finish_id.to_string(), "D1").unwrap();
+        recalculate(&mut conn).unwrap();
+        let result_id: i64 = conn
+            .query_row(
+                "SELECT id FROM results WHERE finish_participant_id = ?",
+                rusqlite::params![finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let details = query_participant_details(&mut conn, result_id).unwrap();
+        assert_eq!(details.result.as_ref().unwrap().format_name, "D1");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM manual_corrections WHERE correction_type = 'assign_course'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn assign_course_rejects_when_same_bib_already_on_target() {
+        let mut conn = memory_db();
+        seed_two_orient_courses(&conn);
+        import_csv_content(
+            &mut conn,
+            "system,chip raw id,id,team name,course,result,brief,start st id,Start time,st1,time1,st2,time2\n\
+             sfr,,3,Андреева Софья,D1,OK,ok,241,2026-08-02 12:00:00,241,2026-08-02 12:00:00,240,2026-08-02 12:20:00\n\
+             sfr,,3,Андреева Софья,D2,OK,ok,241,2026-08-02 13:00:00,241,2026-08-02 13:00:00,240,2026-08-02 13:20:00\n",
+            true,
+        )
+        .unwrap();
+        let finish_d1: i64 = conn
+            .query_row(
+                "SELECT id FROM participants WHERE participant_id = '3' AND course_name = 'D1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let err = assign_course_correction(&conn, &finish_d1.to_string(), "D2").unwrap_err();
+        assert!(
+            err.contains("уже есть финиш"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn seed_repeat_cp_course(conn: &Connection) {
+        conn.execute("INSERT INTO courses(name) VALUES ('D1')", [])
+            .unwrap();
+        let d1 = conn.last_insert_rowid();
+        for (i, cp) in [241_i64, 250, 250, 240].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO course_controls(course_id, seq, cp_number) VALUES (?, ?, ?)",
+                rusqlite::params![d1, (i as i64) + 1, *cp],
+            )
+            .unwrap();
+        }
+        set_setting_value(conn, "sport_kind", "orient").unwrap();
+        set_setting_value(conn, "start_cp", "241").unwrap();
+        set_setting_value(conn, "finish_cp", "240").unwrap();
+        set_setting_value(conn, "start_mode", "station").unwrap();
+        set_setting_value(conn, "control_minutes", "120").unwrap();
+    }
+
+    #[test]
+    fn apply_orient_add_cp_covers_repeated_control() {
+        let marks = vec![
+            mark(241, "2026-08-02 12:00:00"),
+            mark(240, "2026-08-02 13:00:00"),
+        ];
+        let corrections = vec![
+            ManualCorrection {
+                finish_participant_id: Some(1),
+                correction_type: "add_cp".into(),
+                payload: serde_json::json!({"cp_number": 250}),
+            },
+            ManualCorrection {
+                finish_participant_id: Some(1),
+                correction_type: "add_cp".into(),
+                payload: serde_json::json!({"cp_number": 250}),
+            },
+        ];
+        let required = vec![241, 250, 250, 240];
+        let add_counts = orient_add_cp_counts(&corrections, &required);
+        let punches: Vec<i64> = marks.iter().map(|m| m.cp_number).collect();
+        assert_eq!(
+            course_subsequence_taken_with_adds(&punches, &required, &add_counts),
+            4
+        );
+        let mut courses = HashMap::new();
+        courses.insert("d1".to_string(), required.clone());
+        let result = calculate_orient_result(
+            &marks,
+            &orient_settings(120),
+            "D1",
+            Some(1),
+            &courses,
+            &HashSet::new(),
+            &[],
+            &add_counts,
+        );
+        assert_eq!(result.status, "OK");
+        assert!(!result.diagnostics.iter().any(|d| d == "course_incomplete"));
+        assert_eq!(result.elapsed_seconds, 3600);
+        assert_eq!(marks.iter().filter(|m| m.cp_number == 250).count(), 0);
+    }
+
+    #[test]
+    fn add_cp_fills_course_without_invented_times() {
+        let marks = vec![
+            mark(241, "2026-07-11 12:19:59"),
+            mark(70, "2026-07-11 13:21:06"),
+            mark(240, "2026-07-11 13:21:31"),
+        ];
+        let corrections = [35, 42, 38, 32, 250, 34, 40, 31, 39, 33, 250, 49]
+            .into_iter()
+            .map(|cp| ManualCorrection {
+                finish_participant_id: Some(1),
+                correction_type: "add_cp".into(),
+                payload: serde_json::json!({ "cp_number": cp }),
+            })
+            .collect::<Vec<_>>();
+        let required = vec![35, 42, 38, 32, 250, 34, 40, 31, 39, 33, 250, 49, 70];
+        let add_counts = orient_add_cp_counts(&corrections, &required);
+        let punches: Vec<i64> = marks.iter().map(|m| m.cp_number).collect();
+        assert_eq!(
+            course_subsequence_taken_with_adds(&punches, &required, &add_counts),
+            required.len()
+        );
+        let mut courses = HashMap::new();
+        courses.insert("d1".to_string(), required.clone());
+        let result = calculate_orient_result(
+            &marks,
+            &orient_settings(120),
+            "D1",
+            Some(1),
+            &courses,
+            &HashSet::new(),
+            &[orient_rule(32, None)],
+            &add_counts,
+        );
+        assert_eq!(result.elapsed_seconds, 3692);
+        assert_eq!(result.status, "OK");
+    }
+
+    #[test]
+    fn orient_add_cp_allows_each_repeat_on_course() {
+        let mut conn = memory_db();
+        seed_repeat_cp_course(&conn);
+        import_csv_content(
+            &mut conn,
+            "system,chip raw id,id,team name,course,result,brief,start st id,Start time,st1,time1,st2,time2\n\
+             sfr,,7,Иванов Иван,D1,OK,ok,241,2026-08-02 12:00:00,241,2026-08-02 12:00:00,240,2026-08-02 13:00:00\n",
+            true,
+        )
+        .unwrap();
+        let finish_id: i64 = conn
+            .query_row("SELECT id FROM participants WHERE participant_id = '7'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        add_cp_correction(&conn, &finish_id.to_string(), 250, "").unwrap();
+        add_cp_correction(&conn, &finish_id.to_string(), 250, "").unwrap();
+        let err = add_cp_correction(&conn, &finish_id.to_string(), 250, "").unwrap_err();
+        assert!(
+            err.contains("встречается 2 раз"),
+            "unexpected third add_cp error: {err}"
+        );
+        recalculate(&mut conn).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM results WHERE finish_participant_id = ?",
+                rusqlite::params![finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "OK");
+        let added: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM manual_corrections WHERE finish_participant_id = ? AND correction_type = 'add_cp'",
+                rusqlite::params![finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(added, 2);
     }
 }

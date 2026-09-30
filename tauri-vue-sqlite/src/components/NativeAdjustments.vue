@@ -35,6 +35,7 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "exclude_leg_time") return "Исключение перегона";
   if (correctionType === "anomaly_day_shift_24h") return "Коррекция аномалии: -24ч";
   if (correctionType === "remap_cp") return "Замена КП (станция)";
+  if (correctionType === "assign_course") return "Смена дистанции";
   return correctionType;
 }
 
@@ -73,6 +74,12 @@ function correctionPayloadText(row: CorrectionRow) {
     const toText = Number.isFinite(toCp) ? toCp : "-";
     const when = String(row.payload?.mark_time || "-");
     return `Замена: ${fromText} → ${toText} @ ${when}`;
+  }
+
+  if (row.correction_type === "assign_course") {
+    const fromCourse = String(row.payload?.from || "").trim() || "—";
+    const toCourse = String(row.payload?.to || "").trim() || "—";
+    return `${fromCourse} → ${toCourse}`;
   }
 
   return JSON.stringify(row.payload);
