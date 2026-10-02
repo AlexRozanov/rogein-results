@@ -18,6 +18,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.KeyboardType
+import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -38,6 +45,12 @@ fun ChipScreen(viewModel: ChipQueueViewModel) {
     val items by viewModel.items.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
+    val chipReady by viewModel.chipReady.collectAsStateWithLifecycle()
+    val numberText by viewModel.numberText.collectAsStateWithLifecycle()
+    val sessionSummary by viewModel.sessionSummary.collectAsStateWithLifecycle()
+    val number = numberText.toIntOrNull()
+    val numberValid = number != null && number in 1..MAX_LOGICAL_ID
+    val commandsEnabled = chipReady && !busy
 
     Scaffold(
         containerColor = Cream,
@@ -71,9 +84,19 @@ fun ChipScreen(viewModel: ChipQueueViewModel) {
             if (busy) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
+            ChipCommands(
+                ready = commandsEnabled,
+                chipReady = chipReady,
+                summary = sessionSummary,
+                numberText = numberText,
+                numberValid = numberValid,
+                onNumberText = viewModel::onNumberText,
+                onClear = viewModel::clearMarks,
+                onWrite = viewModel::writeLogicalId,
+            )
             if (items.isEmpty() && !busy) {
                 Text(
-                    text = "Очередь пуста. Данные чипа сохраняются здесь и позже уйдут на десктоп.",
+                    text = "Очередь пуста. Отметки остаются здесь, а копия для десктопа пишется в Загрузки/rogein.",
                     modifier = Modifier.padding(horizontal = 16.dp),
                     color = Color(0xFF5C5C5C),
                 )
@@ -81,13 +104,67 @@ fun ChipScreen(viewModel: ChipQueueViewModel) {
             LazyColumn(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
             ) {
                 items(items, key = { it.id }) { item ->
                     QueueCard(item)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ChipCommands(
+    ready: Boolean,
+    chipReady: Boolean,
+    summary: String?,
+    numberText: String,
+    numberValid: Boolean,
+    onNumberText: (String) -> Unit,
+    onClear: () -> Unit,
+    onWrite: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = if (chipReady && summary != null) {
+                "Чип на связи · $summary"
+            } else {
+                "Очистка и запись номера включаются, только пока чип поднесён и прочитан."
+            },
+            color = Color(0xFF5C5C5C),
+        )
+        Button(
+            onClick = onClear,
+            enabled = ready,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Очистить отметки")
+        }
+        OutlinedTextField(
+            value = numberText,
+            onValueChange = onNumberText,
+            enabled = ready,
+            singleLine = true,
+            label = { Text("Логический номер") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = onWrite,
+            enabled = ready && numberValid,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Записать номер")
+        }
+        Spacer(Modifier.height(4.dp))
     }
 }
 

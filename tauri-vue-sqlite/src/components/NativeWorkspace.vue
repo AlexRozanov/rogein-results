@@ -25,6 +25,16 @@ type ImportSummary = {
   results_count: number;
 };
 
+type PhoneReadSummary = {
+  imported: number;
+  already_imported: number;
+  unmatched: number;
+  participants_count: number;
+  results_count: number;
+  snapshot_deleted: boolean;
+  snapshot_note: string;
+};
+
 type NativeSettings = {
   control_minutes: number;
   penalty_per_minute: number;
@@ -391,6 +401,25 @@ async function onImportDialogMerge() {
 async function onImportDialogReplace() {
   importDialogOpen.value = false;
   await importCsv(true);
+}
+
+async function readPhoneQueue() {
+  nativeBusy.value = true;
+  nativeStatus.value = "Чтение очереди с телефона...";
+  try {
+    const summary = await invoke<PhoneReadSummary>("import_phone_snapshot");
+    const deleted = summary.snapshot_deleted
+      ? "Снимок на телефоне удалён."
+      : summary.snapshot_note || "Снимок на телефоне не удалён.";
+    nativeStatus.value =
+      `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}. ` +
+      `Участников ${summary.participants_count}, результатов ${summary.results_count}. ${deleted}`;
+    await refreshNativeData();
+  } catch (error) {
+    nativeStatus.value = `Ошибка чтения с телефона: ${String(error)}`;
+  } finally {
+    nativeBusy.value = false;
+  }
 }
 
 async function importCsv(reset: boolean) {
@@ -760,6 +789,7 @@ async function onSortChanged(column: SortBy) {
       <div class="native-row">
         <FilePickerButton @file-selected="onCsvSelected" />
         <button :disabled="nativeBusy || !csvFile" @click="onCsvImportClick">Импорт CSV</button>
+        <button :disabled="nativeBusy" @click="readPhoneQueue">Считать с телефона</button>
         <button :disabled="nativeBusy" @click="recalculateNative">Пересчитать</button>
         <button :disabled="nativeBusy" @click="scanAnomalies">Поиск аномалий</button>
         <button :disabled="nativeBusy" @click="openCpRemapWindow">Путаница КП</button>

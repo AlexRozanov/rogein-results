@@ -5,10 +5,14 @@ import androidx.room.Room
 import ru.rogein.chip.parse.ChipDump
 import java.util.UUID
 
-class ChipQueueRepository(private val dao: ChipQueueDao) {
+class ChipQueueRepository(
+    private val dao: ChipQueueDao,
+    private val snapshot: ChipQueueSnapshotWriter,
+) {
     fun observeAll() = dao.observeAll()
 
-    suspend fun enqueue(dump: ChipDump, rawHex: String = "") {
+    /** null — снимок записан. Иначе чип уже в очереди, а текст — почему снимок не лег в Загрузки. */
+    suspend fun enqueue(dump: ChipDump, rawHex: String = ""): String? {
         dao.insert(
             QueuedChipEntity(
                 id = UUID.randomUUID().toString(),
@@ -26,18 +30,32 @@ class ChipQueueRepository(private val dao: ChipQueueDao) {
                 ackedAt = null,
             ),
         )
+        return publishSnapshot()
     }
 
-    suspend fun clear() = dao.clear()
+    suspend fun clear(): String? {
+        dao.clear()
+        return publishSnapshot()
+    }
+
+    private suspend fun publishSnapshot(): String? {
+        return try {
+            snapshot.write(dao.listAll())
+            null
+        } catch (e: Exception) {
+            e.message ?: "не удалось записать снимок"
+        }
+    }
 
     companion object {
         fun create(context: Context): ChipQueueRepository {
+            val appContext = context.applicationContext
             val db = Room.databaseBuilder(
-                context.applicationContext,
+                appContext,
                 ChipQueueDatabase::class.java,
                 "chip-queue.db",
             ).build()
-            return ChipQueueRepository(db.dao())
+            return ChipQueueRepository(db.dao(), ChipQueueSnapshotWriter(appContext))
         }
     }
 }
