@@ -9,13 +9,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.queue.ChipQueueRepository
 
 interface ChipIo {
-    fun clearMarks(order: BlockOrder, pointerEnd: Int?)
+    fun clearMarks(order: BlockOrder, pointerEnd: Int?, blockCount: Int)
     fun writeLogicalId(order: BlockOrder, id: Int)
 }
 
@@ -54,6 +55,9 @@ class ChipQueueViewModel(
 
     @Volatile
     private var punchCount: Int = 0
+
+    @Volatile
+    private var chipBlockCount: Int = BLOCK_COUNT
 
     private var lastUid: String? = null
     private var lastAt: Long = 0
@@ -109,6 +113,7 @@ class ChipQueueViewModel(
                 blockOrder = dump.blockOrder
                 pointerEnd = dump.pointerEnd
                 punchCount = dump.punches.size
+                chipBlockCount = dump.blockCount
                 _numberText.value = dump.logicalId?.toString().orEmpty()
                 val label = dump.logicalId?.let { "№ $it" } ?: "без номера"
                 _sessionSummary.value = "$label · $punchCount отметок"
@@ -129,12 +134,13 @@ class ChipQueueViewModel(
     fun clearMarks() {
         val order = blockOrder
         val end = pointerEnd
+        val count = chipBlockCount
         val io = chipIo
         if (!_chipReady.value || order == null || io == null) return
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
-                io.clearMarks(order, end)
+                io.clearMarks(order, end, count)
                 pointerEnd = 5
                 punchCount = 0
                 _sessionSummary.value = "${sessionLabel()} · 0 отметок"

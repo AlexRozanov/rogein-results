@@ -137,7 +137,7 @@ function onSaved() {
           <th v-if="!isOrient">Штраф</th>
           <th v-if="!isOrient" class="sortable-col" @click="emit('sortChanged', 'points_final')">Итог{{ sortMark("points_final") }}</th>
           <th class="sortable-col" @click="emit('sortChanged', 'elapsed_seconds')">Время{{ sortMark("elapsed_seconds") }}</th>
-          <th v-if="!isOrient">Действие</th>
+          <th>Действие</th>
         </tr>
       </thead>
       <tbody>
@@ -202,7 +202,7 @@ function onSaved() {
           <td v-if="!isOrient">{{ row.penalty_points }}</td>
           <td v-if="!isOrient">{{ row.points_final }}</td>
           <td>{{ fmtHms(row.elapsed_seconds) }}</td>
-          <td v-if="!isOrient">
+          <td>
             <button
               v-if="notInStartProtocol(row)"
               type="button"

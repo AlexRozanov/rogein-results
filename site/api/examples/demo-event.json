@@ -1,0 +1,97 @@
+{
+  "title": "Рогейн Щукино (демо)",
+  "competition_date": "2026-04-12",
+  "award_groups": [
+    {
+      "source_id": 1,
+      "name": "Бег 4 часа — мужчины",
+      "gender_mode": "male",
+      "min_age": null,
+      "sort_order": 1
+    },
+    {
+      "source_id": 2,
+      "name": "Бег 4 часа — ветераны",
+      "gender_mode": "any",
+      "min_age": 45,
+      "sort_order": 2
+    }
+  ],
+  "participants": [
+    {
+      "source_id": 101,
+      "bib": "12",
+      "chip_physical": "8001234",
+      "chip_logical": "12",
+      "name": "Иванов Иван",
+      "gender": "мужской",
+      "birth_date": "1978-03-01",
+      "age": 48,
+      "team_id": null,
+      "format_name": "Бег 4 часа",
+      "marks": [
+        { "seq": 1, "cp_number": 31, "mark_time": "2026-04-12T10:12:01" },
+        { "seq": 2, "cp_number": 45, "mark_time": "2026-04-12T10:41:18" },
+        { "seq": 3, "cp_number": 240, "mark_time": "2026-04-12T13:02:00" }
+      ],
+      "path": [
+        { "x": 0.2, "y": 0.3, "cp_number": null, "kind": "start" },
+        { "x": 0.45, "y": 0.42, "cp_number": 45, "kind": "cp" },
+        { "x": 0.7, "y": 0.55, "cp_number": 240, "kind": "finish" }
+      ],
+      "distance_m": 12400
+    },
+    {
+      "source_id": 102,
+      "bib": "18",
+      "chip_physical": "8005678",
+      "chip_logical": "18",
+      "name": "Петров Пётр",
+      "gender": "мужской",
+      "birth_date": "1995-11-20",
+      "age": 31,
+      "team_id": null,
+      "format_name": "Бег 4 часа",
+      "marks": [
+        { "seq": 1, "cp_number": 32, "mark_time": "2026-04-12T10:20:11" },
+        { "seq": 2, "cp_number": 240, "mark_time": "2026-04-12T13:40:00" }
+      ],
+      "path": [
+        { "x": 0.25, "y": 0.28, "cp_number": 32, "kind": "cp" },
+        { "x": 0.6, "y": 0.6, "cp_number": 240, "kind": "finish" }
+      ]
+    }
+  ],
+  "results": [
+    {
+      "participant_source_id": 101,
+      "award_group_source_id": 1,
+      "place": 1,
+      "points_raw": 76,
+      "penalty_points": 0,
+      "points_final": 76,
+      "elapsed_seconds": 10920,
+      "status": "OK"
+    },
+    {
+      "participant_source_id": 102,
+      "award_group_source_id": 1,
+      "place": 2,
+      "points_raw": 32,
+      "penalty_points": 0,
+      "points_final": 32,
+      "elapsed_seconds": 13200,
+      "status": "OK"
+    },
+    {
+      "participant_source_id": 101,
+      "award_group_source_id": 2,
+      "place": 1,
+      "points_raw": 76,
+      "penalty_points": 0,
+      "points_final": 76,
+      "elapsed_seconds": 10920,
+      "status": "OK"
+    }
+  ]
+}

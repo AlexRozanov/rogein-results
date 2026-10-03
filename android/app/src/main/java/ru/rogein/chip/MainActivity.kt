@@ -77,10 +77,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         viewModel.attach(object : ChipIo {
-            override fun clearMarks(order: BlockOrder, pointerEnd: Int?) {
+            override fun clearMarks(order: BlockOrder, pointerEnd: Int?, blockCount: Int) {
                 val tag = sessionTag ?: error("Чип убран")
                 val now = LocalTime.now()
-                val plan = SfrChipMemory.clearPlan(pointerEnd, now.hour, now.minute, now.second)
+                val plan = SfrChipMemory.clearPlan(pointerEnd, now.hour, now.minute, now.second, blockCount)
                 write(tag, order, plan) { done, total ->
                     runOnUiThread { viewModel.reportProgress("Очистка отметок $done/$total") }
                 }

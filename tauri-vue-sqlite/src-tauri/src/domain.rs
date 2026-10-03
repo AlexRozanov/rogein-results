@@ -36,6 +36,7 @@ pub struct PhoneImportSummary {
     pub imported: i64,
     pub already_imported: i64,
     pub unmatched: i64,
+    pub skipped_empty: i64,
     pub participants_count: i64,
     pub results_count: i64,
 }
@@ -1390,7 +1391,7 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
     }
 
     if fresh.is_empty() {
-        return phone_import_summary(conn, 0, already_imported, 0);
+        return phone_import_summary(conn, 0, already_imported, 0, 0);
     }
 
     let settings = get_settings(conn)?;
@@ -1402,8 +1403,29 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
     let orient = settings.sport_kind == "orient";
 
     let mut prepared = Vec::new();
+    let mut skipped_empty = 0_i64;
+    let mut empty_labels = Vec::new();
     for item in &fresh {
-        prepared.push(prepare_phone_item(conn, item, competition_date, orient)?);
+        match prepare_phone_item(conn, item, competition_date, orient)? {
+            Some(row) => prepared.push(row),
+            None => {
+                skipped_empty += 1;
+                empty_labels.push(phone_item_label(item));
+            }
+        }
+    }
+    if prepared.is_empty() {
+        if skipped_empty > 0 {
+            return Err(format!(
+                "{}: нет отметок. Чип в очереди телефона без старта/КП — уберите его из очереди или приложите после финиша.",
+                empty_labels
+                    .iter()
+                    .map(|label| format!("чип {label}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return phone_import_summary(conn, 0, already_imported, 0, 0);
     }
 
     let tx = conn
@@ -1456,7 +1478,13 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
     recalculate_tx(&tx)?;
     tx.commit()
         .map_err(|e| format!("commit phone import: {e}"))?;
-    phone_import_summary(conn, prepared.len() as i64, already_imported, unmatched)
+    phone_import_summary(
+        conn,
+        prepared.len() as i64,
+        already_imported,
+        unmatched,
+        skipped_empty,
+    )
 }
 
 struct PreparedPhoneRow {
@@ -1471,16 +1499,19 @@ struct PreparedPhoneRow {
     matched: bool,
 }
 
+fn phone_item_label(item: &PhoneSnapshotItem) -> String {
+    item.logical_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| item.uid.clone())
+}
+
 fn prepare_phone_item(
     conn: &Connection,
     item: &PhoneSnapshotItem,
     competition_date: NaiveDate,
     orient: bool,
-) -> Result<PreparedPhoneRow, String> {
-    let label = item
-        .logical_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| item.uid.clone());
+) -> Result<Option<PreparedPhoneRow>, String> {
+    let label = phone_item_label(item);
     let mut punches = Vec::new();
     for punch in &item.punches {
         if punch.cp == PHONE_CLEAR_CP || punch.cp <= 0 {
@@ -1492,7 +1523,7 @@ fn prepare_phone_item(
         punches.push((punch.cp, clock));
     }
     if punches.is_empty() {
-        return Err(format!("чип {label}: нет отметок"));
+        return Ok(None);
     }
     let stamped = stamp_clock_times(competition_date, &punches.iter().map(|(_, t)| *t).collect::<Vec<_>>());
     let marks: Vec<(i64, i64, String)> = punches
@@ -1525,7 +1556,7 @@ fn prepare_phone_item(
         }
         None => (item.uid.clone(), format!("чип {}", item.uid), String::new(), false),
     };
-    Ok(PreparedPhoneRow {
+    Ok(Some(PreparedPhoneRow {
         queue_id: item.id.clone(),
         bib,
         uid: item.uid.clone(),
@@ -1535,7 +1566,7 @@ fn prepare_phone_item(
         start_time: marks[start_idx].2.clone(),
         marks,
         matched,
-    })
+    }))
 }
 
 fn stamp_clock_times(start_date: NaiveDate, clocks: &[NaiveTime]) -> Vec<NaiveDateTime> {
@@ -1607,6 +1638,7 @@ fn phone_import_summary(
     imported: i64,
     already_imported: i64,
     unmatched: i64,
+    skipped_empty: i64,
 ) -> Result<PhoneImportSummary, String> {
     let participants_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
@@ -1618,6 +1650,7 @@ fn phone_import_summary(
         imported,
         already_imported,
         unmatched,
+        skipped_empty,
         participants_count,
         results_count,
     })
@@ -3727,6 +3760,10 @@ fn append_course_name_filter(
     let Some(name) = course_name.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
     };
+    if name == "__empty__" {
+        query.push_str(&format!(" AND {} IS NULL ", sql_effective_course_name("p")));
+        return;
+    }
     query.push_str(&format!(" AND {} = ? ", sql_effective_course_name("p")));
     params_dyn.push(name.to_string());
 }
@@ -10123,6 +10160,40 @@ mod tests {
             .query_row("SELECT name FROM participants WHERE participant_id = '7'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "чип 7");
+        assert_eq!(summary.skipped_empty, 0);
+    }
+
+    #[test]
+    fn phone_snapshot_skips_chip_without_punches() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{
+            "items":[
+                {"id":"empty","uid":"CC","logicalId":26,"punches":[]},
+                {"id":"ok","uid":"DD","logicalId":7,"punches":[{"cp":241,"time":"11:00:00"}]}
+            ]
+        }"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped_empty, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let only: String = conn
+            .query_row("SELECT participant_id FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(only, "7");
+    }
+
+    #[test]
+    fn phone_snapshot_only_empty_chip_is_error() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{"items":[{"id":"empty","uid":"CC","logicalId":26,"punches":[]}]}"#;
+        let err = import_phone_snapshot(&mut conn, body).expect_err("empty-only snapshot");
+        assert!(err.contains("чип 26"), "unexpected error: {err}");
+        assert!(err.contains("нет отметок"), "unexpected error: {err}");
     }
 
     #[test]

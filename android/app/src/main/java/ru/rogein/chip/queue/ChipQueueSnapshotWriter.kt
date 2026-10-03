@@ -31,6 +31,7 @@ class ChipQueueSnapshotWriter(private val context: Context) {
             } catch (_: Exception) {
                 JSONArray()
             }
+            if (punches.length() == 0) continue
             array.put(
                 JSONObject()
                     .put("id", item.id)
