@@ -34,8 +34,6 @@ export const site = {
   ],
   calendarEmpty:
     "[Календарь] Здесь появятся анонсы предстоящих стартов. Заменить этот текст, когда будет первый анонс.",
-  resultsLead:
-    "Архив опубликованных стартов. Анонс с тем же slug после загрузки результатов уходит из календаря сюда.",
 };
 
 export function sportKindLabel(kind: string | null | undefined): string {
