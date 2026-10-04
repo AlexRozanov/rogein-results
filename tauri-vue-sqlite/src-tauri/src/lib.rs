@@ -1,5 +1,7 @@
 pub mod archive;
+pub mod archive_orient;
 pub mod domain;
+pub mod phone_sync;
 pub mod site_publish;
 
 use std::fs;
@@ -14,11 +16,13 @@ use domain::{
     CpLegendTypeRow,
     CpRemapAnalyzeSummary, CpRemapApplyItem, CpRemapApplySummary, ErrorRow, ExclusionRuleRow,
     FormatCpTypeRuleInput, FormatCpTypeRulesBundle, FormatSettings, ImportSummary,
+    PhoneImportSummary,
     MapGeorefInfo, MapGpsAnchor, MapGpsAnchorUpsert, ParticipantDetails, ParticipantPathDistance,
     ParticipantRow, ResultRow, SearchSuggestion, Settings, StartProtocolFormatRow,
     StartProtocolImportSummary, StartProtocolRow, DataPresenceCounts,
 };
 use serde::Serialize;
+use archive_orient::ArchiveOrientPreview;
 use site_publish::{SitePublishResult, SitePublishSettings};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -31,6 +35,18 @@ struct AppState {
 const COURSE_MAP_FILE: &str = "course_map.bin";
 const COURSE_MAP_NAME_KEY: &str = "course_map_file_name";
 const COURSE_MAP_MIME_KEY: &str = "course_map_mime";
+
+#[derive(Serialize)]
+struct PhoneReadSummary {
+    imported: i64,
+    already_imported: i64,
+    unmatched: i64,
+    skipped_empty: i64,
+    participants_count: i64,
+    results_count: i64,
+    snapshot_deleted: bool,
+    snapshot_note: String,
+}
 
 #[derive(Serialize)]
 struct CourseMapInfo {
@@ -197,6 +213,35 @@ fn test_site_publish_connection(api_base_url: String) -> Result<String, String> 
 }
 
 #[tauri::command]
+fn preview_archive_orient_csv(
+    csv_content: String,
+    competition_date: String,
+) -> Result<ArchiveOrientPreview, String> {
+    archive_orient::preview_csv(&csv_content, &competition_date)
+}
+
+#[tauri::command]
+fn publish_archive_orient_csv(
+    state: State<'_, AppState>,
+    csv_content: String,
+    title: String,
+    slug: String,
+    competition_date: String,
+    api_base_url: String,
+    publish_token: String,
+) -> Result<SitePublishResult, String> {
+    archive_orient::publish_csv(
+        &state.app_data_dir,
+        &csv_content,
+        &title,
+        &slug,
+        &competition_date,
+        &api_base_url,
+        &publish_token,
+    )
+}
+
+#[tauri::command]
 fn publish_current_start(
     state: State<'_, AppState>,
     api_base_url: String,
@@ -346,6 +391,28 @@ fn import_csv_content(
         .map_err(|_| "database lock poisoned".to_string())?;
     let mut conn = domain::open_and_init_db(&state.db_path)?;
     domain::import_csv_content(&mut conn, &csv_content, reset)
+}
+
+#[tauri::command]
+fn import_phone_snapshot(state: State<'_, AppState>) -> Result<PhoneReadSummary, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let read = phone_sync::read_phone_snapshot()?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary: PhoneImportSummary = domain::import_phone_snapshot(&mut conn, &read.body)?;
+    let deleted = phone_sync::delete_snapshot_if_unchanged(&read)?;
+    Ok(PhoneReadSummary {
+        imported: summary.imported,
+        already_imported: summary.already_imported,
+        unmatched: summary.unmatched,
+        skipped_empty: summary.skipped_empty,
+        participants_count: summary.participants_count,
+        results_count: summary.results_count,
+        snapshot_deleted: deleted.deleted,
+        snapshot_note: deleted.note,
+    })
 }
 
 #[tauri::command]
@@ -1709,6 +1776,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             import_csv_content,
+            import_phone_snapshot,
             import_start_protocol_content,
             get_data_presence_counts,
             get_archives_dir,
@@ -1721,6 +1789,8 @@ pub fn run() {
             get_site_publish_settings,
             save_site_publish_settings,
             test_site_publish_connection,
+            preview_archive_orient_csv,
+            publish_archive_orient_csv,
             publish_current_start,
             recalculate_results,
             get_settings,

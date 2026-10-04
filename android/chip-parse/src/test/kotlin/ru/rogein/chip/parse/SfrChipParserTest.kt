@@ -27,6 +27,56 @@ class SfrChipParserTest {
     }
 
     @Test
+    fun parses64BlockFieldDump() {
+        val dump = SfrChipParser.parse("uid", loadExport("/field-64-error.txt"))
+        assertEquals(64, dump.blockCount)
+        assertEquals(BlockOrder.NfcTools, dump.blockOrder)
+        assertEquals(81, dump.logicalId)
+        assertEquals("11:47:17", dump.clearedAt)
+        assertEquals(36, dump.pointerEnd)
+        assertEquals(32, dump.punches.size)
+        assertTrue(dump.punches.first().isStart)
+        assertTrue(dump.punches.last().isFinish)
+        assertEquals("11:51:59", dump.punches.first().time)
+        assertEquals("12:55:12", dump.punches.last().time)
+    }
+
+    @Test
+    fun parsesOther64BlockFieldDumps() {
+        val second = SfrChipParser.parse("uid", loadExport("/field-64-error2.txt"))
+        val third = SfrChipParser.parse("uid", loadExport("/field-64-error3.txt"))
+        assertEquals(64, second.blockCount)
+        assertEquals(20, second.logicalId)
+        assertTrue(second.punches.first().isStart)
+        assertTrue(second.punches.last().isFinish)
+        assertEquals(64, third.blockCount)
+        assertEquals(15, third.logicalId)
+        assertTrue(third.punches.last().isFinish)
+    }
+
+    @Test
+    fun parses128BlockFieldDump() {
+        val dump = SfrChipParser.parse("uid", loadExport("/field-128-ok.txt"))
+        assertEquals(128, dump.blockCount)
+        assertEquals(BlockOrder.NfcTools, dump.blockOrder)
+        assertEquals(98, dump.logicalId)
+        assertEquals(36, dump.pointerEnd)
+        assertEquals(32, dump.punches.size)
+        assertTrue(dump.punches.last().isFinish)
+    }
+
+    @Test
+    fun truncatedDumpStillYieldsPunchesBeforePointer() {
+        val full = loadExport("/field-64-error.txt")
+        val dump = SfrChipParser.parse("uid", full.take(10))
+        assertEquals(10, dump.blockCount)
+        assertEquals(36, dump.pointerEnd)
+        assertEquals(81, dump.logicalId)
+        assertTrue(dump.punches.isNotEmpty())
+        assertTrue(dump.punches.first().isStart)
+    }
+
+    @Test
     fun hidOrderIsParsedWithoutReverse() {
         val hid = MutableList(BLOCK_COUNT) { ByteArray(4) }
         hid[1] = byteArrayOf(0x00, 0x11, 0x42, 0x41)
@@ -46,17 +96,19 @@ class SfrChipParserTest {
 internal fun loadExport(resource: String): List<ByteArray> {
     val text = SfrChipParserTest::class.java.getResource(resource)?.readText()
         ?: error("missing $resource")
-    val blocks = MutableList(BLOCK_COUNT) { ByteArray(4) }
+    val byIndex = sortedMapOf<Int, ByteArray>()
     val re = Regex("""\[\s*([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2})\s*]\s*Сектор\s*([0-9A-Fa-f]+)""")
     for (line in text.lineSequence()) {
         val m = re.find(line) ?: continue
         val idx = m.groupValues[5].toInt(16)
-        blocks[idx] = byteArrayOf(
+        byIndex[idx] = byteArrayOf(
             m.groupValues[1].toInt(16).toByte(),
             m.groupValues[2].toInt(16).toByte(),
             m.groupValues[3].toInt(16).toByte(),
             m.groupValues[4].toInt(16).toByte(),
         )
     }
-    return blocks
+    val count = (byIndex.keys.maxOrNull() ?: -1) + 1
+    require(count >= MIN_BLOCK_COUNT) { "export $resource has $count blocks" }
+    return List(count) { byIndex[it] ?: ByteArray(4) }
 }

@@ -109,8 +109,8 @@ pub async fn publish_event(
         if person.source_id <= 0 {
             bail!("participant source_id must be positive");
         }
-        if person.bib.trim().is_empty() {
-            bail!("participant bib is required");
+        if person.name.trim().is_empty() {
+            bail!("participant name is required");
         }
         let marks = serde_json::to_value(person.marks.as_deref().unwrap_or(&[]))?;
         let path = serde_json::to_value(person.path.as_deref().unwrap_or(&[]))?;

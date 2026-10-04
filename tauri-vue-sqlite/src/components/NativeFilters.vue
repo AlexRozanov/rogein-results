@@ -61,7 +61,8 @@ const selectedAwardLabel = computed(() => {
 });
 
 const selectedCourseLabel = computed(() => {
-  if (!props.courseName) return props.courses[0]?.name ?? "—";
+  if (!props.courseName) return "Все";
+  if (props.courseName === "__empty__") return "Без дистанции";
   return props.courses.find((c) => c.name === props.courseName)?.name ?? props.courseName;
 });
 
@@ -118,7 +119,7 @@ onBeforeUnmount(() => {
         <option value="Дисквалификация">Дисквалификация</option>
         <option value="Ошибка">Ошибка</option>
         <option value="Не стартовал">Не стартовал</option>
-        <option v-if="!isOrient" value="Нет в протоколе">Нет в протоколе</option>
+        <option value="Нет в протоколе">Нет в протоколе</option>
       </select>
     </label>
     <span class="subtitle">Выбрано: {{ selectedStatusLabel }}</span>
@@ -140,9 +141,11 @@ onBeforeUnmount(() => {
       Дистанция:
       <select
         :value="courseName"
-        :disabled="busy || !courses.length"
+        :disabled="busy"
         @change="emit('update:courseName', ($event.target as HTMLSelectElement).value)"
       >
+        <option value="">Все</option>
+        <option value="__empty__">Без дистанции</option>
         <option v-for="c in courses" :key="c.id" :value="c.name">
           {{ c.name }}
         </option>

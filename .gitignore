@@ -19,13 +19,15 @@ site/web/node_modules
 site/web/dist
 site/media/events
 
-android/.gradle
-android/build
-android/.idea
 android/local.properties
+android/.gradle/
+android/.kotlin/
+android/.idea/
 android/**/build
 android/**/*.iml
+android/chip-parse/bin/
 
 programs/
 Рогейн_Щукино_стартовый_протокол_загрузка.csv
 map.jpeg
+android/chip-parse/src/test/resources/field-64-error.txt

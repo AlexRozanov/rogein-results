@@ -20,6 +20,7 @@ data class ChipDump(
     val punches: List<Punch>,
     val blockOrder: BlockOrder,
     val pointerEnd: Int?,
+    val blockCount: Int,
 )
 
 enum class BlockOrder {
@@ -30,6 +31,7 @@ enum class BlockOrder {
 }
 
 const val BLOCK_COUNT = 128
+const val MIN_BLOCK_COUNT = 5
 const val BLOCK_SIZE = 4
 const val CP_FINISH = 240
 const val CP_START = 241

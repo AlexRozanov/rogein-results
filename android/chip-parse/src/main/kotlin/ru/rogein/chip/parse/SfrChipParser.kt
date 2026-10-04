@@ -2,8 +2,8 @@ package ru.rogein.chip.parse
 
 object SfrChipParser {
     fun parse(uid: String, rawBlocks: List<ByteArray>): ChipDump {
-        require(rawBlocks.size == BLOCK_COUNT) {
-            "expected $BLOCK_COUNT blocks, got ${rawBlocks.size}"
+        require(rawBlocks.size in MIN_BLOCK_COUNT..BLOCK_COUNT) {
+            "expected $MIN_BLOCK_COUNT…$BLOCK_COUNT blocks, got ${rawBlocks.size}"
         }
         rawBlocks.forEachIndexed { i, block ->
             require(block.size == BLOCK_SIZE) { "block $i size ${block.size}" }
@@ -22,8 +22,10 @@ object SfrChipParser {
         val logicalId = blocks.getOrNull(3)?.let(::readLogicalId)
         val pointerEnd = blocks.getOrNull(4)?.let { it[0].toInt() and 0xFF }
         val punches = mutableListOf<Punch>()
-        if (pointerEnd != null && pointerEnd in 5 until BLOCK_COUNT) {
-            for (i in 5..pointerEnd) {
+        val last = blocks.lastIndex
+        val end = pointerEnd?.takeIf { it >= 5 }?.coerceAtMost(last)
+        if (end != null) {
+            for (i in 5..end) {
                 val punch = readPunch(blocks[i]) ?: continue
                 punches += punch
             }
@@ -35,13 +37,14 @@ object SfrChipParser {
             punches = punches,
             blockOrder = order,
             pointerEnd = pointerEnd,
+            blockCount = blocks.size,
         )
     }
 
     private fun score(dump: ChipDump): Int {
         var s = 0
         val end = dump.pointerEnd
-        if (end != null && end in 5 until BLOCK_COUNT) s += 10
+        if (end != null && end in 5 until dump.blockCount) s += 10
         s += dump.punches.size
         if (dump.logicalId != null) s += 5
         if (dump.clearedAt != null) s += 2
