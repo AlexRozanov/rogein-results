@@ -56,34 +56,34 @@ pub struct SitePublishResult {
 }
 
 #[derive(Debug, Serialize)]
-struct PublishPayload {
-    title: String,
-    competition_date: Option<NaiveDate>,
-    award_groups: Vec<PublishAwardGroup>,
-    participants: Vec<PublishParticipant>,
-    results: Vec<PublishResultRow>,
-    map_points: Vec<PublishMapPoint>,
-    meters_per_pixel: Option<f64>,
-    sport_kind: String,
+pub struct PublishPayload {
+    pub title: String,
+    pub competition_date: Option<NaiveDate>,
+    pub award_groups: Vec<PublishAwardGroup>,
+    pub participants: Vec<PublishParticipant>,
+    pub results: Vec<PublishResultRow>,
+    pub map_points: Vec<PublishMapPoint>,
+    pub meters_per_pixel: Option<f64>,
+    pub sport_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    start_cp: Option<i32>,
+    pub start_cp: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    finish_cp: Option<i32>,
+    pub finish_cp: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
-struct PublishAwardGroup {
-    source_id: i64,
-    name: String,
-    gender_mode: String,
-    min_age: Option<i32>,
-    sort_order: i32,
+pub struct PublishAwardGroup {
+    pub source_id: i64,
+    pub name: String,
+    pub gender_mode: String,
+    pub min_age: Option<i32>,
+    pub sort_order: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    course_cps: Vec<i32>,
+    pub course_cps: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct PublishPathPoint {
+pub struct PublishPathPoint {
     x: f64,
     y: f64,
     cp_number: Option<i32>,
@@ -91,50 +91,50 @@ struct PublishPathPoint {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct PublishMapPoint {
-    kind: String,
-    cp_number: Option<i32>,
-    name: String,
-    map_x: f64,
-    map_y: f64,
+pub struct PublishMapPoint {
+    pub kind: String,
+    pub cp_number: Option<i32>,
+    pub name: String,
+    pub map_x: f64,
+    pub map_y: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct PublishMark {
-    seq: i32,
-    cp_number: i32,
-    mark_time: String,
+pub struct PublishMark {
+    pub seq: i32,
+    pub cp_number: i32,
+    pub mark_time: String,
 }
 
 #[derive(Debug, Serialize)]
-struct PublishParticipant {
-    source_id: i64,
-    bib: String,
-    chip_physical: Option<String>,
-    chip_logical: Option<String>,
-    name: String,
-    gender: Option<String>,
-    birth_date: Option<NaiveDate>,
-    age: Option<i32>,
-    team_id: Option<i64>,
-    format_name: Option<String>,
-    marks: Vec<PublishMark>,
-    path: Vec<PublishPathPoint>,
-    distance_m: Option<f64>,
+pub struct PublishParticipant {
+    pub source_id: i64,
+    pub bib: String,
+    pub chip_physical: Option<String>,
+    pub chip_logical: Option<String>,
+    pub name: String,
+    pub gender: Option<String>,
+    pub birth_date: Option<NaiveDate>,
+    pub age: Option<i32>,
+    pub team_id: Option<i64>,
+    pub format_name: Option<String>,
+    pub marks: Vec<PublishMark>,
+    pub path: Vec<PublishPathPoint>,
+    pub distance_m: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
-struct PublishResultRow {
-    participant_source_id: i64,
-    award_group_source_id: i64,
-    place: Option<i32>,
-    points_raw: i32,
-    penalty_points: i32,
-    points_final: i32,
-    elapsed_seconds: i32,
-    status: String,
+pub struct PublishResultRow {
+    pub participant_source_id: i64,
+    pub award_group_source_id: i64,
+    pub place: Option<i32>,
+    pub points_raw: i32,
+    pub penalty_points: i32,
+    pub points_final: i32,
+    pub elapsed_seconds: i32,
+    pub status: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    diagnostics: Vec<String>,
+    pub diagnostics: Vec<String>,
 }
 
 struct MapUpload {
@@ -265,28 +265,13 @@ pub fn publish_current_start(
     let title = title.trim().to_string();
     let payload = build_payload(&mut conn, &title)?;
     let map = load_map_upload(&conn, course_map_path)?;
-    let participant_count = payload.participants.len();
-    let result_count = payload.results.len();
-
-    let base = normalize_base_url(&connection.api_base_url)?;
-    let token = connection.publish_token.trim();
-    if token.is_empty() {
-        return Err("Укажите токен публикации.".into());
-    }
-    let url = format!("{base}/api/events/{slug}");
-    let body = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Не удалось собрать JSON публикации: {e}"))?;
-    let response = agent()
-        .put(&url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("Content-Type", "application/json")
-        .send_bytes(&body)
-        .map_err(|e| map_http_error("публикации результатов", e, body.len()))?;
-    expect_ok(response, "публикации результатов")?;
+    let result = send_event_payload(&connection, &slug, &payload)?;
 
     let mut has_map = false;
     if let Some(map) = map {
-        let map_url = format!("{base}/api/events/{slug}/map");
+        let base = normalize_base_url(&connection.api_base_url)?;
+        let token = connection.publish_token.trim();
+        let map_url = format!("{base}/api/events/{}/map", result.slug);
         let mut request = agent()
             .put(&map_url)
             .set("Authorization", &format!("Bearer {token}"))
@@ -316,10 +301,39 @@ pub fn publish_current_start(
     }
 
     Ok(SitePublishResult {
-        slug,
-        participant_count,
-        result_count,
+        slug: result.slug,
+        participant_count: result.participant_count,
+        result_count: result.result_count,
         has_map,
+    })
+}
+
+pub fn send_event_payload(
+    connection: &SiteConnection,
+    slug: &str,
+    payload: &PublishPayload,
+) -> Result<SitePublishResult, String> {
+    let slug = normalize_slug(slug)?;
+    let base = normalize_base_url(&connection.api_base_url)?;
+    let token = connection.publish_token.trim();
+    if token.is_empty() {
+        return Err("Укажите токен публикации.".into());
+    }
+    let url = format!("{base}/api/events/{slug}");
+    let body = serde_json::to_vec(payload)
+        .map_err(|e| format!("Не удалось собрать JSON публикации: {e}"))?;
+    let response = agent()
+        .put(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json")
+        .send_bytes(&body)
+        .map_err(|e| map_http_error("публикации результатов", e, body.len()))?;
+    expect_ok(response, "публикации результатов")?;
+    Ok(SitePublishResult {
+        slug,
+        participant_count: payload.participants.len(),
+        result_count: payload.results.len(),
+        has_map: false,
     })
 }
 
