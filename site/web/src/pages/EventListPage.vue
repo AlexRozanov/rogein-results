@@ -69,8 +69,7 @@ onMounted(load);
 
 <template>
   <h1>Результаты</h1>
-  <p class="muted">{{ site.resultsLead }}</p>
-
+  
   <form class="filters" @submit.prevent>
     <label>
       Тип
