@@ -25,3 +25,5 @@ android/.kotlin/
 android/.idea/
 android/**/build/
 
+programs/
+android/chip-parse/src/test/resources/field-64-error.txt
