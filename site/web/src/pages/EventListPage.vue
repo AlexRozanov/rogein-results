@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { site, sportKindLabel } from "../content/site";
 
 type EventListItem = {
   slug: string;
@@ -69,8 +68,7 @@ onMounted(load);
 
 <template>
   <h1>Результаты</h1>
-  
-  <form class="filters" @submit.prevent>
+    <form class="filters" @submit.prevent>
     <label>
       Тип
       <select :value="kind" @change="setQuery({ kind: ($event.target as HTMLSelectElement).value, page: 1 })">
