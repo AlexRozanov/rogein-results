@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { sportKindLabel } from "../content/site";
 
 type EventListItem = {
   slug: string;
