@@ -3,8 +3,10 @@ import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import FilePickerButton from "./FilePickerButton.vue";
 import NativeSettingsForm from "./NativeSettingsForm.vue";
+import ArchiveOrientPublish from "./ArchiveOrientPublish.vue";
 
 type SportKind = "rogaine" | "orient";
+type WizardMode = "live" | "archive";
 
 type NativeSettings = {
   control_minutes: number;
@@ -18,7 +20,7 @@ type NativeSettings = {
   sport_kind: SportKind;
 };
 
-type StepId = "sport" | "start" | "legends" | "settings" | "courses" | "finish";
+type StepId = "sport" | "start" | "legends" | "settings" | "courses" | "finish" | "archive";
 
 type WizardStep = { id: StepId; title: string; hint: string };
 
@@ -40,6 +42,7 @@ const legendsFile = ref<File | null>(null);
 const finishFile = ref<File | null>(null);
 const coursesFile = ref<File | null>(null);
 const sportKind = ref<SportKind>("rogaine");
+const wizardMode = ref<WizardMode>("live");
 const stepDone = ref<Record<StepId, boolean>>({
   sport: false,
   start: false,
@@ -47,6 +50,7 @@ const stepDone = ref<Record<StepId, boolean>>({
   settings: false,
   courses: false,
   finish: false,
+  archive: false,
 });
 
 const isBusy = computed(() => props.busy || localBusy.value);
@@ -55,8 +59,18 @@ const steps = computed<WizardStep[]>(() => {
   const sport: WizardStep = {
     id: "sport",
     title: "Вид соревнования",
-    hint: "Рогейн считает очки за КП. Заданное направление — порядок КП и время.",
+    hint: "Рогейн и заданное направление — новый старт. Загрузка результатов — готовый архивный CSV на сайт.",
   };
+  if (wizardMode.value === "archive") {
+    return [
+      sport,
+      {
+        id: "archive",
+        title: "Загрузка результатов",
+        hint: "Укажите CSV, название, slug и дату. Итоги берутся из файла, КП только для карточки.",
+      },
+    ];
+  }
   const finish: WizardStep = {
     id: "finish",
     title: "Финишный протокол",
@@ -134,6 +148,7 @@ async function chooseSport(kind: SportKind) {
       sportKind: kind,
     });
     sportKind.value = kind;
+    wizardMode.value = "live";
     stepDone.value.sport = true;
     emit(
       "status",
@@ -149,6 +164,20 @@ async function chooseSport(kind: SportKind) {
   } finally {
     localBusy.value = false;
   }
+}
+
+function chooseArchive() {
+  wizardMode.value = "archive";
+  stepDone.value.sport = true;
+  emit("status", "Загрузка архивных результатов ориентирования на сайт.");
+  if (current.value?.id === "sport") {
+    goNext();
+  }
+}
+
+function onArchivePublished() {
+  stepDone.value.archive = true;
+  emit("finished");
 }
 
 async function importStart() {
@@ -326,7 +355,7 @@ async function importFinish() {
             <button
               type="button"
               class="sport-kind-btn"
-              :class="{ active: sportKind === 'rogaine' }"
+              :class="{ active: wizardMode === 'live' && sportKind === 'rogaine' }"
               :disabled="isBusy"
               @click="chooseSport('rogaine')"
             >
@@ -335,13 +364,26 @@ async function importFinish() {
             <button
               type="button"
               class="sport-kind-btn"
-              :class="{ active: sportKind === 'orient' }"
+              :class="{ active: wizardMode === 'live' && sportKind === 'orient' }"
               :disabled="isBusy"
               @click="chooseSport('orient')"
             >
               Заданное направление
             </button>
+            <button
+              type="button"
+              class="sport-kind-btn"
+              :class="{ active: wizardMode === 'archive' }"
+              :disabled="isBusy"
+              @click="chooseArchive"
+            >
+              Загрузка результатов
+            </button>
           </div>
+        </template>
+
+        <template v-else-if="current.id === 'archive'">
+          <ArchiveOrientPublish :busy="isBusy" @status="emit('status', $event)" @published="onArchivePublished" />
         </template>
 
         <template v-else-if="current.id === 'start'">

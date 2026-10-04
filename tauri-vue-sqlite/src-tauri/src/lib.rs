@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod archive_orient;
 pub mod domain;
 pub mod phone_sync;
 pub mod site_publish;
@@ -21,6 +22,7 @@ use domain::{
     StartProtocolImportSummary, StartProtocolRow, DataPresenceCounts,
 };
 use serde::Serialize;
+use archive_orient::ArchiveOrientPreview;
 use site_publish::{SitePublishResult, SitePublishSettings};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -208,6 +210,35 @@ fn save_site_publish_settings(
 #[tauri::command]
 fn test_site_publish_connection(api_base_url: String) -> Result<String, String> {
     site_publish::test_connection(&api_base_url)
+}
+
+#[tauri::command]
+fn preview_archive_orient_csv(
+    csv_content: String,
+    competition_date: String,
+) -> Result<ArchiveOrientPreview, String> {
+    archive_orient::preview_csv(&csv_content, &competition_date)
+}
+
+#[tauri::command]
+fn publish_archive_orient_csv(
+    state: State<'_, AppState>,
+    csv_content: String,
+    title: String,
+    slug: String,
+    competition_date: String,
+    api_base_url: String,
+    publish_token: String,
+) -> Result<SitePublishResult, String> {
+    archive_orient::publish_csv(
+        &state.app_data_dir,
+        &csv_content,
+        &title,
+        &slug,
+        &competition_date,
+        &api_base_url,
+        &publish_token,
+    )
 }
 
 #[tauri::command]
@@ -1758,6 +1789,8 @@ pub fn run() {
             get_site_publish_settings,
             save_site_publish_settings,
             test_site_publish_connection,
+            preview_archive_orient_csv,
+            publish_archive_orient_csv,
             publish_current_start,
             recalculate_results,
             get_settings,
