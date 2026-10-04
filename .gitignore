@@ -19,3 +19,9 @@ site/web/node_modules
 site/web/dist
 site/media/events
 
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/.idea/
+android/**/build/
+

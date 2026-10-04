@@ -32,6 +32,16 @@ pub struct ImportSummary {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PhoneImportSummary {
+    pub imported: i64,
+    pub already_imported: i64,
+    pub unmatched: i64,
+    pub skipped_empty: i64,
+    pub participants_count: i64,
+    pub results_count: i64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct StartProtocolImportSummary {
     pub imported_rows: i64,
     pub total_rows: i64,
@@ -708,6 +718,15 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("create idx_leg_exclusion_rules_course: {e}"))?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS phone_chip_imports (
+            queue_id TEXT PRIMARY KEY,
+            imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+    .map_err(|e| format!("ensure phone_chip_imports: {e}"))?;
     Ok(())
 }
 
@@ -1322,6 +1341,316 @@ pub fn import_csv_content(
     tx.commit()
         .map_err(|e| format!("commit import transaction: {e}"))?;
     Ok(ImportSummary {
+        participants_count,
+        results_count,
+    })
+}
+
+const PHONE_CLEAR_CP: i64 = 243;
+
+#[derive(Debug, Deserialize)]
+struct PhoneSnapshotFile {
+    items: Vec<PhoneSnapshotItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhoneSnapshotItem {
+    id: String,
+    uid: String,
+    #[serde(rename = "logicalId")]
+    logical_id: Option<i64>,
+    #[serde(default)]
+    punches: Vec<PhoneSnapshotPunch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhoneSnapshotPunch {
+    cp: i64,
+    time: String,
+}
+
+/// Чипы из снимка телефона. Очередь на телефоне не меняется.
+/// Повтор того же `id` пропускается. Полная замена финиша (CSV reset) сбрасывает эту память.
+pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneImportSummary, String> {
+    let snapshot: PhoneSnapshotFile = serde_json::from_str(body)
+        .map_err(|e| format!("снимок очереди повреждён: {e}"))?;
+    let known = load_phone_import_ids(conn)?;
+    let mut seen = HashSet::new();
+    let mut already_imported = 0_i64;
+    let mut fresh = Vec::new();
+    for item in snapshot.items {
+        let id = item.id.trim().to_string();
+        if id.is_empty() {
+            return Err("в снимке чип без id".to_string());
+        }
+        if !seen.insert(id.clone()) || known.contains(&id) {
+            already_imported += 1;
+            continue;
+        }
+        fresh.push(PhoneSnapshotItem { id, ..item });
+    }
+
+    if fresh.is_empty() {
+        return phone_import_summary(conn, 0, already_imported, 0, 0);
+    }
+
+    let settings = get_settings(conn)?;
+    let competition_date = NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d")
+        .map_err(|_| {
+            "Укажите дату соревнования в настройках (ГГГГ-ММ-ДД): на чипе только время суток."
+                .to_string()
+        })?;
+    let orient = settings.sport_kind == "orient";
+
+    let mut prepared = Vec::new();
+    let mut skipped_empty = 0_i64;
+    let mut empty_labels = Vec::new();
+    for item in &fresh {
+        match prepare_phone_item(conn, item, competition_date, orient)? {
+            Some(row) => prepared.push(row),
+            None => {
+                skipped_empty += 1;
+                empty_labels.push(phone_item_label(item));
+            }
+        }
+    }
+    if prepared.is_empty() {
+        if skipped_empty > 0 {
+            return Err(format!(
+                "{}: нет отметок. Чип в очереди телефона без старта/КП — уберите его из очереди или приложите после финиша.",
+                empty_labels
+                    .iter()
+                    .map(|label| format!("чип {label}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return phone_import_summary(conn, 0, already_imported, 0, 0);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("start transaction: {e}"))?;
+    let mut unmatched = 0_i64;
+    {
+        let mut participant_stmt = tx
+            .prepare(
+                r#"
+                INSERT INTO participants(
+                    participant_id, chip_raw_id, name, start_station_id, start_time, source_row, course_name
+                ) VALUES(?, ?, ?, ?, ?, 0, ?)
+                "#,
+            )
+            .map_err(|e| format!("prepare participants insert: {e}"))?;
+        let mut mark_stmt = tx
+            .prepare(
+                "INSERT INTO marks_raw(finish_participant_id, seq, cp_number, mark_time) VALUES(?, ?, ?, ?)",
+            )
+            .map_err(|e| format!("prepare marks insert: {e}"))?;
+        let mut seen_stmt = tx
+            .prepare("INSERT INTO phone_chip_imports(queue_id) VALUES(?)")
+            .map_err(|e| format!("prepare phone import insert: {e}"))?;
+        for row in &prepared {
+            if !row.matched {
+                unmatched += 1;
+            }
+            participant_stmt
+                .execute(params![
+                    row.bib,
+                    row.uid,
+                    row.name,
+                    row.start_station_id,
+                    row.start_time,
+                    row.course_name
+                ])
+                .map_err(|e| format!("insert phone participant {}: {e}", row.bib))?;
+            let finish_id = tx.last_insert_rowid();
+            for (seq, cp, mark_time) in &row.marks {
+                mark_stmt
+                    .execute(params![finish_id, seq, cp, mark_time])
+                    .map_err(|e| format!("insert phone mark for {}: {e}", row.bib))?;
+            }
+            seen_stmt
+                .execute(params![row.queue_id])
+                .map_err(|e| format!("remember phone chip {}: {e}", row.queue_id))?;
+        }
+    }
+    recalculate_tx(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("commit phone import: {e}"))?;
+    phone_import_summary(
+        conn,
+        prepared.len() as i64,
+        already_imported,
+        unmatched,
+        skipped_empty,
+    )
+}
+
+struct PreparedPhoneRow {
+    queue_id: String,
+    bib: String,
+    uid: String,
+    name: String,
+    course_name: String,
+    start_station_id: i64,
+    start_time: String,
+    marks: Vec<(i64, i64, String)>,
+    matched: bool,
+}
+
+fn phone_item_label(item: &PhoneSnapshotItem) -> String {
+    item.logical_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| item.uid.clone())
+}
+
+fn prepare_phone_item(
+    conn: &Connection,
+    item: &PhoneSnapshotItem,
+    competition_date: NaiveDate,
+    orient: bool,
+) -> Result<Option<PreparedPhoneRow>, String> {
+    let label = phone_item_label(item);
+    let mut punches = Vec::new();
+    for punch in &item.punches {
+        if punch.cp == PHONE_CLEAR_CP || punch.cp <= 0 {
+            continue;
+        }
+        let clock = NaiveTime::parse_from_str(punch.time.trim(), "%H:%M:%S").map_err(|_| {
+            format!("чип {label}: неверное время отметки '{}'", punch.time)
+        })?;
+        punches.push((punch.cp, clock));
+    }
+    if punches.is_empty() {
+        return Ok(None);
+    }
+    let stamped = stamp_clock_times(competition_date, &punches.iter().map(|(_, t)| *t).collect::<Vec<_>>());
+    let marks: Vec<(i64, i64, String)> = punches
+        .iter()
+        .zip(stamped.iter())
+        .enumerate()
+        .map(|(idx, ((cp, _), dt))| {
+            ((idx as i64) + 1, *cp, dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        })
+        .collect();
+    let start_idx = punches
+        .iter()
+        .position(|(cp, _)| *cp == 241)
+        .unwrap_or(0);
+    let (bib, name, course_name, matched) = match item.logical_id {
+        Some(logical_id) => {
+            let hits = protocol_hits_for_bib(conn, logical_id)?;
+            if hits.len() == 1 {
+                let (protocol_bib, protocol_name, format_name) = &hits[0];
+                let course = if orient { format_name.clone() } else { String::new() };
+                (protocol_bib.clone(), protocol_name.clone(), course, true)
+            } else {
+                (
+                    logical_id.to_string(),
+                    format!("чип {logical_id}"),
+                    String::new(),
+                    false,
+                )
+            }
+        }
+        None => (item.uid.clone(), format!("чип {}", item.uid), String::new(), false),
+    };
+    Ok(Some(PreparedPhoneRow {
+        queue_id: item.id.clone(),
+        bib,
+        uid: item.uid.clone(),
+        name,
+        course_name,
+        start_station_id: punches[start_idx].0,
+        start_time: marks[start_idx].2.clone(),
+        marks,
+        matched,
+    }))
+}
+
+fn stamp_clock_times(start_date: NaiveDate, clocks: &[NaiveTime]) -> Vec<NaiveDateTime> {
+    let mut day = start_date;
+    let mut prev: Option<NaiveTime> = None;
+    let mut out = Vec::with_capacity(clocks.len());
+    for clock in clocks {
+        if let Some(previous) = prev {
+            if *clock < previous {
+                day = day
+                    .checked_add_signed(Duration::days(1))
+                    .unwrap_or(day);
+            }
+        }
+        prev = Some(*clock);
+        out.push(day.and_time(*clock));
+    }
+    out
+}
+
+fn protocol_hits_for_bib(
+    conn: &Connection,
+    logical_id: i64,
+) -> Result<Vec<(String, String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT TRIM(participant_id), name, TRIM(IFNULL(format_name, ''))
+            FROM start_protocol
+            WHERE TRIM(participant_id) GLOB '[0-9]*'
+              AND TRIM(participant_id) NOT GLOB '*[^0-9]*'
+              AND CAST(TRIM(participant_id) AS INTEGER) = ?1
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| format!("prepare protocol lookup: {e}"))?;
+    let rows = stmt
+        .query_map(params![logical_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query protocol lookup: {e}"))?;
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row.map_err(|e| format!("read protocol lookup: {e}"))?);
+    }
+    Ok(hits)
+}
+
+fn load_phone_import_ids(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT queue_id FROM phone_chip_imports")
+        .map_err(|e| format!("prepare phone imports: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query phone imports: {e}"))?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        ids.insert(row.map_err(|e| format!("read phone import id: {e}"))?);
+    }
+    Ok(ids)
+}
+
+fn phone_import_summary(
+    conn: &Connection,
+    imported: i64,
+    already_imported: i64,
+    unmatched: i64,
+    skipped_empty: i64,
+) -> Result<PhoneImportSummary, String> {
+    let participants_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+        .map_err(|e| format!("count participants: {e}"))?;
+    let results_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM results", [], |r| r.get(0))
+        .map_err(|e| format!("count results: {e}"))?;
+    Ok(PhoneImportSummary {
+        imported,
+        already_imported,
+        unmatched,
+        skipped_empty,
         participants_count,
         results_count,
     })
@@ -3431,6 +3760,10 @@ fn append_course_name_filter(
     let Some(name) = course_name.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
     };
+    if name == "__empty__" {
+        query.push_str(&format!(" AND {} IS NULL ", sql_effective_course_name("p")));
+        return;
+    }
     query.push_str(&format!(" AND {} = ? ", sql_effective_course_name("p")));
     params_dyn.push(name.to_string());
 }
@@ -9236,6 +9569,7 @@ fn clear_finish_import_data(tx: &Transaction<'_>) -> Result<(), rusqlite::Error>
         "DELETE FROM manual_corrections WHERE finish_participant_id IS NOT NULL",
         [],
     )?;
+    tx.execute("DELETE FROM phone_chip_imports", [])?;
     Ok(())
 }
 
@@ -9520,7 +9854,7 @@ mod tests {
         add_cp_correction, calculate_orient_result, ManualCorrection,
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
-        import_csv_content, init_db, orient_course_legs, orient_start_punch_kind, parse_time,
+        import_csv_content, import_phone_snapshot, init_db, orient_course_legs, orient_start_punch_kind, parse_time,
         query_participant_details, recalculate, resolve_orient_leg_to, set_setting_value,
         suggested_start_time, ExclusionRule, Mark, Settings,
     };
@@ -9745,6 +10079,121 @@ mod tests {
         assert!(statuses.iter().all(|(_, status, diag)| {
             status == "Ошибка" && diag.contains("duplicate_bib_in_finish")
         }));
+    }
+
+    #[test]
+    fn phone_snapshot_links_protocol_and_skips_repeat() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        set_setting_value(&conn, "start_cp", "241").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name) VALUES('012', 'Иванов')",
+            [],
+        )
+        .unwrap();
+        let body = r#"{
+            "items":[{
+                "id":"q1",
+                "uid":"AA11",
+                "logicalId":12,
+                "punches":[
+                    {"cp":243,"time":"09:00:00"},
+                    {"cp":241,"time":"10:00:00"},
+                    {"cp":31,"time":"10:30:00"},
+                    {"cp":240,"time":"00:10:00"}
+                ]
+            }]
+        }"#;
+        let first = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(first.imported, 1);
+        assert_eq!(first.already_imported, 0);
+        assert_eq!(first.unmatched, 0);
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT participant_id, name, start_time FROM participants",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "012");
+        assert_eq!(row.1, "Иванов");
+        assert_eq!(row.2, "2026-08-02 10:00:00");
+        let times: Vec<(i64, String)> = conn
+            .prepare("SELECT cp_number, mark_time FROM marks_raw ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            times,
+            vec![
+                (241, "2026-08-02 10:00:00".to_string()),
+                (31, "2026-08-02 10:30:00".to_string()),
+                (240, "2026-08-03 00:10:00".to_string()),
+            ]
+        );
+        let status: String = conn
+            .query_row("SELECT status FROM results WHERE name = 'Иванов'", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(status, "Нет в протоколе");
+
+        let second = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.already_imported, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn phone_snapshot_without_protocol_keeps_chip_only() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{"items":[{"id":"q2","uid":"BB","logicalId":7,"punches":[{"cp":241,"time":"11:00:00"}]}]}"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.unmatched, 1);
+        let name: String = conn
+            .query_row("SELECT name FROM participants WHERE participant_id = '7'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "чип 7");
+        assert_eq!(summary.skipped_empty, 0);
+    }
+
+    #[test]
+    fn phone_snapshot_skips_chip_without_punches() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{
+            "items":[
+                {"id":"empty","uid":"CC","logicalId":26,"punches":[]},
+                {"id":"ok","uid":"DD","logicalId":7,"punches":[{"cp":241,"time":"11:00:00"}]}
+            ]
+        }"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped_empty, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let only: String = conn
+            .query_row("SELECT participant_id FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(only, "7");
+    }
+
+    #[test]
+    fn phone_snapshot_only_empty_chip_is_error() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{"items":[{"id":"empty","uid":"CC","logicalId":26,"punches":[]}]}"#;
+        let err = import_phone_snapshot(&mut conn, body).expect_err("empty-only snapshot");
+        assert!(err.contains("чип 26"), "unexpected error: {err}");
+        assert!(err.contains("нет отметок"), "unexpected error: {err}");
     }
 
     #[test]

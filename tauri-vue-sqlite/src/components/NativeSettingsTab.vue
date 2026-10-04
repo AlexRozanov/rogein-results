@@ -8,6 +8,7 @@ import NativeExclusionRules from "./NativeExclusionRules.vue";
 import NativeAwardGroups from "./NativeAwardGroups.vue";
 import NativeStartArchives from "./NativeStartArchives.vue";
 import NativeSitePublish from "./NativeSitePublish.vue";
+import ArchiveOrientPublish from "./ArchiveOrientPublish.vue";
 import NativeOrientRemovedCps from "./NativeOrientRemovedCps.vue";
 import NativeOrientExclusionRules from "./NativeOrientExclusionRules.vue";
 import CollapsiblePanel from "./CollapsiblePanel.vue";
@@ -204,6 +205,13 @@ async function onWorkspaceReset() {
       :busy="props.busy || localBusy"
       @status="emit('status', $event)"
     />
+
+    <CollapsiblePanel panel-id="archive-orient" title="Архив ориентирования на сайт">
+      <ArchiveOrientPublish
+        :busy="props.busy || localBusy"
+        @status="emit('status', $event)"
+      />
+    </CollapsiblePanel>
 
     <CollapsiblePanel panel-id="general" title="Общие настройки">
       <p class="subtitle">

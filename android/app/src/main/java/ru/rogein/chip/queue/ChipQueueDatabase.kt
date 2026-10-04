@@ -32,6 +32,9 @@ interface ChipQueueDao {
     @Query("SELECT * FROM chip_queue WHERE ackedAt IS NULL ORDER BY createdAt ASC")
     fun observePending(): Flow<List<QueuedChipEntity>>
 
+    @Query("SELECT * FROM chip_queue ORDER BY createdAt ASC")
+    suspend fun listAll(): List<QueuedChipEntity>
+
     @Insert
     suspend fun insert(item: QueuedChipEntity)
 

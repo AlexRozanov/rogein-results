@@ -25,6 +25,17 @@ type ImportSummary = {
   results_count: number;
 };
 
+type PhoneReadSummary = {
+  imported: number;
+  already_imported: number;
+  unmatched: number;
+  skipped_empty: number;
+  participants_count: number;
+  results_count: number;
+  snapshot_deleted: boolean;
+  snapshot_note: string;
+};
+
 type NativeSettings = {
   control_minutes: number;
   penalty_per_minute: number;
@@ -393,6 +404,37 @@ async function onImportDialogReplace() {
   await importCsv(true);
 }
 
+async function readPhoneQueue() {
+  nativeBusy.value = true;
+  nativeStatus.value = "Чтение очереди с телефона...";
+  try {
+    const summary = await invoke<PhoneReadSummary>("import_phone_snapshot");
+    const deleted = summary.snapshot_deleted
+      ? "Снимок на телефоне удалён."
+      : summary.snapshot_note || "Снимок на телефоне не удалён.";
+    const skipped =
+      summary.skipped_empty > 0
+        ? ` без отметок пропущены ${summary.skipped_empty}.`
+        : "";
+    nativeStatus.value =
+      `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
+      `Участников ${summary.participants_count}, результатов ${summary.results_count}. ${deleted}`;
+    pageOffset.value = 0;
+    if (summary.unmatched > 0) {
+      nativeFilterStatus.value = "";
+      nativeFilterSearch.value = "";
+      nativeFilterFormatId.value = "";
+      nativeFilterAwardGroupId.value = "";
+      nativeFilterCourseName.value = "";
+    }
+    await refreshNativeData();
+  } catch (error) {
+    nativeStatus.value = `Ошибка чтения с телефона: ${String(error)}`;
+  } finally {
+    nativeBusy.value = false;
+  }
+}
+
 async function importCsv(reset: boolean) {
   if (!csvFile.value) {
     nativeStatus.value = "Выберите CSV файл.";
@@ -450,8 +492,12 @@ async function refreshNativeData() {
     const orient = settings.sport_kind === "orient";
     if (orient) {
       const names = courseOptions.value.map((c) => c.name);
-      if (!nativeFilterCourseName.value || !names.includes(nativeFilterCourseName.value)) {
-        nativeFilterCourseName.value = names[0] ?? "";
+      if (
+        nativeFilterCourseName.value &&
+        nativeFilterCourseName.value !== "__empty__" &&
+        !names.includes(nativeFilterCourseName.value)
+      ) {
+        nativeFilterCourseName.value = "";
       }
       if (sortBy.value === "points_final") {
         sortBy.value = "place";
@@ -467,9 +513,7 @@ async function refreshNativeData() {
       ? Number(nativeFilterAwardGroupId.value)
       : null;
     const courseName =
-      settings.sport_kind === "orient" && nativeFilterCourseName.value
-        ? nativeFilterCourseName.value
-        : null;
+      settings.sport_kind === "orient" ? nativeFilterCourseName.value || null : null;
     const response = await invoke<NativeResultsResponse>("get_results", {
       limit: pageSize.value,
       offset: pageOffset.value,
@@ -760,6 +804,7 @@ async function onSortChanged(column: SortBy) {
       <div class="native-row">
         <FilePickerButton @file-selected="onCsvSelected" />
         <button :disabled="nativeBusy || !csvFile" @click="onCsvImportClick">Импорт CSV</button>
+        <button :disabled="nativeBusy" @click="readPhoneQueue">Считать с телефона</button>
         <button :disabled="nativeBusy" @click="recalculateNative">Пересчитать</button>
         <button :disabled="nativeBusy" @click="scanAnomalies">Поиск аномалий</button>
         <button :disabled="nativeBusy" @click="openCpRemapWindow">Путаница КП</button>
@@ -795,7 +840,7 @@ async function onSortChanged(column: SortBy) {
         </button>
         <span v-else>Ошибка: {{ nativeCounts["Ошибка"] ?? 0 }}</span>
         <span>Не стартовал: {{ nativeCounts["Не стартовал"] ?? 0 }}</span>
-        <span v-if="!isOrient">Нет в протоколе: {{ nativeCounts["Нет в протоколе"] ?? 0 }}</span>
+        <span>Нет в протоколе: {{ nativeCounts["Нет в протоколе"] ?? 0 }}</span>
       </div>
 
       <section v-if="hasAnomaliesPanel" class="anomalies-panel">
