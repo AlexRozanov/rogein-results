@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
 import PageLoading from "../components/PageLoading.vue";
+import { parseMarkMs, wrapDeltaSec } from "../orientSplits";
 
 type PathPoint = {
   x: number;
@@ -174,6 +175,44 @@ const metrics = computed(() => {
   const pace = km != null && elapsed != null && elapsed > 0 && km > 0 ? elapsed / km : null;
   const pointsPerKm = km != null && points != null && km > 0 ? points / km : null;
   return { points, elapsed, pointsPerKm, pace, speed };
+});
+
+const markView = computed(() => {
+  const marks = person.value?.marks ?? [];
+  const startCp = event.value?.start_cp ?? 241;
+  const finishCp = event.value?.finish_cp ?? 240;
+  let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
+  if (startIdx < 0) startIdx = 0;
+  let finishIdx = -1;
+  if (finishCp != null) {
+    for (let i = marks.length - 1; i >= 0; i -= 1) {
+      if (marks[i].cp_number === finishCp) {
+        finishIdx = i;
+        break;
+      }
+    }
+  }
+  if (finishIdx < 0) finishIdx = marks.length - 1;
+  const t0 = marks[startIdx] ? parseMarkMs(marks[startIdx].mark_time) : null;
+  let prevMs: number | null = null;
+  const rows = marks.map((mark, index) => {
+    const ms = parseMarkMs(mark.mark_time);
+    const fromStartSec = t0 != null && ms != null ? wrapDeltaSec(t0, ms) : null;
+    const fromPrevSec = prevMs != null && ms != null ? wrapDeltaSec(prevMs, ms) : null;
+    if (ms != null) prevMs = ms;
+    return {
+      seq: mark.seq,
+      n: index + 1,
+      cp: mark.cp_number,
+      fromStartSec,
+      fromPrevSec,
+    };
+  });
+  return {
+    startClock: marks[startIdx] ? fmtMarkTime(marks[startIdx].mark_time) : null,
+    finishClock: finishIdx >= 0 && marks[finishIdx] ? fmtMarkTime(marks[finishIdx].mark_time) : null,
+    rows,
+  };
 });
 
 function pathDistanceM(path: PathPoint[], ev: EventDetail | null) {
@@ -374,7 +413,7 @@ watch(() => [route.params.slug, route.params.sourceId], load);
       </p>
     </header>
 
-    <div class="stat-grid" :class="{ 'is-single': isOrient }">
+    <div class="stat-grid" :class="{ 'is-orient': isOrient }">
       <div v-if="!isOrient" class="stat">
         <span class="stat-label">Очки</span>
         <span class="stat-value">{{ metrics.points ?? "—" }}</span>
@@ -382,6 +421,14 @@ watch(() => [route.params.slug, route.params.sourceId], load);
       <div class="stat">
         <span class="stat-label">Время</span>
         <span class="stat-value">{{ fmtHms(metrics.elapsed) }}</span>
+      </div>
+      <div v-if="isOrient" class="stat">
+        <span class="stat-label">Старт</span>
+        <span class="stat-value">{{ markView.startClock || "—" }}</span>
+      </div>
+      <div v-if="isOrient" class="stat">
+        <span class="stat-label">Финиш</span>
+        <span class="stat-value">{{ markView.finishClock || "—" }}</span>
       </div>
       <div v-if="!isOrient" class="stat">
         <span class="stat-label">Очков на км</span>
@@ -428,19 +475,29 @@ watch(() => [route.params.slug, route.params.sourceId], load);
       <section class="person-marks">
         <h2>Финишные отметки</h2>
         <div class="card marks-card">
-          <p v-if="!person.marks.length" class="muted">Отметок нет</p>
-          <ol v-else class="marks-list">
-            <li
-              v-for="mark in person.marks"
-              :key="mark.seq"
-              class="mark-row"
-              :class="{ 'is-wrong': wrongMarkSeqs.has(mark.seq) }"
-            >
-              <span class="mark-seq">{{ mark.seq }}</span>
-              <span class="mark-cp">КП {{ mark.cp_number }}</span>
-              <span class="mark-time">{{ fmtMarkTime(mark.mark_time) }}</span>
-            </li>
-          </ol>
+          <p v-if="!markView.rows.length" class="muted">Отметок нет</p>
+          <table v-else class="marks-table">
+            <thead>
+              <tr>
+                <th class="col-n">№</th>
+                <th>КП</th>
+                <th>От старта</th>
+                <th>От предыдущего КП</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="mark in markView.rows"
+                :key="mark.seq"
+                :class="{ 'is-wrong': wrongMarkSeqs.has(mark.seq) }"
+              >
+                <td class="col-n">{{ mark.n }}</td>
+                <td class="col-cp">КП {{ mark.cp }}</td>
+                <td>{{ fmtHms(mark.fromStartSec) }}</td>
+                <td>{{ mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 

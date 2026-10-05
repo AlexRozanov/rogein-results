@@ -36,9 +36,21 @@ function asNumberList(raw: unknown): number[] {
 
 function parseMarkMs(raw: string): number | null {
   const normalized = raw.trim().replace(" ", "T");
+  if (!normalized) return null;
   const ms = Date.parse(normalized);
   return Number.isFinite(ms) ? ms : null;
 }
+
+/** Drop 24h archive date-rolls so a later punch still has a real split. */
+export function wrapDeltaSec(fromMs: number, toMs: number): number | null {
+  let sec = Math.round((toMs - fromMs) / 1000);
+  while (sec > 12 * 3600) sec -= 24 * 3600;
+  while (sec < -12 * 3600) sec += 24 * 3600;
+  if (sec < 0) return null;
+  return sec;
+}
+
+export { parseMarkMs };
 
 function punchWindow(marks: SplitMark[], startCp: number | null, finishCp: number | null) {
   if (!marks.length) return [] as SplitMark[];
