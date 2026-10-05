@@ -23,9 +23,8 @@ function asMarks(raw: unknown): SplitMark[] {
     if (!item || typeof item !== "object") continue;
     const row = item as { cp_number?: unknown; mark_time?: unknown };
     const cp = Number(row.cp_number);
-    const time = String(row.mark_time ?? "");
-    if (!Number.isFinite(cp) || !time) continue;
-    out.push({ cp_number: cp, mark_time: time });
+    if (!Number.isFinite(cp)) continue;
+    out.push({ cp_number: cp, mark_time: String(row.mark_time ?? "") });
   }
   return out;
 }
@@ -92,6 +91,13 @@ export function splitColumns(
   return cols;
 }
 
+function findCpFrom(marks: SplitMark[], from: number, cp: number): number {
+  for (let i = from; i < marks.length; i += 1) {
+    if (marks[i].cp_number === cp) return i;
+  }
+  return -1;
+}
+
 function timesAlongCourse(
   marksRaw: unknown,
   startCp: number | null,
@@ -106,27 +112,30 @@ function timesAlongCourse(
   const out: Array<{ splitSec: number; cumSec: number } | null> = [];
   let i = startIdx + 1;
   let prevCum = 0;
-  let missed = false;
   for (const col of cols) {
-    if (missed) {
+    const found = findCpFrom(marks, i, col.cp);
+    if (found < 0) {
       out.push(null);
       continue;
     }
-    while (i < marks.length && marks[i].cp_number !== col.cp) i += 1;
-    if (i >= marks.length) {
-      missed = true;
-      out.push(null);
-      continue;
-    }
-    const t = parseMarkMs(marks[i].mark_time);
-    i += 1;
+    i = found + 1;
+    const t = parseMarkMs(marks[found].mark_time);
     if (t == null) {
-      missed = true;
       out.push(null);
       continue;
     }
-    const cumSec = Math.max(0, Math.round((t - t0) / 1000));
-    const splitSec = Math.max(0, cumSec - prevCum);
+    let cumSec = Math.round((t - t0) / 1000);
+    let splitSec = cumSec - prevCum;
+    // Archive CSV can roll the calendar day when a leftover punch is earlier
+    // than start; drop 24h wraps so the next timed CP still has a real split.
+    while (splitSec > 12 * 3600) {
+      cumSec -= 24 * 3600;
+      splitSec = cumSec - prevCum;
+    }
+    if (cumSec < 0 || splitSec < 0) {
+      out.push(null);
+      continue;
+    }
     prevCum = cumSec;
     out.push({ splitSec, cumSec });
   }

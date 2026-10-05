@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { site, sportKindLabel } from "../content/site";
+import PageLoading from "../components/PageLoading.vue";
 
 type UpcomingItem = {
   slug: string;
@@ -12,14 +13,18 @@ type UpcomingItem = {
 
 const items = ref<UpcomingItem[]>([]);
 const error = ref("");
+const loading = ref(true);
 
 onMounted(async () => {
+  loading.value = true;
   try {
     const res = await fetch("/api/upcoming");
     if (!res.ok) throw new Error(await res.text());
     items.value = await res.json();
   } catch (e) {
     error.value = String(e);
+  } finally {
+    loading.value = false;
   }
 });
 </script>
@@ -27,6 +32,7 @@ onMounted(async () => {
 <template>
   <h1>Календарь</h1>
   <p v-if="error" class="err">{{ error }}</p>
+  <PageLoading v-else-if="loading" label="Загрузка календаря…" />
   <p v-else-if="!items.length" class="muted">{{ site.calendarEmpty }}</p>
   <div v-else class="event-list">
     <article

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
+import PageLoading from "../components/PageLoading.vue";
 
 type PathPoint = {
   x: number;
@@ -64,6 +65,7 @@ const route = useRoute();
 const person = ref<Participant | null>(null);
 const event = ref<EventDetail | null>(null);
 const error = ref("");
+const loading = ref(true);
 
 const personResults = computed(() => {
   if (!person.value || !event.value) return [];
@@ -323,7 +325,10 @@ function courseCpTitle(item: CourseProgressItem) {
 }
 
 async function load() {
+  loading.value = true;
   error.value = "";
+  person.value = null;
+  event.value = null;
   try {
     const slug = String(route.params.slug);
     const sourceId = String(route.params.sourceId);
@@ -337,6 +342,10 @@ async function load() {
     event.value = await eRes.json();
   } catch (e) {
     error.value = String(e);
+    person.value = null;
+    event.value = null;
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -346,6 +355,7 @@ watch(() => [route.params.slug, route.params.sourceId], load);
 
 <template>
   <p v-if="error" class="err">{{ error }}</p>
+  <PageLoading v-else-if="loading" label="Загрузка карточки участника…" />
   <template v-else-if="person && event">
     <p class="back-link">
       <router-link :to="`/events/${event.slug}`">← {{ event.title }}</router-link>

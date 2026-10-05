@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { sportKindLabel } from "../content/site";
+import PageLoading from "../components/PageLoading.vue";
 
 type EventListItem = {
   slug: string;
@@ -22,6 +23,7 @@ const route = useRoute();
 const router = useRouter();
 const page = ref<EventListPage | null>(null);
 const error = ref("");
+const loading = ref(true);
 
 const kind = computed(() => String(route.query.kind ?? ""));
 const from = computed(() => String(route.query.from ?? ""));
@@ -43,6 +45,7 @@ function setQuery(patch: Record<string, string | number | undefined>) {
 }
 
 async function load() {
+  loading.value = true;
   error.value = "";
   const params = new URLSearchParams();
   if (kind.value) params.set("kind", kind.value);
@@ -56,6 +59,9 @@ async function load() {
     page.value = await res.json();
   } catch (e) {
     error.value = String(e);
+    page.value = null;
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -97,6 +103,7 @@ onMounted(load);
   </form>
 
   <p v-if="error" class="err">{{ error }}</p>
+  <PageLoading v-else-if="loading" label="Загрузка списка стартов…" />
   <p v-else-if="page && !page.items.length" class="muted">Нет стартов по выбранным фильтрам.</p>
   <div v-else-if="page" class="event-list">
     <router-link

@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { sportKindLabel } from "../content/site";
+import PageLoading from "../components/PageLoading.vue";
 import {
   buildSplitCells,
   inferCourseCps,
@@ -50,6 +51,7 @@ type EventDetail = {
 const route = useRoute();
 const event = ref<EventDetail | null>(null);
 const error = ref("");
+const loading = ref(true);
 const showSplits = ref(false);
 const activeGroupId = ref<number | null>(null);
 const navOpen = ref(false);
@@ -222,7 +224,9 @@ async function afterRender() {
 }
 
 async function load() {
+  loading.value = true;
   error.value = "";
+  event.value = null;
   observer?.disconnect();
   try {
     const res = await fetch(`/api/events/${route.params.slug}`);
@@ -232,6 +236,8 @@ async function load() {
   } catch (e) {
     error.value = String(e);
     event.value = null;
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -262,6 +268,7 @@ onBeforeUnmount(() => {
 
 <template>
   <p v-if="error" class="err">{{ error }}</p>
+  <PageLoading v-else-if="loading" label="Загрузка результатов…" />
   <template v-else-if="event">
     <p class="back-link">
       <router-link to="/results">← Все результаты</router-link>

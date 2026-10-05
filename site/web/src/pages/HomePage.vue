@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { sportKindLabel } from "../content/site";
+import PageLoading from "../components/PageLoading.vue";
 
 type EventListItem = {
   slug: string;
@@ -12,8 +13,10 @@ type EventListItem = {
 
 const latest = ref<EventListItem[]>([]);
 const error = ref("");
+const loading = ref(true);
 
 onMounted(async () => {
+  loading.value = true;
   try {
     const res = await fetch("/api/events?per_page=3");
     if (!res.ok) throw new Error(await res.text());
@@ -21,14 +24,17 @@ onMounted(async () => {
     latest.value = page.items ?? [];
   } catch (e) {
     error.value = String(e);
+  } finally {
+    loading.value = false;
   }
 });
 </script>
 
 <template>
   <p v-if="error" class="err">{{ error }}</p>
+  <PageLoading v-else-if="loading" label="Загрузка результатов…" />
 
-  <section class="content-section">
+  <section v-else class="content-section">
     <h1>
       <router-link class="section-title-link" to="/results">Последние результаты</router-link>
     </h1>
