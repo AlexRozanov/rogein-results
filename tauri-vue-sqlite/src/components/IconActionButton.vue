@@ -7,6 +7,7 @@ withDefaults(
       | "cancel"
       | "edit"
       | "copy"
+      | "generate"
       | "save"
       | "pageFirst"
       | "pagePrev"
@@ -60,6 +61,13 @@ function onClick(event: MouseEvent) {
     <svg v-else-if="variant === 'edit'" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path
         d="M4 17.25V20h2.75L17.81 8.94l-2.75-2.75L4 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 2.75 2.75 1.83-1.83z"
+        fill="currentColor"
+      />
+    </svg>
+    <!-- sparkles / generate -->
+    <svg v-else-if="variant === 'generate'" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M11 2.5 12.4 7 17 8.5 12.4 10 11 14.5 9.6 10 5 8.5 9.6 7 11 2.5zm7.2 9.2.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6zM6.8 14.2l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2z"
         fill="currentColor"
       />
     </svg>

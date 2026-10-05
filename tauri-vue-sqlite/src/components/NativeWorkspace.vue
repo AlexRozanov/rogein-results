@@ -10,6 +10,7 @@ import NativeStartProtocol from "./NativeStartProtocol.vue";
 import NativeCpLegends from "./NativeCpLegends.vue";
 import NativeSettingsTab from "./NativeSettingsTab.vue";
 import NativeCourses from "./NativeCourses.vue";
+import ArchiveOrientPublish from "./ArchiveOrientPublish.vue";
 import ImportExistingDataDialog from "./ImportExistingDataDialog.vue";
 import IconActionButton from "./IconActionButton.vue";
 import NewStartWizard from "./NewStartWizard.vue";
@@ -17,6 +18,7 @@ import {
   loadWorkspaceUiState,
   openAuxWebviewWindow,
   saveWorkspaceUiState,
+  type WorkspaceMode,
   type WorkspaceUiState,
 } from "../workspaceUiState";
 
@@ -150,7 +152,13 @@ type AwardGroupOption = {
 
 type SortBy = "participant_id" | "name" | "points_raw" | "points_final" | "elapsed_seconds" | "place";
 type SortDir = "asc" | "desc";
-type MainTab = "results" | "start_protocol" | "cp_legends" | "courses" | "settings";
+type MainTab =
+  | "results"
+  | "start_protocol"
+  | "cp_legends"
+  | "courses"
+  | "settings"
+  | "archive_upload";
 
 const nativeStatus = ref("");
 const csvFile = ref<File | null>(null);
@@ -185,6 +193,8 @@ const totalCount = ref(0);
 const sortBy = ref<SortBy>("points_final");
 const sortDir = ref<SortDir>("desc");
 const activeTab = ref<MainTab>("start_protocol");
+const workspaceMode = ref<WorkspaceMode>("live");
+const isArchiveMode = computed(() => workspaceMode.value === "archive");
 const anomalyBulkState = ref<AnomalyBulkActionsState>({
   can_apply_day_shift_24h: false,
   can_rollback_day_shift_24h: false,
@@ -212,6 +222,7 @@ const selectedResultId = ref<number | null>(null);
 function snapshotWorkspaceUi(): WorkspaceUiState {
   return {
     activeTab: activeTab.value,
+    workspaceMode: workspaceMode.value,
     filterStatus: nativeFilterStatus.value,
     filterSearch: nativeFilterSearch.value,
     filterFormatId: nativeFilterFormatId.value,
@@ -229,6 +240,7 @@ function persistWorkspaceUi() {
 }
 
 function applySportWorkspaceUi(orient: boolean, sportChanged: boolean) {
+  if (isArchiveMode.value) return;
   if (orient && (activeTab.value === "start_protocol" || activeTab.value === "cp_legends")) {
     activeTab.value = activeTab.value === "cp_legends" ? "courses" : "results";
   }
@@ -255,8 +267,18 @@ watch(isOrient, (orient) => {
   applySportWorkspaceUi(orient, true);
 });
 
+watch([activeTab, workspaceMode], () => {
+  persistWorkspaceUi();
+});
+
 function applyWorkspaceUi(state: WorkspaceUiState) {
-  activeTab.value = state.activeTab;
+  workspaceMode.value = state.workspaceMode;
+  activeTab.value =
+    state.workspaceMode === "archive" &&
+    state.activeTab !== "archive_upload" &&
+    state.activeTab !== "settings"
+      ? "archive_upload"
+      : state.activeTab;
   nativeFilterStatus.value = state.filterStatus;
   nativeFilterSearch.value = state.filterSearch;
   nativeFilterFormatId.value = state.filterFormatId;
@@ -543,7 +565,33 @@ async function refreshNativeData() {
   }
 }
 
+function enterArchiveMode() {
+  workspaceMode.value = "archive";
+  activeTab.value = "archive_upload";
+  persistWorkspaceUi();
+}
+
+function enterLiveMode() {
+  if (workspaceMode.value === "live") return;
+  workspaceMode.value = "live";
+  if (activeTab.value === "archive_upload") {
+    activeTab.value = isOrient.value ? "results" : "start_protocol";
+  }
+  persistWorkspaceUi();
+}
+
+function finishArchiveStart() {
+  enterLiveMode();
+  wizardDismissed.value = false;
+  workspaceWasEmpty.value = false;
+  showNewStartWizard.value = true;
+}
+
 async function updateWizardVisibility() {
+  if (isArchiveMode.value) {
+    showNewStartWizard.value = false;
+    return;
+  }
   try {
     const counts = await invoke<{
       finish_participants: number;
@@ -755,7 +803,16 @@ async function onSortChanged(column: SortBy) {
   <section class="native-tools">
     <div class="native-tabs">
       <button
-        v-if="!isOrient"
+        v-if="isArchiveMode"
+        class="tab-btn"
+        :class="{ active: activeTab === 'archive_upload' }"
+        :disabled="nativeBusy && activeTab !== 'archive_upload'"
+        @click="activeTab = 'archive_upload'"
+      >
+        Загрузка результатов
+      </button>
+      <button
+        v-if="!isArchiveMode && !isOrient"
         class="tab-btn"
         :class="{ active: activeTab === 'start_protocol' }"
         :disabled="nativeBusy && activeTab !== 'start_protocol'"
@@ -764,7 +821,7 @@ async function onSortChanged(column: SortBy) {
         Стартовый протокол
       </button>
       <button
-        v-if="!isOrient"
+        v-if="!isArchiveMode && !isOrient"
         class="tab-btn"
         :class="{ active: activeTab === 'cp_legends' }"
         :disabled="nativeBusy && activeTab !== 'cp_legends'"
@@ -773,7 +830,7 @@ async function onSortChanged(column: SortBy) {
         Легенды КП
       </button>
       <button
-        v-if="isOrient"
+        v-if="!isArchiveMode && isOrient"
         class="tab-btn"
         :class="{ active: activeTab === 'courses' }"
         :disabled="nativeBusy && activeTab !== 'courses'"
@@ -782,6 +839,7 @@ async function onSortChanged(column: SortBy) {
         Дистанции
       </button>
       <button
+        v-if="!isArchiveMode"
         class="tab-btn"
         :class="{ active: activeTab === 'results' }"
         :disabled="nativeBusy && activeTab !== 'results'"
@@ -800,7 +858,11 @@ async function onSortChanged(column: SortBy) {
     </div>
     <p v-if="nativeStatus" class="status">{{ nativeStatus }}</p>
 
-    <template v-if="activeTab === 'results'">
+    <template v-if="activeTab === 'archive_upload'">
+      <ArchiveOrientPublish :busy="nativeBusy" @status="nativeStatus = $event" />
+    </template>
+
+    <template v-else-if="activeTab === 'results'">
       <div class="native-row">
         <FilePickerButton @file-selected="onCsvSelected" />
         <button :disabled="nativeBusy || !csvFile" @click="onCsvImportClick">Импорт CSV</button>
@@ -1006,9 +1068,11 @@ async function onSortChanged(column: SortBy) {
     <template v-else-if="activeTab === 'settings'">
       <NativeSettingsTab
         :busy="nativeBusy"
+        :archive-mode="isArchiveMode"
         @status="nativeStatus = $event"
         @saved="refreshNativeData"
         @workspace-reset="onWorkspaceResetFromSettings"
+        @finish-start="finishArchiveStart"
       />
     </template>
 
@@ -1049,6 +1113,8 @@ async function onSortChanged(column: SortBy) {
       @status="nativeStatus = $event"
       @finished="onWizardFinished"
       @dismissed="onWizardDismissed"
+      @enter-archive="enterArchiveMode"
+      @enter-live="enterLiveMode"
     />
   </section>
 </template>

@@ -261,6 +261,21 @@ button:disabled {
   white-space: nowrap;
 }
 
+.native-settings .date-input {
+  width: auto;
+  min-width: 10.5rem;
+  max-width: 16rem;
+}
+
+.site-publish-settings .date-input {
+  width: 100%;
+  max-width: 520px;
+}
+
+.site-publish-wide .date-input {
+  max-width: 720px;
+}
+
 .native-settings input,
 .native-settings select {
   border-radius: 6px;
@@ -304,6 +319,21 @@ button:disabled {
 
 .site-publish-wide input {
   max-width: 720px;
+}
+
+.slug-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 520px;
+}
+
+.slug-field-row input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 
 .native-results-wrap {
@@ -352,6 +382,13 @@ button:disabled {
   padding: 6px 8px;
   background: #0f172a;
   color: #e2e8f0;
+}
+
+.date-input.row-edit-input {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 textarea.row-edit-input {

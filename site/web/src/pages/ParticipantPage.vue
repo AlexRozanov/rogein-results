@@ -309,6 +309,7 @@ function diagnosticLabel(code: string) {
 
 function fallbackStatusMessage(status: string) {
   if (status === "Не стартовал") return ["Нет отметки старта"];
+  if (status === "DNF") return ["Не финишировал"];
   if (status === "Дисквалификация") return ["Дистанция пройдена не полностью"];
   if (status === "Ошибка") return ["Результат не засчитан"];
   return status && status !== "OK" ? [status] : [];

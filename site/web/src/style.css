@@ -429,6 +429,11 @@ th { color: #64748b; font-weight: 600; }
   min-width: 0;
 }
 
+.results-table .col-time,
+.results-table .col-gap {
+  font-variant-numeric: tabular-nums;
+}
+
 .results-table .col-name {
   white-space: normal;
   min-width: 10rem;

@@ -54,11 +54,26 @@ const emptyGroupText = computed(() =>
 );
 const groupedResults = computed(() => {
   if (!event.value) return [];
-  return event.value.award_groups.map((group) => ({
-    group,
-    rows: event.value!.results.filter((row) => row.award_group_id === group.id),
-  }));
+  return event.value.award_groups.map((group) => {
+    const rows = event.value!.results.filter((row) => row.award_group_id === group.id);
+    const okTimes = rows
+      .filter((row) => isOk(row.status) && row.elapsed_seconds > 0)
+      .map((row) => row.elapsed_seconds);
+    const leaderElapsed = okTimes.length ? Math.min(...okTimes) : null;
+    return { group, rows, leaderElapsed };
+  });
 });
+
+function isOk(status: string | null | undefined) {
+  return (status || "OK") === "OK";
+}
+
+function statusLabel(status: string) {
+  if (status === "Дисквалификация") return "DSQ";
+  if (status === "Не стартовал") return "DNS";
+  if (status === "DNF") return "DNF";
+  return status;
+}
 
 function fmtHms(total: number) {
   const s = Math.max(0, total | 0);
@@ -66,6 +81,29 @@ function fmtHms(total: number) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
+}
+
+function fmtOrientTime(total: number) {
+  const s = Math.max(0, total | 0);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  if (hh > 0) {
+    return `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  }
+  return `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function resultCell(row: ResultRow) {
+  if (isOk(row.status)) return fmtOrientTime(row.elapsed_seconds);
+  return statusLabel(row.status);
+}
+
+function gapCell(row: ResultRow, leaderElapsed: number | null) {
+  if (!isOk(row.status) || leaderElapsed == null) return "";
+  const gap = row.elapsed_seconds - leaderElapsed;
+  if (gap <= 0) return "—";
+  return `+${fmtOrientTime(gap)}`;
 }
 
 function groupAnchor(id: number) {
@@ -259,7 +297,8 @@ onBeforeUnmount(() => {
               <th v-if="!isOrient">Штраф</th>
               <th v-if="!isOrient">Итог</th>
               <th>Время</th>
-              <th>Статус</th>
+              <th v-if="isOrient">Отставание</th>
+              <th v-if="!isOrient">Статус</th>
             </tr>
           </thead>
           <tbody>
@@ -289,8 +328,9 @@ onBeforeUnmount(() => {
               <td v-if="!isOrient">{{ row.points_raw }}</td>
               <td v-if="!isOrient">{{ row.penalty_points }}</td>
               <td v-if="!isOrient">{{ row.points_final }}</td>
-              <td>{{ fmtHms(row.elapsed_seconds) }}</td>
-              <td>{{ row.status }}</td>
+              <td class="col-time">{{ isOrient ? resultCell(row) : fmtHms(row.elapsed_seconds) }}</td>
+              <td v-if="isOrient" class="col-gap">{{ gapCell(row, block.leaderElapsed) }}</td>
+              <td v-if="!isOrient">{{ row.status }}</td>
             </tr>
           </tbody>
         </table>

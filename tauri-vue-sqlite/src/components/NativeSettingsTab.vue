@@ -8,7 +8,6 @@ import NativeExclusionRules from "./NativeExclusionRules.vue";
 import NativeAwardGroups from "./NativeAwardGroups.vue";
 import NativeStartArchives from "./NativeStartArchives.vue";
 import NativeSitePublish from "./NativeSitePublish.vue";
-import ArchiveOrientPublish from "./ArchiveOrientPublish.vue";
 import NativeOrientRemovedCps from "./NativeOrientRemovedCps.vue";
 import NativeOrientExclusionRules from "./NativeOrientExclusionRules.vue";
 import CollapsiblePanel from "./CollapsiblePanel.vue";
@@ -34,12 +33,14 @@ type FormatOption = {
 
 const props = defineProps<{
   busy: boolean;
+  archiveMode?: boolean;
 }>();
 
 const emit = defineEmits<{
   status: [message: string];
   saved: [];
   workspaceReset: [];
+  finishStart: [];
 }>();
 
 const globalSettings = ref<NativeSettings | null>(null);
@@ -64,8 +65,9 @@ onMounted(() => {
 async function refresh() {
   try {
     globalSettings.value = await invoke<NativeSettings>("get_settings");
-    await formatOverridesRef.value?.refresh();
     await sitePublishRef.value?.refresh();
+    if (props.archiveMode) return;
+    await formatOverridesRef.value?.refresh();
     await removedCpsRef.value?.refresh();
     await orientExclusionRef.value?.refresh();
   } catch (error) {
@@ -193,7 +195,21 @@ async function onWorkspaceReset() {
 </script>
 
 <template>
-  <div class="settings-tab">
+  <div v-if="props.archiveMode" class="settings-tab">
+    <NativeSitePublish
+      ref="sitePublishRef"
+      access-only
+      :busy="props.busy || localBusy"
+      @status="emit('status', $event)"
+    />
+    <div class="native-row" style="margin-top: 16px">
+      <button type="button" :disabled="isBusy" @click="emit('finishStart')">
+        Завершить старт
+      </button>
+    </div>
+  </div>
+
+  <div v-else class="settings-tab">
     <NativeStartArchives
       :busy="props.busy || localBusy"
       @status="emit('status', $event)"
@@ -205,13 +221,6 @@ async function onWorkspaceReset() {
       :busy="props.busy || localBusy"
       @status="emit('status', $event)"
     />
-
-    <CollapsiblePanel panel-id="archive-orient" title="Архив ориентирования на сайт">
-      <ArchiveOrientPublish
-        :busy="props.busy || localBusy"
-        @status="emit('status', $event)"
-      />
-    </CollapsiblePanel>
 
     <CollapsiblePanel panel-id="general" title="Общие настройки">
       <p class="subtitle">

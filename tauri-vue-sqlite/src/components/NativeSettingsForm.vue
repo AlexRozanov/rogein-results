@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import IconActionButton from "./IconActionButton.vue";
+import DateInput from "./DateInput.vue";
 
 export type SportKind = "rogaine" | "orient";
 
@@ -140,7 +141,7 @@ function submit() {
     </label>
     <label>
       Дата соревнования{{ isTimeMode ? " *" : "" }}:
-      <input v-model="form.competition_date" type="date" />
+      <DateInput v-model="form.competition_date" :disabled="busy" />
     </label>
     <label v-if="!isOrient">
       Стартовое время{{ isTimeMode ? " *" : "" }}:

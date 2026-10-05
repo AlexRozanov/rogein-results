@@ -5,6 +5,7 @@ import FilePickerButton from "./FilePickerButton.vue";
 import AddToStartProtocolDialog from "./AddToStartProtocolDialog.vue";
 import IconActionButton from "./IconActionButton.vue";
 import ImportExistingDataDialog from "./ImportExistingDataDialog.vue";
+import DateInput from "./DateInput.vue";
 
 type StartProtocolRow = {
   id: number;
@@ -811,12 +812,12 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
               <span v-else>{{ row.gender || "" }}</span>
             </td>
             <td>
-              <input
+              <DateInput
                 v-if="isEditingRow(row.id)"
                 v-model="editBirthDateIso"
                 class="row-edit-input"
-                type="date"
                 @click.stop
+                @mousedown.stop
               />
               <span v-else>{{ row.birth_date_raw || "" }}</span>
             </td>

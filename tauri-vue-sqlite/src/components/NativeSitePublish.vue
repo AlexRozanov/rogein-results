@@ -2,6 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import CollapsiblePanel from "./CollapsiblePanel.vue";
+import IconActionButton from "./IconActionButton.vue";
+import OverwriteSiteEventDialog from "./OverwriteSiteEventDialog.vue";
+import { buildEventSlug } from "../eventSlug";
 
 type SitePublishSettings = {
   api_base_url: string;
@@ -21,6 +24,7 @@ type SitePublishResult = {
 
 const props = defineProps<{
   busy: boolean;
+  accessOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +38,7 @@ const slug = ref("");
 const title = ref("");
 const suggestedSlug = ref("");
 const suggestedTitle = ref("");
+const overwriteOpen = ref(false);
 
 const isBusy = computed(() => props.busy || localBusy.value);
 
@@ -57,6 +62,20 @@ function applySettings(settings: SitePublishSettings) {
   title.value = settings.title || settings.suggested_title || "";
   suggestedSlug.value = settings.suggested_slug;
   suggestedTitle.value = settings.suggested_title;
+}
+
+async function generateSlug() {
+  try {
+    const settings = await invoke<{ competition_date: string }>("get_settings");
+    const generated = buildEventSlug(settings.competition_date, title.value);
+    if (!generated) {
+      emit("status", "Для slug нужны название старта и дата соревнования.");
+      return;
+    }
+    slug.value = generated;
+  } catch (error) {
+    emit("status", `Не удалось собрать slug: ${String(error)}`);
+  }
 }
 
 function payload() {
@@ -98,18 +117,46 @@ async function testConnection() {
 async function publish() {
   localBusy.value = true;
   try {
-    const result = await invoke<SitePublishResult>("publish_current_start", payload());
-    emit(
-      "status",
-      `Опубликовано «${result.slug}»: участников ${result.participant_count}, строк ${result.result_count}${
-        result.has_map ? ", карта отправлена" : ""
-      }. Повторная публикация с тем же slug заменит результаты.`,
-    );
+    const exists = await invoke<boolean>("site_event_exists", {
+      apiBaseUrl: apiBaseUrl.value.trim(),
+      slug: slug.value.trim(),
+    });
+    if (exists) {
+      overwriteOpen.value = true;
+      return;
+    }
+    await uploadToSite();
   } catch (error) {
     emit("status", `Ошибка публикации: ${String(error)}`);
   } finally {
     localBusy.value = false;
   }
+}
+
+function onOverwriteNo() {
+  overwriteOpen.value = false;
+}
+
+async function onOverwriteYes() {
+  overwriteOpen.value = false;
+  localBusy.value = true;
+  try {
+    await uploadToSite();
+  } catch (error) {
+    emit("status", `Ошибка публикации: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
+async function uploadToSite() {
+  const result = await invoke<SitePublishResult>("publish_current_start", payload());
+  emit(
+    "status",
+    `Опубликовано «${result.slug}»: участников ${result.participant_count}, строк ${result.result_count}${
+      result.has_map ? ", карта отправлена" : ""
+    }. Повторная публикация с тем же slug заменит результаты.`,
+  );
 }
 
 defineExpose({ refresh });
@@ -121,8 +168,11 @@ defineExpose({ refresh });
       Адрес — корень сайта, как в браузере: https://malahit-sprint.ru
       (без :18790). Порт API снаружи не открыт, nginx сам проксирует /api/.
       Адрес и токен хранятся в папке программы на этом компьютере и не сбрасываются
-      при завершении старта. Slug и название относятся к текущему старту: повторная
-      отправка с тем же slug заменяет публикацию на сайте.
+      при завершении старта.
+      <template v-if="!props.accessOnly">
+        Slug и название относятся к текущему старту: повторная
+        отправка с тем же slug заменяет публикацию на сайте.
+      </template>
     </p>
 
     <h3>Доступ к серверу</h3>
@@ -152,29 +202,46 @@ defineExpose({ refresh });
       <button type="button" :disabled="isBusy" @click="testConnection">Проверить связь</button>
     </div>
 
-    <h3>Этот старт</h3>
-    <div class="native-settings site-publish-settings">
-      <label>
-        Slug
-        <input
-          v-model="slug"
-          type="text"
-          :placeholder="suggestedSlug || 'start-2026-04-12'"
-          :disabled="isBusy"
-        />
-      </label>
-      <label class="site-publish-wide">
-        Название
-        <input
-          v-model="title"
-          type="text"
-          :placeholder="suggestedTitle || 'Название старта'"
-          :disabled="isBusy"
-        />
-      </label>
-    </div>
-    <div class="native-row">
-      <button type="button" :disabled="isBusy" @click="publish">Опубликовать</button>
-    </div>
+    <template v-if="!props.accessOnly">
+      <h3>Этот старт</h3>
+      <div class="native-settings site-publish-settings">
+        <label>
+          Slug
+          <div class="slug-field-row">
+            <input
+              v-model="slug"
+              type="text"
+              :placeholder="suggestedSlug || 'start-2026-04-12-usadba-trubeckih'"
+              :disabled="isBusy"
+            />
+            <IconActionButton
+              variant="generate"
+              label="Собрать slug из даты и названия"
+              :disabled="isBusy"
+              @click="generateSlug"
+            />
+          </div>
+        </label>
+        <label class="site-publish-wide">
+          Название
+          <input
+            v-model="title"
+            type="text"
+            :placeholder="suggestedTitle || 'Название старта'"
+            :disabled="isBusy"
+          />
+        </label>
+      </div>
+      <div class="native-row">
+        <button type="button" :disabled="isBusy" @click="publish">Опубликовать</button>
+      </div>
+    </template>
   </CollapsiblePanel>
+
+  <OverwriteSiteEventDialog
+    :open="overwriteOpen"
+    :busy="isBusy"
+    @yes="onOverwriteYes"
+    @no="onOverwriteNo"
+  />
 </template>

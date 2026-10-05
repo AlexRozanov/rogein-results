@@ -14,8 +14,20 @@ pub struct ArchiveOrientPreview {
     pub row_count: usize,
     pub ok_count: usize,
     pub dsq_count: usize,
+    pub dnf_count: usize,
+    pub dns_count: usize,
     pub courses: Vec<ArchiveCoursePreview>,
+    pub participants: Vec<ArchiveParticipantPreview>,
     pub suggested_slug: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveParticipantPreview {
+    pub name: String,
+    pub course: String,
+    pub elapsed_seconds: i32,
+    pub place: Option<i32>,
+    pub result: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,23 +82,48 @@ fn preview_from_rows(rows: &[ArchiveRow], competition_date: &str) -> ArchiveOrie
     let mut courses: BTreeMap<String, usize> = BTreeMap::new();
     let mut ok_count = 0_usize;
     let mut dsq_count = 0_usize;
+    let mut dnf_count = 0_usize;
+    let mut dns_count = 0_usize;
     for row in rows {
         *courses.entry(row.course.clone()).or_insert(0) += 1;
-        if row.status == "OK" {
-            ok_count += 1;
-        } else {
-            dsq_count += 1;
+        match row.status.as_str() {
+            "OK" => ok_count += 1,
+            "Дисквалификация" => dsq_count += 1,
+            "DNF" => dnf_count += 1,
+            "Не стартовал" => dns_count += 1,
+            _ => dsq_count += 1,
         }
     }
     ArchiveOrientPreview {
         row_count: rows.len(),
         ok_count,
         dsq_count,
+        dnf_count,
+        dns_count,
+        participants: rows
+            .iter()
+            .map(|row| ArchiveParticipantPreview {
+                name: row.name.clone(),
+                course: row.course.clone(),
+                elapsed_seconds: row.elapsed_seconds,
+                place: row.place,
+                result: result_code(&row.status),
+            })
+            .collect(),
         courses: courses
             .into_iter()
             .map(|(name, count)| ArchiveCoursePreview { name, count })
             .collect(),
         suggested_slug: suggested_slug(competition_date),
+    }
+}
+
+fn result_code(status: &str) -> String {
+    match status {
+        "Дисквалификация" => "DSQ".into(),
+        "Не стартовал" => "DNS".into(),
+        "DNF" => "DNF".into(),
+        other => other.to_string(),
     }
 }
 
@@ -116,7 +153,7 @@ fn parse_csv(content: &str) -> Result<Vec<ArchiveRow>, String> {
         .clone();
     let place_idx = find_header(&headers, &["place", "место"])?;
     let name_idx = find_header(&headers, &["team name", "team_name", "name", "имя"])?;
-    let time_idx = find_header(&headers, &["time", "время"])?;
+    let time_idx = find_header(&headers, &["time", "brief", "время"])?;
     let course_idx = find_header(&headers, &["course", "дистанция"])?;
     let result_idx = find_header(&headers, &["result", "результат"])?;
     let punch_from = result_idx + 1;
@@ -186,6 +223,12 @@ fn map_status(raw: &str) -> Result<String, String> {
     }
     if key == "dsq" || key.starts_with("дискв") {
         return Ok("Дисквалификация".into());
+    }
+    if key == "dnf" || key == "сошел" || key == "сошёл" {
+        return Ok("DNF".into());
+    }
+    if key == "dns" || key == "н/я" || key.starts_with("не старт") {
+        return Ok("Не стартовал".into());
     }
     Err(format!("неизвестный результат «{raw}»"))
 }
@@ -384,6 +427,15 @@ mod tests {
     const DSQ: &str = "place;team name;time;course;result\n\
 ;Иванов Иван;12:00;D2;DSQ\n";
 
+    const BRIEF: &str = "place;team name;brief;course;result\n\
+1;Петров Петр;20:15;D1;OK\n";
+
+    const STATUSES: &str = "place;team name;time;course;result\n\
+1;Петров Петр;20:00;D1;OK\n\
+;Сидоров Сидор;15:00;D1;DNF\n\
+;Козлов Козел;;D1;DNS\n\
+;Иванов Иван;12:00;D1;DSQ\n";
+
     #[test]
     fn parses_usadba_clock_then_split() {
         let rows = parse_csv(USADBA).unwrap();
@@ -429,11 +481,41 @@ mod tests {
     }
 
     #[test]
+    fn accepts_brief_as_time() {
+        let rows = parse_csv(BRIEF).unwrap();
+        assert_eq!(rows[0].elapsed_seconds, 20 * 60 + 15);
+    }
+
+    #[test]
     fn dsq_has_no_place() {
         let rows = parse_csv(DSQ).unwrap();
         assert_eq!(rows[0].status, "Дисквалификация");
         assert_eq!(rows[0].place, None);
         assert_eq!(rows[0].elapsed_seconds, 12 * 60);
+    }
+
+    #[test]
+    fn accepts_dnf_and_dns() {
+        let rows = parse_csv(STATUSES).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].status, "OK");
+        assert_eq!(rows[0].place, Some(1));
+        assert_eq!(rows[1].status, "DNF");
+        assert_eq!(rows[1].place, None);
+        assert_eq!(rows[2].status, "Не стартовал");
+        assert_eq!(rows[2].place, None);
+        assert_eq!(rows[2].elapsed_seconds, 0);
+        assert_eq!(rows[3].status, "Дисквалификация");
+        let preview = preview_from_rows(&rows, "2024-04-12");
+        assert_eq!(preview.ok_count, 1);
+        assert_eq!(preview.dnf_count, 1);
+        assert_eq!(preview.dns_count, 1);
+        assert_eq!(preview.dsq_count, 1);
+        assert_eq!(preview.participants.len(), 4);
+        assert_eq!(preview.participants[0].result, "OK");
+        assert_eq!(preview.participants[1].result, "DNF");
+        assert_eq!(preview.participants[2].result, "DNS");
+        assert_eq!(preview.participants[3].result, "DSQ");
     }
 
     #[test]

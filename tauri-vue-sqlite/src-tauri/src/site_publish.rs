@@ -244,6 +244,28 @@ pub fn test_connection(api_base_url: &str) -> Result<String, String> {
     Ok(base)
 }
 
+pub fn event_exists(api_base_url: &str, slug: &str) -> Result<bool, String> {
+    let slug = normalize_slug(slug)?;
+    let base = normalize_base_url(api_base_url)?;
+    let url = format!("{base}/api/events/{slug}");
+    match agent().get(&url).call() {
+        Ok(response) => {
+            let status = response.status();
+            if (200..300).contains(&status) {
+                Ok(true)
+            } else if status == 404 {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "Не удалось проверить старт на сайте: сервер ответил {status}"
+                ))
+            }
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(e) => Err(map_http_error("проверки старта на сайте", e, 0)),
+    }
+}
+
 pub fn publish_current_start(
     app_data_dir: &Path,
     db_path: &Path,

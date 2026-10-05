@@ -213,6 +213,11 @@ fn test_site_publish_connection(api_base_url: String) -> Result<String, String> 
 }
 
 #[tauri::command]
+fn site_event_exists(api_base_url: String, slug: String) -> Result<bool, String> {
+    site_publish::event_exists(&api_base_url, &slug)
+}
+
+#[tauri::command]
 fn preview_archive_orient_csv(
     csv_content: String,
     competition_date: String,
@@ -1789,6 +1794,7 @@ pub fn run() {
             get_site_publish_settings,
             save_site_publish_settings,
             test_site_publish_connection,
+            site_event_exists,
             preview_archive_orient_csv,
             publish_archive_orient_csv,
             publish_current_start,

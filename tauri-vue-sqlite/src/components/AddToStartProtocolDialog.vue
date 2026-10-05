@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IconActionButton from "./IconActionButton.vue";
+import DateInput from "./DateInput.vue";
 
 export type StartProtocolFormatOption = {
   id: number;
@@ -199,7 +200,7 @@ async function save() {
         </label>
         <label>
           Дата рождения:
-          <input v-model="birthDateIso" type="date" :disabled="localBusy || busy" />
+          <DateInput v-model="birthDateIso" :disabled="localBusy || busy" />
         </label>
       </div>
 

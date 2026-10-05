@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import FilePickerButton from "./FilePickerButton.vue";
 import NativeSettingsForm from "./NativeSettingsForm.vue";
-import ArchiveOrientPublish from "./ArchiveOrientPublish.vue";
 
 type SportKind = "rogaine" | "orient";
 type WizardMode = "live" | "archive";
@@ -20,7 +19,7 @@ type NativeSettings = {
   sport_kind: SportKind;
 };
 
-type StepId = "sport" | "start" | "legends" | "settings" | "courses" | "finish" | "archive";
+type StepId = "sport" | "start" | "legends" | "settings" | "courses" | "finish";
 
 type WizardStep = { id: StepId; title: string; hint: string };
 
@@ -32,6 +31,8 @@ const emit = defineEmits<{
   status: [message: string];
   finished: [];
   dismissed: [];
+  enterArchive: [];
+  enterLive: [];
 }>();
 
 const stepIndex = ref(0);
@@ -50,7 +51,6 @@ const stepDone = ref<Record<StepId, boolean>>({
   settings: false,
   courses: false,
   finish: false,
-  archive: false,
 });
 
 const isBusy = computed(() => props.busy || localBusy.value);
@@ -61,16 +61,6 @@ const steps = computed<WizardStep[]>(() => {
     title: "Вид соревнования",
     hint: "Рогейн и заданное направление — новый старт. Загрузка результатов — готовый архивный CSV на сайт.",
   };
-  if (wizardMode.value === "archive") {
-    return [
-      sport,
-      {
-        id: "archive",
-        title: "Загрузка результатов",
-        hint: "Укажите CSV, название, slug и дату. Итоги берутся из файла, КП только для карточки.",
-      },
-    ];
-  }
   const finish: WizardStep = {
     id: "finish",
     title: "Финишный протокол",
@@ -150,6 +140,7 @@ async function chooseSport(kind: SportKind) {
     sportKind.value = kind;
     wizardMode.value = "live";
     stepDone.value.sport = true;
+    emit("enterLive");
     emit(
       "status",
       kind === "orient"
@@ -170,13 +161,7 @@ function chooseArchive() {
   wizardMode.value = "archive";
   stepDone.value.sport = true;
   emit("status", "Загрузка архивных результатов ориентирования на сайт.");
-  if (current.value?.id === "sport") {
-    goNext();
-  }
-}
-
-function onArchivePublished() {
-  stepDone.value.archive = true;
+  emit("enterArchive");
   emit("finished");
 }
 
@@ -380,10 +365,6 @@ async function importFinish() {
               Загрузка результатов
             </button>
           </div>
-        </template>
-
-        <template v-else-if="current.id === 'archive'">
-          <ArchiveOrientPublish :busy="isBusy" @status="emit('status', $event)" @published="onArchivePublished" />
         </template>
 
         <template v-else-if="current.id === 'start'">

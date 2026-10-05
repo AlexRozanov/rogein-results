@@ -1,4 +1,11 @@
-export type WorkspaceMainTab = "results" | "start_protocol" | "cp_legends" | "courses" | "settings";
+export type WorkspaceMainTab =
+  | "results"
+  | "start_protocol"
+  | "cp_legends"
+  | "courses"
+  | "settings"
+  | "archive_upload";
+export type WorkspaceMode = "live" | "archive";
 export type WorkspaceSortBy =
   | "participant_id"
   | "name"
@@ -10,6 +17,7 @@ export type WorkspaceSortDir = "asc" | "desc";
 
 export type WorkspaceUiState = {
   activeTab: WorkspaceMainTab;
+  workspaceMode: WorkspaceMode;
   filterStatus: string;
   filterSearch: string;
   filterFormatId: string;
@@ -43,9 +51,11 @@ export function loadWorkspaceUiState(): WorkspaceUiState | null {
         parsed.activeTab === "start_protocol" ||
         parsed.activeTab === "cp_legends" ||
         parsed.activeTab === "courses" ||
-        parsed.activeTab === "settings"
+        parsed.activeTab === "settings" ||
+        parsed.activeTab === "archive_upload"
           ? parsed.activeTab
           : "results",
+      workspaceMode: parsed.workspaceMode === "archive" ? "archive" : "live",
       filterStatus: String(parsed.filterStatus ?? ""),
       filterSearch: String(parsed.filterSearch ?? ""),
       filterFormatId: String(parsed.filterFormatId ?? ""),
@@ -75,7 +85,8 @@ export function loadWorkspaceUiState(): WorkspaceUiState | null {
 export function markReturnToResultsTab(): void {
   const current = loadWorkspaceUiState();
   saveWorkspaceUiState({
-    activeTab: "results",
+    activeTab: current?.workspaceMode === "archive" ? "archive_upload" : "results",
+    workspaceMode: current?.workspaceMode ?? "live",
     filterStatus: current?.filterStatus ?? "",
     filterSearch: current?.filterSearch ?? "",
     filterFormatId: current?.filterFormatId ?? "",
