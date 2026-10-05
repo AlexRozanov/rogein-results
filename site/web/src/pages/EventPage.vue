@@ -53,6 +53,9 @@ const event = ref<EventDetail | null>(null);
 const error = ref("");
 const loading = ref(true);
 const showSplits = ref(false);
+const compareIds = ref<Record<number, number[]>>({});
+const compareQuery = ref<Record<number, string>>({});
+const compareMenuFor = ref<number | null>(null);
 const activeGroupId = ref<number | null>(null);
 const navOpen = ref(false);
 const navRef = ref<HTMLElement | null>(null);
@@ -84,6 +87,101 @@ const groupedResults = computed(() => {
     return { group, rows, leaderElapsed, splitCols: cols, splitCells };
   });
 });
+
+const displayedResults = computed(() => {
+  const startCp = event.value?.start_cp ?? 241;
+  return groupedResults.value.map((block) => {
+    const selected = compareIds.value[block.group.id] ?? [];
+    const comparing = isOrient.value && selected.length >= 2;
+    if (!comparing) {
+      return {
+        ...block,
+        viewRows: block.rows,
+        viewSplitCells: block.splitCells,
+        viewLeader: block.leaderElapsed,
+        comparing: false,
+        selected,
+      };
+    }
+    const idSet = new Set(selected);
+    const viewRows = block.rows.filter((row) => idSet.has(row.participant_source_id));
+    const viewSplitCells = block.splitCols.length
+      ? buildSplitCells(viewRows, block.splitCols, startCp)
+      : viewRows.map(() => []);
+    const okTimes = viewRows
+      .filter((row) => isOk(row.status) && row.elapsed_seconds > 0)
+      .map((row) => row.elapsed_seconds);
+    return {
+      ...block,
+      viewRows,
+      viewSplitCells,
+      viewLeader: okTimes.length ? Math.min(...okTimes) : null,
+      comparing: true,
+      selected,
+    };
+  });
+});
+
+function normName(value: string) {
+  return value.trim().toLowerCase().replace(/ё/g, "е");
+}
+
+function selectedRows(block: { group: AwardGroup; rows: ResultRow[] }) {
+  const ids = compareIds.value[block.group.id] ?? [];
+  return ids
+    .map((id) => block.rows.find((row) => row.participant_source_id === id))
+    .filter((row): row is ResultRow => Boolean(row));
+}
+
+function compareSuggestions(block: { group: AwardGroup; rows: ResultRow[] }) {
+  const q = normName(compareQuery.value[block.group.id] ?? "");
+  if (q.length < 1) return [] as ResultRow[];
+  const selected = new Set(compareIds.value[block.group.id] ?? []);
+  return block.rows
+    .filter((row) => !selected.has(row.participant_source_id) && normName(row.name).includes(q))
+    .slice(0, 8);
+}
+
+function onCompareInput(groupId: number, event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  compareQuery.value = { ...compareQuery.value, [groupId]: value };
+  compareMenuFor.value = groupId;
+}
+
+function addToCompare(groupId: number, row: ResultRow) {
+  const current = compareIds.value[groupId] ?? [];
+  if (current.includes(row.participant_source_id)) return;
+  compareIds.value = { ...compareIds.value, [groupId]: [...current, row.participant_source_id] };
+  compareQuery.value = { ...compareQuery.value, [groupId]: "" };
+  compareMenuFor.value = null;
+}
+
+function removeFromCompare(groupId: number, id: number) {
+  compareIds.value = {
+    ...compareIds.value,
+    [groupId]: (compareIds.value[groupId] ?? []).filter((item) => item !== id),
+  };
+}
+
+function clearCompare(groupId: number) {
+  compareIds.value = { ...compareIds.value, [groupId]: [] };
+  compareQuery.value = { ...compareQuery.value, [groupId]: "" };
+  compareMenuFor.value = null;
+}
+
+function onCompareKeydown(groupId: number, block: { group: AwardGroup; rows: ResultRow[] }, event: KeyboardEvent) {
+  if (event.key === "Enter") {
+    const first = compareSuggestions(block)[0];
+    if (first) {
+      event.preventDefault();
+      addToCompare(groupId, first);
+    }
+  }
+}
+
+function splitsOn(comparing: boolean) {
+  return showSplits.value || comparing;
+}
 
 function isOk(status: string | null | undefined) {
   return (status || "OK") === "OK";
@@ -135,8 +233,8 @@ function splitText(sec: number, place: number | null) {
   return place != null ? `${fmtSplit(sec)} (${place})` : fmtSplit(sec);
 }
 
-function orientColspan(splitCount: number) {
-  return 4 + (showSplits.value ? splitCount : 0);
+function orientColspan(splitCount: number, comparing: boolean) {
+  return 4 + (splitsOn(comparing) ? splitCount : 0);
 }
 
 function groupAnchor(id: number) {
@@ -157,13 +255,22 @@ function closeNav() {
 }
 
 function onDocumentPointerDown(event: PointerEvent) {
+  const target = event.target as HTMLElement | null;
+  if (compareMenuFor.value != null && !target?.closest(".compare-box")) {
+    compareMenuFor.value = null;
+  }
   if (!navOpen.value || !navRef.value) return;
   if (navRef.value.contains(event.target as Node)) return;
   closeNav();
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") closeNav();
+  if (event.key !== "Escape") return;
+  if (compareMenuFor.value != null) {
+    compareMenuFor.value = null;
+    return;
+  }
+  closeNav();
 }
 
 async function scrollToGroup(id: number) {
@@ -249,9 +356,18 @@ onMounted(() => {
 watch(() => route.params.slug, () => {
   navOpen.value = false;
   showSplits.value = false;
+  compareIds.value = {};
+  compareQuery.value = {};
+  compareMenuFor.value = null;
   load();
 });
 watch(showSplits, () => {
+  void nextTick(() => {
+    observeNav();
+    setupObserver();
+  });
+});
+watch(compareIds, () => {
   void nextTick(() => {
     observeNav();
     setupObserver();
@@ -330,15 +446,65 @@ onBeforeUnmount(() => {
     </nav>
 
     <section
-      v-for="block in groupedResults"
+      v-for="block in displayedResults"
       :id="groupAnchor(block.group.id)"
       :key="block.group.id"
       class="results-section"
       :data-group-id="block.group.id"
     >
       <h2>{{ block.group.name }}</h2>
+      <div v-if="isOrient" class="compare-box">
+        <div class="compare-search">
+          <input
+            :value="compareQuery[block.group.id] ?? ''"
+            type="search"
+            autocomplete="off"
+            placeholder="Добавить к сравнению"
+            :aria-label="`Добавить к сравнению на дистанции ${block.group.name}`"
+            @focus="compareMenuFor = block.group.id"
+            @input="onCompareInput(block.group.id, $event)"
+            @keydown="onCompareKeydown(block.group.id, block, $event)"
+          />
+          <ul
+            v-if="compareMenuFor === block.group.id && compareSuggestions(block).length"
+            class="compare-suggest"
+          >
+            <li v-for="row in compareSuggestions(block)" :key="row.participant_source_id">
+              <button type="button" @mousedown.prevent="addToCompare(block.group.id, row)">
+                <span>{{ row.name }}</span>
+                <span class="compare-suggest-meta">{{ row.place ?? "—" }}</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div v-if="selectedRows(block).length" class="compare-chips">
+          <button
+            v-for="row in selectedRows(block)"
+            :key="row.participant_source_id"
+            type="button"
+            class="compare-chip"
+            :title="`Убрать ${row.name}`"
+            @click="removeFromCompare(block.group.id, row.participant_source_id)"
+          >
+            {{ row.name }}
+            <span aria-hidden="true">×</span>
+          </button>
+          <button type="button" class="compare-reset" @click="clearCompare(block.group.id)">
+            Сбросить
+          </button>
+        </div>
+        <p v-if="selectedRows(block).length === 1" class="muted compare-hint">
+          Выберите ещё одного участника этой дистанции
+        </p>
+        <p v-else-if="block.comparing" class="muted compare-hint">
+          Сравнение {{ block.viewRows.length }} участников · места на перегонах среди выбранных
+        </p>
+      </div>
       <div class="card table-wrap">
-        <table class="results-table" :class="{ compact: isOrient, 'with-splits': isOrient && showSplits }">
+        <table
+          class="results-table"
+          :class="{ compact: isOrient, 'with-splits': isOrient && splitsOn(block.comparing) }"
+        >
           <thead>
             <tr>
               <th>Место</th>
@@ -353,7 +519,7 @@ onBeforeUnmount(() => {
               <th v-if="isOrient">Отставание</th>
               <th v-if="!isOrient">Статус</th>
               <th
-                v-for="col in isOrient && showSplits ? block.splitCols : []"
+                v-for="col in isOrient && splitsOn(block.comparing) ? block.splitCols : []"
                 :key="col.label"
                 class="col-split"
               >
@@ -362,10 +528,12 @@ onBeforeUnmount(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!block.rows.length">
-              <td :colspan="isOrient ? orientColspan(block.splitCols.length) : 10">{{ emptyGroupText }}</td>
+            <tr v-if="!block.viewRows.length">
+              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 10">
+                {{ emptyGroupText }}
+              </td>
             </tr>
-            <tr v-for="(row, rowIndex) in block.rows" :key="row.participant_source_id">
+            <tr v-for="(row, rowIndex) in block.viewRows" :key="row.participant_source_id">
               <td>{{ row.place ?? "—" }}</td>
               <td v-if="!isOrient">
                 <router-link
@@ -389,10 +557,10 @@ onBeforeUnmount(() => {
               <td v-if="!isOrient">{{ row.penalty_points }}</td>
               <td v-if="!isOrient">{{ row.points_final }}</td>
               <td class="col-time">{{ isOrient ? resultCell(row) : fmtHms(row.elapsed_seconds) }}</td>
-              <td v-if="isOrient" class="col-gap">{{ gapCell(row, block.leaderElapsed) }}</td>
+              <td v-if="isOrient" class="col-gap">{{ gapCell(row, block.viewLeader) }}</td>
               <td v-if="!isOrient">{{ row.status }}</td>
               <td
-                v-for="(cell, colIndex) in isOrient && showSplits ? block.splitCells[rowIndex] ?? [] : []"
+                v-for="(cell, colIndex) in isOrient && splitsOn(block.comparing) ? block.viewSplitCells[rowIndex] ?? [] : []"
                 :key="`${row.participant_source_id}-${block.splitCols[colIndex]?.label ?? colIndex}`"
                 class="col-split"
               >

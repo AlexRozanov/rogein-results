@@ -484,6 +484,112 @@ th { color: #64748b; font-weight: 600; }
   box-shadow: 0 0 0 3px rgba(31, 174, 58, 0.16);
 }
 
+.compare-box {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.compare-search {
+  position: relative;
+  max-width: 28rem;
+}
+
+.compare-search input {
+  width: 100%;
+  min-height: 2.6rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: var(--ink);
+  font: inherit;
+}
+
+.compare-search input:focus {
+  outline: 2px solid rgba(31, 174, 58, 0.35);
+  border-color: var(--green);
+}
+
+.compare-suggest {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(22, 58, 42, 0.12);
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.compare-suggest button {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.compare-suggest button:hover {
+  background: #e7f6ea;
+}
+
+.compare-suggest-meta {
+  color: var(--slate);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.compare-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.compare-chip,
+.compare-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--green);
+  background: #e7f6ea;
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 0.92em;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.compare-reset {
+  border-color: var(--line);
+  background: #fff;
+}
+
+.compare-hint {
+  margin: 8px 0 0;
+  font-size: 0.9em;
+}
+
 .results-table.with-splits {
   min-width: max-content;
 }
