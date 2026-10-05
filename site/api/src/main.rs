@@ -409,7 +409,8 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
             r.points_final,
             r.elapsed_seconds,
             r.status,
-            r.diagnostics
+            r.diagnostics,
+            p.marks
         FROM results r
         JOIN participants p ON p.id = r.participant_id
         WHERE r.event_id = $1

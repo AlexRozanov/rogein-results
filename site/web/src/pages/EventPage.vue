@@ -2,11 +2,19 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { sportKindLabel } from "../content/site";
+import {
+  buildSplitCells,
+  inferCourseCps,
+  splitColumns,
+  type SplitCell,
+  type SplitCol,
+} from "../orientSplits";
 
 type AwardGroup = {
   id: number;
   source_id: number;
   name: string;
+  course_cps?: number[] | null;
 };
 
 type ResultRow = {
@@ -24,6 +32,7 @@ type ResultRow = {
   points_final: number;
   elapsed_seconds: number;
   status: string;
+  marks?: unknown;
 };
 
 type EventDetail = {
@@ -32,6 +41,8 @@ type EventDetail = {
   competition_date: string | null;
   sport_kind?: string;
   map_url: string | null;
+  start_cp?: number | null;
+  finish_cp?: number | null;
   award_groups: AwardGroup[];
   results: ResultRow[];
 };
@@ -39,6 +50,7 @@ type EventDetail = {
 const route = useRoute();
 const event = ref<EventDetail | null>(null);
 const error = ref("");
+const showSplits = ref(false);
 const activeGroupId = ref<number | null>(null);
 const navOpen = ref(false);
 const navRef = ref<HTMLElement | null>(null);
@@ -54,13 +66,20 @@ const emptyGroupText = computed(() =>
 );
 const groupedResults = computed(() => {
   if (!event.value) return [];
+  const startCp = event.value.start_cp ?? 241;
+  const finishCp = event.value.finish_cp ?? 240;
   return event.value.award_groups.map((group) => {
     const rows = event.value!.results.filter((row) => row.award_group_id === group.id);
     const okTimes = rows
       .filter((row) => isOk(row.status) && row.elapsed_seconds > 0)
       .map((row) => row.elapsed_seconds);
     const leaderElapsed = okTimes.length ? Math.min(...okTimes) : null;
-    return { group, rows, leaderElapsed };
+    const course = inferCourseCps(group.course_cps, rows, startCp, finishCp);
+    const cols: SplitCol[] = splitColumns(course, finishCp);
+    const splitCells: Array<Array<SplitCell | null>> = cols.length
+      ? buildSplitCells(rows, cols, startCp)
+      : rows.map(() => []);
+    return { group, rows, leaderElapsed, splitCols: cols, splitCells };
   });
 });
 
@@ -104,6 +123,18 @@ function gapCell(row: ResultRow, leaderElapsed: number | null) {
   const gap = row.elapsed_seconds - leaderElapsed;
   if (gap <= 0) return "—";
   return `+${fmtOrientTime(gap)}`;
+}
+
+function fmtSplit(sec: number) {
+  return fmtHms(sec);
+}
+
+function splitText(sec: number, place: number | null) {
+  return place != null ? `${fmtSplit(sec)} (${place})` : fmtSplit(sec);
+}
+
+function orientColspan(splitCount: number) {
+  return 4 + (showSplits.value ? splitCount : 0);
 }
 
 function groupAnchor(id: number) {
@@ -211,7 +242,14 @@ onMounted(() => {
 });
 watch(() => route.params.slug, () => {
   navOpen.value = false;
+  showSplits.value = false;
   load();
+});
+watch(showSplits, () => {
+  void nextTick(() => {
+    observeNav();
+    setupObserver();
+  });
 });
 onBeforeUnmount(() => {
   observer?.disconnect();
@@ -233,6 +271,14 @@ onBeforeUnmount(() => {
       {{ event.competition_date || "дата не указана" }}
       · {{ sportKindLabel(event.sport_kind) }}
     </p>
+
+    <label v-if="isOrient" class="splits-toggle" :class="{ 'is-on': showSplits }">
+      <input v-model="showSplits" type="checkbox" />
+      <span class="splits-toggle-text">
+        <strong>Сплиты</strong>
+        <small>время и место на перегоне и от старта</small>
+      </span>
+    </label>
 
     <nav
       v-if="event.award_groups.length"
@@ -285,7 +331,7 @@ onBeforeUnmount(() => {
     >
       <h2>{{ block.group.name }}</h2>
       <div class="card table-wrap">
-        <table class="results-table" :class="{ compact: isOrient }">
+        <table class="results-table" :class="{ compact: isOrient, 'with-splits': isOrient && showSplits }">
           <thead>
             <tr>
               <th>Место</th>
@@ -299,13 +345,20 @@ onBeforeUnmount(() => {
               <th>Время</th>
               <th v-if="isOrient">Отставание</th>
               <th v-if="!isOrient">Статус</th>
+              <th
+                v-for="col in isOrient && showSplits ? block.splitCols : []"
+                :key="col.label"
+                class="col-split"
+              >
+                {{ col.label }}
+              </th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!block.rows.length">
-              <td :colspan="isOrient ? 4 : 10">{{ emptyGroupText }}</td>
+              <td :colspan="isOrient ? orientColspan(block.splitCols.length) : 10">{{ emptyGroupText }}</td>
             </tr>
-            <tr v-for="row in block.rows" :key="row.participant_source_id">
+            <tr v-for="(row, rowIndex) in block.rows" :key="row.participant_source_id">
               <td>{{ row.place ?? "—" }}</td>
               <td v-if="!isOrient">
                 <router-link
@@ -331,6 +384,20 @@ onBeforeUnmount(() => {
               <td class="col-time">{{ isOrient ? resultCell(row) : fmtHms(row.elapsed_seconds) }}</td>
               <td v-if="isOrient" class="col-gap">{{ gapCell(row, block.leaderElapsed) }}</td>
               <td v-if="!isOrient">{{ row.status }}</td>
+              <td
+                v-for="(cell, colIndex) in isOrient && showSplits ? block.splitCells[rowIndex] ?? [] : []"
+                :key="`${row.participant_source_id}-${block.splitCols[colIndex]?.label ?? colIndex}`"
+                class="col-split"
+              >
+                <template v-if="cell">
+                  <div class="split-leg" :class="{ best: cell.splitPlace === 1 }">
+                    {{ splitText(cell.splitSec, cell.splitPlace) }}
+                  </div>
+                  <div class="split-cum">
+                    {{ splitText(cell.cumSec, cell.cumPlace) }}
+                  </div>
+                </template>
+              </td>
             </tr>
           </tbody>
         </table>

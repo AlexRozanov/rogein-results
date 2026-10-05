@@ -439,6 +439,82 @@ th { color: #64748b; font-weight: 600; }
   min-width: 10rem;
 }
 
+.splits-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0 20px;
+  padding: 14px 20px;
+  border: 2px solid var(--green);
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+
+.splits-toggle input {
+  width: 1.55rem;
+  height: 1.55rem;
+  accent-color: var(--green);
+  cursor: pointer;
+  flex: none;
+}
+
+.splits-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.splits-toggle-text strong {
+  font-size: 1.12rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.splits-toggle-text small {
+  color: var(--slate);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.splits-toggle.is-on {
+  background: #e7f6ea;
+  box-shadow: 0 0 0 3px rgba(31, 174, 58, 0.16);
+}
+
+.results-table.with-splits {
+  min-width: max-content;
+}
+
+.results-table .col-split {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82em;
+  line-height: 1.25;
+  vertical-align: top;
+  text-align: right;
+}
+
+.results-table th.col-split {
+  white-space: nowrap;
+  font-size: 0.78em;
+}
+
+.split-leg,
+.split-cum {
+  white-space: nowrap;
+}
+
+.split-leg.best {
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.split-cum {
+  color: var(--slate);
+}
+
 .group-nav {
   position: sticky;
   top: calc(var(--header-h) + var(--sticky-gap));

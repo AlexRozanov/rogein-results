@@ -62,6 +62,7 @@ pub struct ResultPublic {
     pub elapsed_seconds: i32,
     pub status: String,
     pub diagnostics: JsonValue,
+    pub marks: JsonValue,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
