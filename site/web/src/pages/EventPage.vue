@@ -135,11 +135,22 @@ function selectedRows(block: { group: AwardGroup; rows: ResultRow[] }) {
 
 function compareSuggestions(block: { group: AwardGroup; rows: ResultRow[] }) {
   const q = normName(compareQuery.value[block.group.id] ?? "");
-  if (q.length < 1) return [] as ResultRow[];
   const selected = new Set(compareIds.value[block.group.id] ?? []);
-  return block.rows
-    .filter((row) => !selected.has(row.participant_source_id) && normName(row.name).includes(q))
-    .slice(0, 8);
+  return block.rows.filter((row) => {
+    if (selected.has(row.participant_source_id)) return false;
+    return !q || normName(row.name).includes(q);
+  });
+}
+
+function compareEmptyText(block: { group: AwardGroup; rows: ResultRow[] }) {
+  const selected = compareIds.value[block.group.id] ?? [];
+  if (selected.length >= block.rows.length) return "Все участники уже выбраны";
+  if ((compareQuery.value[block.group.id] ?? "").trim()) return "Никого не найдено";
+  return "Нет участников";
+}
+
+function toggleCompareMenu(groupId: number) {
+  compareMenuFor.value = compareMenuFor.value === groupId ? null : groupId;
 }
 
 function onCompareInput(groupId: number, event: Event) {
@@ -153,7 +164,7 @@ function addToCompare(groupId: number, row: ResultRow) {
   if (current.includes(row.participant_source_id)) return;
   compareIds.value = { ...compareIds.value, [groupId]: [...current, row.participant_source_id] };
   compareQuery.value = { ...compareQuery.value, [groupId]: "" };
-  compareMenuFor.value = null;
+  compareMenuFor.value = groupId;
 }
 
 function removeFromCompare(groupId: number, id: number) {
@@ -454,21 +465,47 @@ onBeforeUnmount(() => {
     >
       <h2>{{ block.group.name }}</h2>
       <div v-if="isOrient" class="compare-box">
-        <div class="compare-search">
+        <div class="compare-search" :class="{ 'is-open': compareMenuFor === block.group.id }">
           <input
             :value="compareQuery[block.group.id] ?? ''"
-            type="search"
+            type="text"
+            role="combobox"
             autocomplete="off"
             placeholder="Добавить к сравнению"
             :aria-label="`Добавить к сравнению на дистанции ${block.group.name}`"
+            :aria-expanded="compareMenuFor === block.group.id"
+            aria-haspopup="listbox"
             @focus="compareMenuFor = block.group.id"
+            @click="compareMenuFor = block.group.id"
             @input="onCompareInput(block.group.id, $event)"
             @keydown="onCompareKeydown(block.group.id, block, $event)"
           />
-          <ul
-            v-if="compareMenuFor === block.group.id && compareSuggestions(block).length"
-            class="compare-suggest"
+          <button
+            type="button"
+            class="compare-caret"
+            tabindex="-1"
+            :aria-label="compareMenuFor === block.group.id ? 'Скрыть список' : 'Показать список участников'"
+            @mousedown.prevent="toggleCompareMenu(block.group.id)"
           >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path
+                d="M5 7.5 10 12.5 15 7.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <ul
+            v-if="compareMenuFor === block.group.id"
+            class="compare-suggest"
+            role="listbox"
+          >
+            <li v-if="!compareSuggestions(block).length" class="compare-suggest-empty">
+              {{ compareEmptyText(block) }}
+            </li>
             <li v-for="row in compareSuggestions(block)" :key="row.participant_source_id">
               <button type="button" @mousedown.prevent="addToCompare(block.group.id, row)">
                 <span>{{ row.name }}</span>

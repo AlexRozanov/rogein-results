@@ -503,7 +503,7 @@ th { color: #64748b; font-weight: 600; }
   border: 1px solid var(--line);
   background: #fff;
   border-radius: 10px;
-  padding: 8px 12px;
+  padding: 8px 40px 8px 12px;
   color: var(--ink);
   font: inherit;
 }
@@ -511,6 +511,35 @@ th { color: #64748b; font-weight: 600; }
 .compare-search input:focus {
   outline: 2px solid rgba(31, 174, 58, 0.35);
   border-color: var(--green);
+}
+
+.compare-caret {
+  position: absolute;
+  right: 4px;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--slate);
+  cursor: pointer;
+}
+
+.compare-caret svg {
+  width: 18px;
+  height: 18px;
+  transition: transform 0.15s ease;
+}
+
+.compare-search.is-open .compare-caret svg {
+  transform: rotate(180deg);
+}
+
+.compare-suggest-empty {
+  padding: 10px 12px;
+  color: var(--slate);
 }
 
 .compare-suggest {
