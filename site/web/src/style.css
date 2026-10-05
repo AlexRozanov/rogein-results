@@ -657,6 +657,18 @@ th { color: #64748b; font-weight: 600; }
   gap: 6px 14px;
   margin: 0;
   color: #64748b;
+  align-items: center;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-weight: 800;
+  font-size: 0.8em;
 }
 
 .stat-grid {
@@ -741,6 +753,20 @@ th { color: #64748b; font-weight: 600; }
 
 .marks-table tr.is-wrong td {
   color: #b91c1c;
+  background: #fff7ed;
+}
+
+.marks-table tr.is-missed td {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.mark-note {
+  display: inline-block;
+  margin-left: 6px;
+  color: inherit;
+  font-size: 0.78em;
+  font-weight: 700;
 }
 
 .course-error {
@@ -765,6 +791,17 @@ th { color: #64748b; font-weight: 600; }
 
 .course-error-break {
   margin-top: 8px;
+}
+
+.course-order {
+  margin-top: 12px;
+}
+
+.course-order-label {
+  margin: 0;
+  color: #9a3412;
+  font-size: 0.82em;
+  font-weight: 700;
 }
 
 .course-chip-row {

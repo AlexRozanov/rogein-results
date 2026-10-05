@@ -72,7 +72,7 @@ function punchWindow(marks: SplitMark[], startCp: number | null, finishCp: numbe
 
 export function inferCourseCps(
   courseCps: unknown,
-  rows: { place?: number | null; status?: string; marks?: unknown }[],
+  rows: { place?: number | null; status?: string | null; marks?: unknown }[],
   startCp: number | null,
   finishCp: number | null,
 ): number[] {
@@ -86,6 +86,101 @@ export function inferCourseCps(
   return punchWindow(asMarks(leader.marks), startCp, finishCp)
     .map((mark) => mark.cp_number)
     .filter((cp) => cp !== startCp && cp !== finishCp);
+}
+
+export type PunchKind = "ok" | "start" | "finish" | "missed" | "extra" | "out_of_order";
+
+export type ClassifiedPunch = {
+  kind: PunchKind;
+  cp: number;
+  seq: number | null;
+  mark_time: string;
+};
+
+type PunchInput = {
+  seq?: number;
+  cp_number: number;
+  mark_time?: string;
+};
+
+function markWindowIdx(marks: PunchInput[], startCp: number | null, finishCp: number | null) {
+  if (!marks.length) return { startIdx: 0, endIdx: -1 };
+  let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
+  if (startIdx < 0) startIdx = 0;
+  let finishIdx = -1;
+  if (finishCp != null) {
+    for (let i = marks.length - 1; i > startIdx; i -= 1) {
+      if (marks[i].cp_number === finishCp) {
+        finishIdx = i;
+        break;
+      }
+    }
+  }
+  return { startIdx, endIdx: finishIdx >= 0 ? finishIdx : marks.length - 1 };
+}
+
+function emitPunch(mark: PunchInput, kind: PunchKind): ClassifiedPunch {
+  return {
+    kind,
+    cp: mark.cp_number,
+    seq: Number.isFinite(Number(mark.seq)) ? Number(mark.seq) : null,
+    mark_time: String(mark.mark_time ?? ""),
+  };
+}
+
+function emitMissed(cp: number): ClassifiedPunch {
+  return { kind: "missed", cp, seq: null, mark_time: "" };
+}
+
+export function classifyCoursePunches(
+  marks: PunchInput[],
+  courseCps: number[],
+  startCp: number | null,
+  finishCp: number | null,
+): ClassifiedPunch[] {
+  if (!marks.length) {
+    return courseCps.map(emitMissed);
+  }
+  const { startIdx, endIdx } = markWindowIdx(marks, startCp, finishCp);
+  const remaining = courseCps.slice();
+  const out: ClassifiedPunch[] = [];
+  for (let i = 0; i < marks.length; i += 1) {
+    const mark = marks[i];
+    if (i < startIdx || i > endIdx) {
+      out.push(emitPunch(mark, "extra"));
+      continue;
+    }
+    const cp = mark.cp_number;
+    if (startCp != null && cp === startCp) {
+      out.push(emitPunch(mark, "start"));
+      continue;
+    }
+    if (finishCp != null && cp === finishCp) {
+      remaining.forEach((miss) => out.push(emitMissed(miss)));
+      remaining.length = 0;
+      out.push(emitPunch(mark, "finish"));
+      continue;
+    }
+    if (!courseCps.length) {
+      out.push(emitPunch(mark, "ok"));
+      continue;
+    }
+    const idx = remaining.indexOf(cp);
+    if (idx === 0) {
+      remaining.shift();
+      out.push(emitPunch(mark, "ok"));
+      continue;
+    }
+    if (idx > 0) {
+      remaining.splice(0, idx).forEach((miss) => out.push(emitMissed(miss)));
+      remaining.shift();
+      out.push(emitPunch(mark, "ok"));
+      continue;
+    }
+    out.push(emitPunch(mark, courseCps.includes(cp) ? "out_of_order" : "extra"));
+  }
+  remaining.forEach((miss) => out.push(emitMissed(miss)));
+  return out;
 }
 
 export function splitColumns(

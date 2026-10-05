@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
 import PageLoading from "../components/PageLoading.vue";
-import { parseMarkMs, wrapDeltaSec } from "../orientSplits";
+import { parseMarkMs, wrapDeltaSec, inferCourseCps, classifyCoursePunches } from "../orientSplits";
 
 type PathPoint = {
   x: number;
@@ -35,10 +35,12 @@ type AwardGroup = {
 type ResultRow = {
   award_group_id: number;
   participant_source_id: number;
+  place?: number | null;
   points_final: number;
   elapsed_seconds: number;
   status?: string | null;
   diagnostics?: string[] | null;
+  marks?: unknown;
 };
 
 type EventDetail = {
@@ -98,33 +100,58 @@ const awardGroupName = computed(() => {
 const isOrient = computed(() => event.value?.sport_kind === "orient");
 const pathPoints = computed<PathPoint[]>(() => normalizePath(person.value?.path));
 const selectedStatus = computed(() => selectedResult.value?.status || "OK");
+const isDsq = computed(() => {
+  const status = selectedStatus.value;
+  return status === "Дисквалификация" || status === "DSQ";
+});
 const selectedGroup = computed(() =>
   event.value?.award_groups.find((group) => group.id === selectedResult.value?.award_group_id) ?? null,
 );
-const courseControls = computed(() => asNumberList(selectedGroup.value?.course_cps));
+const startCp = computed(() => event.value?.start_cp ?? 241);
+const finishCp = computed(() => event.value?.finish_cp ?? 240);
 const diagnostics = computed(() => asStringList(selectedResult.value?.diagnostics));
+const courseControls = computed(() => {
+  if (!event.value || !selectedGroup.value) return [] as number[];
+  const rows = event.value.results.filter((row) => row.award_group_id === selectedGroup.value!.id);
+  return inferCourseCps(selectedGroup.value.course_cps, rows, startCp.value, finishCp.value);
+});
+
+const classifiedPunches = computed(() => {
+  if (!isOrient.value) return [];
+  return classifyCoursePunches(
+    person.value?.marks ?? [],
+    courseControls.value,
+    startCp.value,
+    finishCp.value,
+  );
+});
 
 const courseProgress = computed(() => {
   const required = courseControls.value;
   if (!required.length) return [] as CourseProgressItem[];
-  const punches = punchWindow(person.value?.marks ?? [], event.value?.start_cp, event.value?.finish_cp);
-  const punched = new Set(punches);
-  let i = 0;
+  const actual = new Set(
+    classifiedPunches.value
+      .filter((row) => row.kind !== "missed")
+      .map((row) => row.cp),
+  );
+  const taken = new Set(
+    classifiedPunches.value.filter((row) => row.kind === "ok").map((row) => row.cp),
+  );
   let firstMiss = true;
   return required.map((cp) => {
-    while (i < punches.length && punches[i] !== cp) i += 1;
-    const taken = i < punches.length && punches[i] === cp;
-    if (taken) i += 1;
-    const blocker = !taken && firstMiss;
-    if (!taken) firstMiss = false;
-    return { cp, taken, punched: punched.has(cp), blocker };
+    const isTaken = taken.has(cp);
+    const punched = actual.has(cp);
+    const blocker = !isTaken && !punched && firstMiss;
+    if (!isTaken) firstMiss = false;
+    return { cp, taken: isTaken, punched, blocker };
   });
 });
 
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
-const outOfOrderCps = computed(() =>
-  courseProgress.value.filter((item) => !item.taken && item.punched).map((item) => item.cp),
+
+const actualOrder = computed(() =>
+  classifiedPunches.value.filter((row) => row.kind !== "missed"),
 );
 
 const courseError = computed(() => {
@@ -136,27 +163,10 @@ const courseError = computed(() => {
     firstMissedCp: firstMissedCp.value,
     missingMore: missingCourseCps.value.length > 1,
     progress: courseProgress.value,
-    showProgress: courseProgress.value.some((item) => !item.taken),
+    actual: actualOrder.value,
+    showCourse: courseProgress.value.length > 0,
+    showActual: actualOrder.value.length > 0,
   };
-});
-
-const wrongMarkSeqs = computed(() => {
-  const wrong = new Set<number>();
-  if (!isOrient.value || selectedStatus.value === "OK") return wrong;
-  if (!outOfOrderCps.value.length && !diagnostics.value.includes("course_incomplete")) return wrong;
-  const marks = person.value?.marks ?? [];
-  const required = courseControls.value;
-  if (!marks.length || !required.length) return wrong;
-  const { startIdx, endIdx } = markWindow(marks, event.value?.start_cp, event.value?.finish_cp);
-  const consumed = consumedMarkSeqs(marks, required, startIdx, endIdx);
-  const remaining = new Set(outOfOrderCps.value);
-  for (let i = startIdx; i <= endIdx; i += 1) {
-    const mark = marks[i];
-    if (!mark) continue;
-    if (consumed.has(mark.seq)) continue;
-    if (remaining.has(mark.cp_number)) wrong.add(mark.seq);
-  }
-  return wrong;
 });
 
 const resolvedDistanceM = computed(() => {
@@ -179,14 +189,14 @@ const metrics = computed(() => {
 
 const markView = computed(() => {
   const marks = person.value?.marks ?? [];
-  const startCp = event.value?.start_cp ?? 241;
-  const finishCp = event.value?.finish_cp ?? 240;
-  let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
+  const start = startCp.value;
+  const finish = finishCp.value;
+  let startIdx = start != null ? marks.findIndex((mark) => mark.cp_number === start) : 0;
   if (startIdx < 0) startIdx = 0;
   let finishIdx = -1;
-  if (finishCp != null) {
+  if (finish != null) {
     for (let i = marks.length - 1; i >= 0; i -= 1) {
-      if (marks[i].cp_number === finishCp) {
+      if (marks[i].cp_number === finish) {
         finishIdx = i;
         break;
       }
@@ -194,18 +204,36 @@ const markView = computed(() => {
   }
   if (finishIdx < 0) finishIdx = marks.length - 1;
   const t0 = marks[startIdx] ? parseMarkMs(marks[startIdx].mark_time) : null;
+  const timing = new Map<number, { fromStartSec: number | null; fromPrevSec: number | null }>();
   let prevMs: number | null = null;
-  const rows = marks.map((mark, index) => {
+  marks.forEach((mark) => {
     const ms = parseMarkMs(mark.mark_time);
     const fromStartSec = t0 != null && ms != null ? wrapDeltaSec(t0, ms) : null;
     const fromPrevSec = prevMs != null && ms != null ? wrapDeltaSec(prevMs, ms) : null;
     if (ms != null) prevMs = ms;
+    timing.set(mark.seq, { fromStartSec, fromPrevSec });
+  });
+  const classified = isOrient.value && selectedStatus.value !== "OK" ? classifiedPunches.value : [];
+  const source = classified.length
+    ? classified
+    : marks.map((mark) => ({
+        kind: "ok" as const,
+        cp: mark.cp_number,
+        seq: mark.seq,
+        mark_time: mark.mark_time,
+      }));
+  let n = 0;
+  const rows = source.map((row, index) => {
+    const times = row.seq != null ? timing.get(row.seq) : undefined;
+    if (row.kind !== "missed") n += 1;
     return {
-      seq: mark.seq,
-      n: index + 1,
-      cp: mark.cp_number,
-      fromStartSec,
-      fromPrevSec,
+      key: row.seq != null ? `s-${row.seq}` : `m-${index}-${row.cp}`,
+      seq: row.seq,
+      n: row.kind === "missed" ? null : n,
+      cp: row.cp,
+      kind: row.kind,
+      fromStartSec: times?.fromStartSec ?? null,
+      fromPrevSec: times?.fromPrevSec ?? null,
     };
   });
   return {
@@ -288,51 +316,9 @@ function fmtMarkTime(raw: string) {
   return (part || raw).slice(0, 8);
 }
 
-function asNumberList(raw: unknown): number[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((value) => Number(value)).filter((value) => Number.isFinite(value));
-}
-
 function asStringList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((value) => String(value)).filter((value) => value.length > 0);
-}
-
-function markWindow(marks: Mark[], startCp: number | null | undefined, finishCp: number | null | undefined) {
-  if (!marks.length) return { startIdx: 0, endIdx: -1 };
-  let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
-  if (startIdx < 0) startIdx = 0;
-  let finishIdx = -1;
-  if (finishCp != null) {
-    for (let i = marks.length - 1; i > startIdx; i -= 1) {
-      if (marks[i].cp_number === finishCp) {
-        finishIdx = i;
-        break;
-      }
-    }
-  }
-  return { startIdx, endIdx: finishIdx >= 0 ? finishIdx : marks.length - 1 };
-}
-
-function punchWindow(marks: Mark[], startCp: number | null | undefined, finishCp: number | null | undefined) {
-  const { startIdx, endIdx } = markWindow(marks, startCp, finishCp);
-  if (endIdx < startIdx) return [];
-  return marks.slice(startIdx, endIdx + 1).map((mark) => mark.cp_number);
-}
-
-function consumedMarkSeqs(marks: Mark[], required: number[], startIdx: number, endIdx: number) {
-  const consumed = new Set<number>();
-  let i = startIdx;
-  for (const cp of required) {
-    while (i <= endIdx && marks[i]?.cp_number !== cp) i += 1;
-    if (i <= endIdx && marks[i]?.cp_number === cp) {
-      consumed.add(marks[i].seq);
-      i += 1;
-      continue;
-    }
-    break;
-  }
-  return consumed;
 }
 
 function diagnosticLabel(code: string) {
@@ -361,6 +347,25 @@ function courseCpTitle(item: CourseProgressItem) {
   if (item.punched) return "есть отметка, но не в зачёт: предыдущий КП не взят";
   if (item.blocker) return "не взято — с этого КП дистанция не засчитана";
   return "не взято";
+}
+
+function punchKindNote(kind: string) {
+  if (kind === "missed") return "не взято";
+  if (kind === "extra") return "лишняя";
+  if (kind === "out_of_order") return "не по порядку";
+  return "";
+}
+
+function actualChipLabel(kind: string, cp: number) {
+  if (kind === "start") return "Старт";
+  if (kind === "finish") return "Финиш";
+  return String(cp);
+}
+
+function actualChipTitle(kind: string, cp: number) {
+  const note = punchKindNote(kind);
+  if (kind === "start" || kind === "finish") return note;
+  return note ? `КП ${cp} — ${note}` : `КП ${cp}`;
 }
 
 async function load() {
@@ -405,6 +410,9 @@ watch(() => [route.params.slug, route.params.sourceId], load);
       <p class="person-sub">
         <template v-if="isOrient">
           <span>Дистанция: {{ awardGroupName }}</span>
+          <span v-if="selectedStatus !== 'OK'" class="status-pill" :class="{ 'is-dsq': isDsq }">
+            {{ selectedStatus === "Дисквалификация" ? "DSQ" : selectedStatus }}
+          </span>
         </template>
         <template v-else>
           <span>№ {{ person.bib }}</span>
@@ -447,26 +455,48 @@ watch(() => [route.params.slug, route.params.sourceId], load);
     <section v-if="courseError" class="course-error">
       <h2>Диагностика</h2>
       <p class="course-error-diag">{{ courseError.diagnosticsText }}</p>
-      <div v-if="courseError.showProgress" class="course-chip-row">
-        <template v-for="(item, idx) in courseError.progress" :key="`${idx}-${item.cp}`">
-          <span
-            class="course-chip"
-            :class="{
-              muted: !item.taken && !item.punched,
-              'out-of-order': !item.taken && item.punched,
-              blocker: item.blocker,
-            }"
-            :title="courseCpTitle(item)"
-          >
-            <span class="course-chip-num">{{ item.cp }}</span>
-          </span>
-          <span v-if="idx < courseError.progress.length - 1" class="course-seq-arrow">→</span>
-        </template>
+      <div v-if="courseError.showCourse" class="course-order">
+        <p class="course-order-label">Правильный порядок</p>
+        <div class="course-chip-row">
+          <template v-for="(item, idx) in courseError.progress" :key="`c-${idx}-${item.cp}`">
+            <span
+              class="course-chip"
+              :class="{
+                muted: !item.taken && !item.punched,
+                'out-of-order': !item.taken && item.punched,
+                blocker: item.blocker,
+              }"
+              :title="courseCpTitle(item)"
+            >
+              <span class="course-chip-num">{{ item.cp }}</span>
+            </span>
+            <span v-if="idx < courseError.progress.length - 1" class="course-seq-arrow">→</span>
+          </template>
+        </div>
+      </div>
+      <div v-if="courseError.showActual" class="course-order">
+        <p class="course-order-label">Реальный порядок</p>
+        <div class="course-chip-row">
+          <template v-for="(item, idx) in courseError.actual" :key="`a-${idx}-${item.seq ?? item.cp}`">
+            <span
+              class="course-chip"
+              :class="{
+                extra: item.kind === 'extra',
+                'out-of-order': item.kind === 'out_of_order',
+                blocker: item.kind === 'extra' || item.kind === 'out_of_order',
+              }"
+              :title="actualChipTitle(item.kind, item.cp)"
+            >
+              <span class="course-chip-num">{{ actualChipLabel(item.kind, item.cp) }}</span>
+            </span>
+            <span v-if="idx < courseError.actual.length - 1" class="course-seq-arrow">→</span>
+          </template>
+        </div>
       </div>
       <p v-if="courseError.firstMissedCp != null" class="course-error-break">
         Дистанция оборвалась на КП {{ courseError.firstMissedCp }}
         <template v-if="courseError.missingMore">
-          — следующие КП не в зачёт, пока не взят этот.
+          — следующие пропущенные КП отмечены в списке отметок.
         </template>
       </p>
     </section>
@@ -488,13 +518,19 @@ watch(() => [route.params.slug, route.params.sourceId], load);
             <tbody>
               <tr
                 v-for="mark in markView.rows"
-                :key="mark.seq"
-                :class="{ 'is-wrong': wrongMarkSeqs.has(mark.seq) }"
+                :key="mark.key"
+                :class="{
+                  'is-wrong': mark.kind === 'extra' || mark.kind === 'out_of_order',
+                  'is-missed': mark.kind === 'missed',
+                }"
               >
-                <td class="col-n">{{ mark.n }}</td>
-                <td class="col-cp">КП {{ mark.cp }}</td>
-                <td>{{ fmtHms(mark.fromStartSec) }}</td>
-                <td>{{ mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
+                <td class="col-n">{{ mark.n ?? "" }}</td>
+                <td class="col-cp">
+                  КП {{ mark.cp }}
+                  <span v-if="punchKindNote(mark.kind)" class="mark-note">{{ punchKindNote(mark.kind) }}</span>
+                </td>
+                <td>{{ mark.kind === "missed" ? "—" : fmtHms(mark.fromStartSec) }}</td>
+                <td>{{ mark.kind === "missed" || mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
               </tr>
             </tbody>
           </table>
