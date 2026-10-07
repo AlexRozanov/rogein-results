@@ -23,6 +23,7 @@ const props = defineProps<{
   open: boolean;
   busy?: boolean;
   title?: string;
+  isOrient?: boolean;
   initial?: AddToStartProtocolDraft | null;
 }>();
 
@@ -38,6 +39,8 @@ const error = ref("");
 const participantId = ref("");
 const name = ref("");
 const formatId = ref("");
+const courseName = ref("");
+const courseRows = ref<{ id: number; name: string }[]>([]);
 const gender = ref<"мужской" | "женский">("мужской");
 const birthDateIso = ref("");
 
@@ -69,6 +72,7 @@ function applyInitial(draft: AddToStartProtocolDraft | null | undefined) {
   participantId.value = String(draft?.participant_id || "").trim();
   name.value = String(draft?.name || "").trim();
   formatId.value = draft?.format_id != null ? String(draft.format_id) : "";
+  courseName.value = "";
   gender.value = normalizeGender(draft?.gender);
   birthDateIso.value =
     String(draft?.birth_date_iso || "").trim() || ruDateToIso(draft?.birth_date_raw);
@@ -83,12 +87,24 @@ async function loadFormats() {
   }
 }
 
+async function loadCourses() {
+  try {
+    courseRows.value = await invoke<{ id: number; name: string }[]>("get_courses");
+  } catch (err) {
+    error.value = `Ошибка загрузки дистанций: ${String(err)}`;
+  }
+}
+
 watch(
   () => props.open,
   async (isOpen) => {
     if (!isOpen) return;
     applyInitial(props.initial);
-    await loadFormats();
+    if (props.isOrient) {
+      await loadCourses();
+    } else {
+      await loadFormats();
+    }
   },
 );
 
@@ -104,6 +120,10 @@ async function save() {
     error.value = "Заполните номер (ID) и имя участника.";
     return;
   }
+  if (props.isOrient && !courseName.value.trim()) {
+    error.value = "Выберите дистанцию.";
+    return;
+  }
   localBusy.value = true;
   error.value = "";
   try {
@@ -111,8 +131,9 @@ async function save() {
       participantId: pid,
       name: personName,
       formatId: formatId.value ? Number(formatId.value) : null,
-      gender: gender.value,
-      birthDateRaw: isoDateToRu(birthDateIso.value) || null,
+      gender: props.isOrient ? null : gender.value,
+      birthDateRaw: props.isOrient ? null : isoDateToRu(birthDateIso.value) || null,
+      courseName: props.isOrient ? courseName.value.trim() : null,
     });
     await invoke("recalculate_results");
     emit("status", `Участник «${personName}» (#${pid}) добавлен в стартовый протокол.`);
@@ -163,11 +184,11 @@ async function save() {
 
       <div class="native-settings">
         <label>
-          ID:
+          Номер:
           <input
             v-model="participantId"
             type="text"
-            placeholder="Номер участника"
+            placeholder="Номер чипа"
             :disabled="localBusy || busy"
             @keyup.enter="save"
           />
@@ -182,7 +203,20 @@ async function save() {
             @keyup.enter="save"
           />
         </label>
-        <label>
+        <label v-if="isOrient">
+          Дистанция:
+          <input
+            v-model="courseName"
+            list="dialog-courses"
+            type="text"
+            placeholder="D1"
+            :disabled="localBusy || busy"
+          />
+          <datalist id="dialog-courses">
+            <option v-for="c in courseRows" :key="`dialog-course-${c.id}`" :value="c.name" />
+          </datalist>
+        </label>
+        <label v-else>
           Формат:
           <select v-model="formatId" :disabled="localBusy || busy">
             <option value="">Не выбран</option>
@@ -191,14 +225,14 @@ async function save() {
             </option>
           </select>
         </label>
-        <label>
+        <label v-if="!isOrient">
           Пол:
           <select v-model="gender" :disabled="localBusy || busy">
             <option value="мужской">мужской</option>
             <option value="женский">женский</option>
           </select>
         </label>
-        <label>
+        <label v-if="!isOrient">
           Дата рождения:
           <DateInput v-model="birthDateIso" :disabled="localBusy || busy" />
         </label>

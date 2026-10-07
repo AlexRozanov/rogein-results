@@ -23,6 +23,7 @@ type StartProtocolRow = {
   has_result: boolean;
   is_incomplete: boolean;
   missing_format: boolean;
+  courses?: string[];
 };
 
 type StartProtocolResponse = {
@@ -45,6 +46,7 @@ type StartProtocolFormatRow = {
 
 const props = defineProps<{
   busy: boolean;
+  isOrient?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -61,6 +63,9 @@ const onlyMissingFormat = ref(false);
 const protocolFile = ref<File | null>(null);
 const importDialogOpen = ref(false);
 const importExistingCount = ref(0);
+const coursesFile = ref<File | null>(null);
+const coursesImportDialogOpen = ref(false);
+const coursesImportExistingCount = ref(0);
 const pageSize = ref(50);
 const pageOffset = ref(0);
 const formatRows = ref<StartProtocolFormatRow[]>([]);
@@ -71,6 +76,9 @@ const editName = ref("");
 const editFormatId = ref<string>("");
 const editGender = ref<"мужской" | "женский">("мужской");
 const editBirthDateIso = ref("");
+const editCourseName = ref("");
+const extraCourseName = ref("");
+const courseRows = ref<{ id: number; name: string; controls: number[] }[]>([]);
 
 const formatsModalOpen = ref(false);
 const formatsBusy = ref(false);
@@ -85,6 +93,7 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   void loadFormats();
+  void loadCourses();
   void refresh();
   window.addEventListener("keydown", onTeamHotkey);
 });
@@ -158,6 +167,24 @@ async function loadFormats() {
     }
   } catch (error) {
     emit("status", `Ошибка загрузки справочника форматов: ${String(error)}`);
+  }
+}
+
+async function loadCourses() {
+  if (!props.isOrient) return;
+  try {
+    courseRows.value = await invoke<{ id: number; name: string; controls: number[] }[]>("get_courses");
+  } catch (error) {
+    emit("status", `Ошибка загрузки дистанций: ${String(error)}`);
+  }
+}
+
+async function sendToPhone() {
+  try {
+    const note = await invoke<string>("push_start_pack_to_phone");
+    emit("status", note);
+  } catch (error) {
+    emit("status", `Ошибка отправки на телефон: ${String(error)}`);
   }
 }
 
@@ -257,9 +284,77 @@ async function runImport(reset: boolean) {
     );
     pageOffset.value = 0;
     await loadFormats();
+    await loadCourses();
     await refresh();
   } catch (error) {
     emit("status", `Ошибка импорта стартового протокола: ${String(error)}`);
+  }
+}
+
+async function onCoursesFileSelected(file: File | null) {
+  coursesFile.value = file;
+  if (!coursesFile.value) return;
+  await beginCoursesImportFlow();
+}
+
+async function importCoursesOrder() {
+  if (!coursesFile.value) {
+    emit("status", "Выберите CSV порядка КП: D1;31;32;33");
+    return;
+  }
+  await beginCoursesImportFlow();
+}
+
+async function beginCoursesImportFlow() {
+  try {
+    const counts = await invoke<{ courses: number }>("get_data_presence_counts");
+    const withControls = courseRows.value.filter((c) => c.controls.length > 0).length;
+    if (counts.courses > 0 && withControls > 0) {
+      coursesImportExistingCount.value = counts.courses;
+      coursesImportDialogOpen.value = true;
+      return;
+    }
+    await runCoursesImport(false);
+  } catch (error) {
+    emit("status", `Ошибка проверки дистанций: ${String(error)}`);
+  }
+}
+
+function onCoursesImportDialogCancel() {
+  coursesImportDialogOpen.value = false;
+}
+
+async function onCoursesImportDialogMerge() {
+  coursesImportDialogOpen.value = false;
+  await runCoursesImport(false);
+}
+
+async function onCoursesImportDialogReplace() {
+  coursesImportDialogOpen.value = false;
+  await runCoursesImport(true);
+}
+
+async function runCoursesImport(reset: boolean) {
+  if (!coursesFile.value) {
+    emit("status", "Выберите CSV порядка КП: D1;31;32;33");
+    return;
+  }
+  try {
+    const csvContent = await coursesFile.value.text();
+    const summary = await invoke<{ imported_rows: number; total_rows: number }>(
+      "import_courses_content",
+      { csvContent, reset },
+    );
+    await loadCourses();
+    emit("teamsChanged");
+    emit(
+      "status",
+      reset
+        ? `Порядок КП загружен заново: ${summary.imported_rows} дистанций. Отправьте протокол на телефон.`
+        : `Порядок КП обновлён: ${summary.imported_rows} дистанций. Отправьте протокол на телефон.`,
+    );
+  } catch (error) {
+    emit("status", `Ошибка импорта порядка КП: ${String(error)}`);
   }
 }
 
@@ -497,6 +592,8 @@ function beginEdit(row: StartProtocolRow) {
   editChipId.value = row.participant_id;
   editName.value = row.name;
   editFormatId.value = row.format_id == null ? "" : String(row.format_id);
+  editCourseName.value = row.format_name || "";
+  extraCourseName.value = "";
   editGender.value = normalizeGender(row.gender);
   editBirthDateIso.value = row.birth_date_iso || ruDateToIso(row.birth_date_raw);
   editId.value = row.id;
@@ -507,6 +604,8 @@ function cancelEdit() {
   editChipId.value = "";
   editName.value = "";
   editFormatId.value = "";
+  editCourseName.value = "";
+  extraCourseName.value = "";
   editGender.value = "мужской";
   editBirthDateIso.value = "";
 }
@@ -519,16 +618,67 @@ async function saveEdit() {
       participantId: editChipId.value,
       name: editName.value,
       formatId: editFormatId.value ? Number(editFormatId.value) : null,
-      gender: editGender.value,
-      birthDateRaw: isoDateToRu(editBirthDateIso.value) || null,
+      gender: props.isOrient ? null : editGender.value,
+      birthDateRaw: props.isOrient ? null : isoDateToRu(editBirthDateIso.value) || null,
+      courseName: props.isOrient ? editCourseName.value || null : null,
     });
     emit("status", `Запись стартового протокола #${editChipId.value} обновлена.`);
     cancelEdit();
     await loadFormats();
+    await loadCourses();
     await refresh();
   } catch (error) {
     emit("status", `Ошибка обновления стартового протокола: ${String(error)}`);
   }
+}
+
+async function addExtraCourse(row: StartProtocolRow) {
+  const course = extraCourseName.value.trim();
+  if (!course) {
+    emit("status", "Выберите дистанцию, чтобы добавить её участнику.");
+    return;
+  }
+  try {
+    await invoke("add_start_protocol_course", {
+      entryId: row.id,
+      courseName: course,
+      makeCurrent: true,
+    });
+    extraCourseName.value = "";
+    emit("status", `Участнику «${row.name}» добавлена дистанция «${course}».`);
+    await loadCourses();
+    await refresh();
+  } catch (error) {
+    emit("status", `Ошибка добавления дистанции: ${String(error)}`);
+  }
+}
+
+async function deleteRow(row: StartProtocolRow, event: Event) {
+  event.stopPropagation();
+  if (!window.confirm(`Удалить ${row.participant_id} ${row.name} из стартового протокола?`)) {
+    return;
+  }
+  try {
+    await invoke("delete_start_protocol_entry", { entryId: row.id });
+    if (editId.value === row.id) cancelEdit();
+    emit("status", `Участник «${row.name}» удалён из стартового протокола.`);
+    await refresh();
+  } catch (error) {
+    emit("status", `Ошибка удаления: ${String(error)}`);
+  }
+}
+
+function rowCourses(row: StartProtocolRow) {
+  const items = [...(row.courses || [])];
+  if (row.format_name && !items.some((item) => item === row.format_name)) {
+    items.unshift(row.format_name);
+  }
+  return items;
+}
+
+function availableExtraCourses(row: StartProtocolRow) {
+  const have = new Set(rowCourses(row).map((item) => item.toLowerCase()));
+  return courseRows.value.filter((item) => !have.has(item.name.toLowerCase()));
 }
 
 function isEditingRow(rowId: number) {
@@ -558,6 +708,7 @@ function closeAddModal() {
 
 async function onAddSaved() {
   await loadFormats();
+  await loadCourses();
   await refresh();
 }
 
@@ -642,9 +793,31 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       <FilePickerButton @file-selected="onFileSelected" />
       <button :disabled="props.busy" @click="importProtocol">Импорт стартового протокола</button>
       <button :disabled="props.busy" @click="openAddModal">Добавить участника</button>
+      <button v-if="props.isOrient" :disabled="props.busy" @click="sendToPhone">Отправить на телефон</button>
       <button :disabled="props.busy" @click="refresh">Обновить список</button>
-      <button :disabled="props.busy" @click="openFormatsModal">Справочник форматов</button>
+      <button v-if="!props.isOrient" :disabled="props.busy" @click="openFormatsModal">Справочник форматов</button>
     </div>
+    <p v-if="props.isOrient" class="subtitle">
+      CSV участников: номер;ФИО;дистанция. Повторная загрузка того же номера добавляет дистанцию, не создавая второго человека.
+      «Отправить на телефон» можно не нажимать: при USB-отладке протокол уходит сам. Кнопка — на крайний случай.
+    </p>
+    <div v-if="props.isOrient" class="native-row">
+      <FilePickerButton
+        button-label="Выбрать CSV порядка КП"
+        empty-label="Файл порядка КП не выбран"
+        :disabled="props.busy"
+        @file-selected="onCoursesFileSelected"
+      />
+      <button :disabled="props.busy" @click="importCoursesOrder">Импорт порядка КП</button>
+    </div>
+    <p v-if="props.isOrient" class="subtitle">
+      CSV порядка КП: <code>D1;31;32;33</code> — строка на дистанцию. Можно
+      <code>D1;31 32 33</code>. Старт и финиш задаются в настройках.
+      <template v-if="courseRows.length">
+        Сейчас:
+        {{ courseRows.map((c) => c.name + " (" + c.controls.length + " КП)").join(", ") }}.
+      </template>
+    </p>
 
     <div class="native-settings">
       <label>
@@ -658,25 +831,25 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
         />
       </label>
       <label>
-        Формат:
+        {{ props.isOrient ? "Дистанция:" : "Формат:" }}
         <select v-model="formatFilterId" @change="applyFilters">
-          <option value="">Все форматы</option>
+          <option value="">{{ props.isOrient ? "Все дистанции" : "Все форматы" }}</option>
           <option v-for="f in formatRows" :key="f.id" :value="String(f.id)">{{ f.format_name }}</option>
         </select>
       </label>
-      <label class="checkbox-label">
+      <label v-if="!props.isOrient" class="checkbox-label">
         <input v-model="onlyIncomplete" type="checkbox" @change="applyFilters" />
         Только с незаполненными полями
       </label>
       <label class="checkbox-label">
         <input v-model="onlyMissingFormat" type="checkbox" @change="applyFilters" />
-        Только без формата
+        {{ props.isOrient ? "Только без дистанции" : "Только без формата" }}
       </label>
       <button :disabled="props.busy" @click="applyFilters">Применить фильтр</button>
       <span class="subtitle">Найдено: {{ totalCount }}</span>
     </div>
 
-    <div v-if="selectedIds.length" class="native-row team-actions-bar">
+    <div v-if="selectedIds.length && !props.isOrient" class="native-row team-actions-bar">
       <span class="subtitle">Выбрано: {{ selectedIds.length }}</span>
       <button
         :disabled="props.busy || teamBusy || !canMergeSelection"
@@ -706,7 +879,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       <table class="native-results">
         <thead>
           <tr>
-            <th class="team-check-col">
+            <th v-if="!props.isOrient" class="team-check-col">
               <input
                 type="checkbox"
                 :checked="allVisibleSelected"
@@ -715,20 +888,21 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
                 @change="toggleSelectAllVisible(($event.target as HTMLInputElement).checked)"
               />
             </th>
-            <th class="team-brace-col" title="Группировка команды"></th>
-            <th>ID</th>
+            <th v-if="!props.isOrient" class="team-brace-col" title="Группировка команды"></th>
+            <th>Номер</th>
             <th>Имя</th>
-            <th>Формат</th>
-            <th>Команда</th>
-            <th>Пол</th>
-            <th>Дата рождения</th>
+            <th>{{ props.isOrient ? "Дистанция" : "Формат" }}</th>
+            <th v-if="props.isOrient">Все дистанции</th>
+            <th v-if="!props.isOrient">Команда</th>
+            <th v-if="!props.isOrient">Пол</th>
+            <th v-if="!props.isOrient">Дата рождения</th>
             <th>Есть в результатах</th>
             <th>Действие</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!rows.length">
-            <td colspan="10">Стартовый протокол пуст</td>
+            <td :colspan="props.isOrient ? 6 : 10">Стартовый протокол пуст</td>
           </tr>
           <tr
             v-for="(row, rowIndex) in rows"
@@ -742,7 +916,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
             }"
             @click="beginEdit(row)"
           >
-            <td class="team-check-col" @click.stop>
+            <td v-if="!props.isOrient" class="team-check-col" @click.stop>
               <input
                 type="checkbox"
                 :checked="isSelected(row.id)"
@@ -750,7 +924,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
                 @change="toggleSelect(row.id, ($event.target as HTMLInputElement).checked)"
               />
             </td>
-            <td class="team-brace-col" aria-hidden="true">
+            <td v-if="!props.isOrient" class="team-brace-col" aria-hidden="true">
               <span
                 v-if="teamGroupPos(row, rowIndex) !== 'none'"
                 class="team-brace"
@@ -772,7 +946,26 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
             </td>
             <td>
               <select
-                v-if="isEditingRow(row.id)"
+                v-if="isEditingRow(row.id) && props.isOrient"
+                :key="`course-${row.id}`"
+                v-model="editCourseName"
+                class="row-edit-input"
+                @click.stop
+                @mousedown.stop
+              >
+                <option value="">Не выбрана</option>
+                <option v-for="c in courseRows" :key="`course-edit-${c.id}`" :value="c.name">
+                  {{ c.name }}
+                </option>
+                <option
+                  v-if="editCourseName && !courseRows.some((c) => c.name === editCourseName)"
+                  :value="editCourseName"
+                >
+                  {{ editCourseName }}
+                </option>
+              </select>
+              <select
+                v-else-if="isEditingRow(row.id)"
                 :key="`format-${row.id}`"
                 v-model="editFormatId"
                 class="row-edit-input"
@@ -786,7 +979,21 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
               </select>
               <span v-else>{{ row.format_name || "—" }}</span>
             </td>
-            <td>
+            <td v-if="props.isOrient">
+              <span>{{ rowCourses(row).join(", ") || "—" }}</span>
+              <div v-if="isEditingRow(row.id)" class="native-row" @click.stop>
+                <select v-model="extraCourseName" class="row-edit-input">
+                  <option value="">Ещё дистанция</option>
+                  <option v-for="c in availableExtraCourses(row)" :key="`extra-${row.id}-${c.id}`" :value="c.name">
+                    {{ c.name }}
+                  </option>
+                </select>
+                <button type="button" :disabled="props.busy || !extraCourseName" @click="addExtraCourse(row)">
+                  Добавить
+                </button>
+              </div>
+            </td>
+            <td v-if="!props.isOrient">
               <span
                 v-if="row.team_id != null && row.team_id > 0"
                 class="team-cell"
@@ -797,7 +1004,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
               </span>
               <span v-else class="team-cell muted">—</span>
             </td>
-            <td>
+            <td v-if="!props.isOrient">
               <select
                 v-if="isEditingRow(row.id)"
                 :key="`gender-${row.id}`"
@@ -811,7 +1018,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
               </select>
               <span v-else>{{ row.gender || "" }}</span>
             </td>
-            <td>
+            <td v-if="!props.isOrient">
               <DateInput
                 v-if="isEditingRow(row.id)"
                 v-model="editBirthDateIso"
@@ -843,6 +1050,13 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
                 label="Изменить"
                 :disabled="props.busy"
                 @click="beginEdit(row)"
+              />
+              <IconActionButton
+                v-if="!isEditingRow(row.id)"
+                variant="delete"
+                label="Удалить"
+                :disabled="props.busy"
+                @click="deleteRow(row, $event)"
               />
             </td>
           </tr>
@@ -904,6 +1118,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
     <AddToStartProtocolDialog
       :open="addModalOpen"
       :busy="props.busy"
+      :is-orient="props.isOrient"
       title="Добавить участника"
       @close="closeAddModal"
       @saved="onAddSaved"
@@ -1018,6 +1233,16 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       @cancel="onImportDialogCancel"
       @merge="onImportDialogMerge"
       @replace="onImportDialogReplace"
+    />
+    <ImportExistingDataDialog
+      :open="coursesImportDialogOpen"
+      kind="courses"
+      :existing-count="coursesImportExistingCount"
+      :file-name="coursesFile?.name"
+      :busy="props.busy"
+      @cancel="onCoursesImportDialogCancel"
+      @merge="onCoursesImportDialogMerge"
+      @replace="onCoursesImportDialogReplace"
     />
   </section>
 </template>

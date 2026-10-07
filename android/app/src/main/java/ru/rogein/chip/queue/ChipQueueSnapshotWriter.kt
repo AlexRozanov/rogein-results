@@ -37,6 +37,8 @@ class ChipQueueSnapshotWriter(private val context: Context) {
                     .put("id", item.id)
                     .put("uid", item.uid)
                     .put("logicalId", item.logicalId ?: JSONObject.NULL)
+                    .put("name", item.personName)
+                    .put("courseName", item.courseName)
                     .put("clearedAt", item.clearedAt ?: JSONObject.NULL)
                     .put("punches", punches),
             )

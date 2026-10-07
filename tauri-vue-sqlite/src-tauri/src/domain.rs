@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -173,6 +175,8 @@ pub struct StartProtocolRow {
     pub has_result: bool,
     pub is_incomplete: bool,
     pub missing_format: bool,
+    #[serde(default)]
+    pub courses: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -727,6 +731,28 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("ensure phone_chip_imports: {e}"))?;
+    ensure_start_protocol_courses_schema(conn)?;
+    Ok(())
+}
+
+fn ensure_start_protocol_courses_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS start_protocol_courses (
+            protocol_id INTEGER NOT NULL,
+            course_name TEXT NOT NULL,
+            PRIMARY KEY (protocol_id, course_name),
+            FOREIGN KEY (protocol_id) REFERENCES start_protocol(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_start_protocol_courses_name
+            ON start_protocol_courses(course_name);
+        INSERT OR IGNORE INTO start_protocol_courses(protocol_id, course_name)
+        SELECT id, TRIM(format_name)
+        FROM start_protocol
+        WHERE TRIM(IFNULL(format_name, '')) <> '';
+        "#,
+    )
+    .map_err(|e| format!("ensure start_protocol_courses: {e}"))?;
     Ok(())
 }
 
@@ -855,6 +881,7 @@ fn map_start_protocol_row(
         has_result: r.get(12)?,
         is_incomplete: r.get(incomplete_idx)?,
         missing_format: r.get(missing_idx)?,
+        courses: Vec::new(),
     })
 }
 
@@ -1048,6 +1075,14 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_start_protocol_format ON start_protocol(format_name);
         CREATE INDEX IF NOT EXISTS idx_start_protocol_name ON start_protocol(name);
         CREATE INDEX IF NOT EXISTS idx_start_protocol_format_id ON start_protocol(format_id);
+        CREATE TABLE IF NOT EXISTS start_protocol_courses (
+            protocol_id INTEGER NOT NULL,
+            course_name TEXT NOT NULL,
+            PRIMARY KEY (protocol_id, course_name),
+            FOREIGN KEY (protocol_id) REFERENCES start_protocol(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_start_protocol_courses_name
+            ON start_protocol_courses(course_name);
         "#,
     )
     .map_err(|e| format!("init schema: {e}"))?;
@@ -1361,6 +1396,10 @@ struct PhoneSnapshotItem {
     logical_id: Option<i64>,
     #[serde(default)]
     punches: Vec<PhoneSnapshotPunch>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "courseName")]
+    course_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1541,15 +1580,43 @@ fn prepare_phone_item(
     let (bib, name, course_name, matched) = match item.logical_id {
         Some(logical_id) => {
             let hits = protocol_hits_for_bib(conn, logical_id)?;
+            let stamped_course = item
+                .course_name
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+            let stamped_name = item
+                .name
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
             if hits.len() == 1 {
                 let (protocol_bib, protocol_name, format_name) = &hits[0];
-                let course = if orient { format_name.clone() } else { String::new() };
-                (protocol_bib.clone(), protocol_name.clone(), course, true)
+                let course = stamped_course.unwrap_or_else(|| {
+                    if orient {
+                        format_name.clone()
+                    } else {
+                        String::new()
+                    }
+                });
+                (
+                    protocol_bib.clone(),
+                    stamped_name.unwrap_or_else(|| protocol_name.clone()),
+                    course,
+                    true,
+                )
+            } else if stamped_name.is_some() && stamped_course.is_some() {
+                (
+                    logical_id.to_string(),
+                    stamped_name.unwrap(),
+                    stamped_course.unwrap(),
+                    !hits.is_empty(),
+                )
             } else {
                 (
                     logical_id.to_string(),
-                    format!("чип {logical_id}"),
-                    String::new(),
+                    stamped_name.unwrap_or_else(|| format!("чип {logical_id}")),
+                    stamped_course.unwrap_or_default(),
                     false,
                 )
             }
@@ -1681,6 +1748,7 @@ pub fn import_start_protocol_content(
     csv_content: &str,
     reset: bool,
 ) -> Result<StartProtocolImportSummary, String> {
+    let orient = get_settings(conn)?.sport_kind == "orient";
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b';')
         .has_headers(true)
@@ -1691,18 +1759,49 @@ pub fn import_start_protocol_content(
         .headers()
         .map_err(|e| format!("start protocol header read: {e}"))?
         .clone();
-    if headers.len() < 5 {
-        return Err("Стартовый протокол: ожидается минимум 5 колонок".to_string());
+    let min_cols = if orient { 3 } else { 5 };
+    if headers.len() < min_cols {
+        return Err(if orient {
+            "Стартовый протокол: ожидаются колонки номер;ФИО;дистанция".to_string()
+        } else {
+            "Стартовый протокол: ожидается минимум 5 колонок".to_string()
+        });
     }
 
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("start protocol transaction: {e}"))?;
     if reset {
+        tx.execute("DELETE FROM start_protocol_courses", [])
+            .map_err(|e| format!("clear start protocol courses: {e}"))?;
         tx.execute("DELETE FROM start_protocol", [])
             .map_err(|e| format!("clear start protocol: {e}"))?;
     }
 
+    let imported_rows = if orient {
+        import_orient_start_protocol_rows(&tx, &mut reader, reset)?
+    } else {
+        import_rogaine_start_protocol_rows(&tx, &mut reader, reset)?
+    };
+    sync_start_protocol_format_ids_tx(&tx)?;
+
+    let total_rows: i64 = tx
+        .query_row("SELECT COUNT(*) FROM start_protocol", [], |r| r.get(0))
+        .map_err(|e| format!("count start protocol rows: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit start protocol import: {e}"))?;
+
+    Ok(StartProtocolImportSummary {
+        imported_rows,
+        total_rows,
+    })
+}
+
+fn import_rogaine_start_protocol_rows<R: std::io::Read>(
+    tx: &Transaction<'_>,
+    reader: &mut csv::Reader<R>,
+    reset: bool,
+) -> Result<i64, String> {
     let mut imported_rows = 0_i64;
     let upsert_sql = if reset {
         r#"
@@ -1748,7 +1847,7 @@ pub fn import_start_protocol_content(
         let format_id = if format_name.is_empty() {
             None
         } else {
-            Some(ensure_format_id_tx(&tx, &format_name)?)
+            Some(ensure_format_id_tx(tx, &format_name)?)
         };
         let birth_date_iso = parse_birth_date_ru(&birth_date_raw);
         let changed = stmt
@@ -1770,20 +1869,157 @@ pub fn import_start_protocol_content(
         if changed > 0 {
             imported_rows += 1;
         }
+        if !format_name.is_empty() {
+            if let Some(protocol_id) = find_protocol_id_tx(tx, &participant_id, &name)? {
+                link_protocol_course_tx(tx, protocol_id, &format_name)?;
+            }
+        }
     }
-    drop(stmt);
-    sync_start_protocol_format_ids_tx(&tx)?;
+    Ok(imported_rows)
+}
 
-    let total_rows: i64 = tx
-        .query_row("SELECT COUNT(*) FROM start_protocol", [], |r| r.get(0))
-        .map_err(|e| format!("count start protocol rows: {e}"))?;
-    tx.commit()
-        .map_err(|e| format!("commit start protocol import: {e}"))?;
+fn import_orient_start_protocol_rows<R: std::io::Read>(
+    tx: &Transaction<'_>,
+    reader: &mut csv::Reader<R>,
+    reset: bool,
+) -> Result<i64, String> {
+    let mut imported_rows = 0_i64;
+    for (idx, row) in reader.records().enumerate() {
+        let source_row = idx as i64 + 2;
+        let rec = row.map_err(|e| format!("Строка {source_row}: {e}"))?;
+        if record_is_blank(&rec) {
+            continue;
+        }
+        let participant_id = field(&rec, 0);
+        let name = field(&rec, 1);
+        let course_raw = field(&rec, 2);
+        if participant_id.is_empty() || name.is_empty() {
+            return Err(format!(
+                "Строка {source_row}: обязательные поля номер/ФИО не заполнены"
+            ));
+        }
+        if course_raw.is_empty() {
+            return Err(format!("Строка {source_row}: не указана дистанция"));
+        }
+        let course_name = ensure_course_name_tx(tx, &course_raw)?;
+        let format_id = ensure_format_id_tx(tx, &course_name)?;
+        let existing = find_protocol_by_bib_tx(tx, &participant_id)?;
+        if let Some((protocol_id, old_name)) = existing {
+            if old_name != name {
+                tx.execute(
+                    "UPDATE start_protocol SET name = ? WHERE id = ?",
+                    params![name, protocol_id],
+                )
+                .map_err(|e| format!("update start protocol name {source_row}: {e}"))?;
+            }
+            let current = tx
+                .query_row(
+                    "SELECT TRIM(IFNULL(format_name, '')) FROM start_protocol WHERE id = ?",
+                    params![protocol_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .map_err(|e| format!("read current course {source_row}: {e}"))?;
+            link_protocol_course_tx(tx, protocol_id, &course_name)?;
+            if reset || current.is_empty() {
+                set_protocol_current_course_tx(tx, protocol_id, &course_name)?;
+            }
+            imported_rows += 1;
+        } else {
+            tx.execute(
+                r#"
+                INSERT INTO start_protocol(
+                    participant_id, name, format_id, format_name, gender, birth_date_raw, birth_date_iso, source_row
+                ) VALUES(?, ?, ?, ?, NULL, NULL, NULL, ?)
+                "#,
+                params![participant_id, name, format_id, course_name, source_row],
+            )
+            .map_err(|e| format!("insert start protocol row {source_row}: {e}"))?;
+            let protocol_id = tx.last_insert_rowid();
+            link_protocol_course_tx(tx, protocol_id, &course_name)?;
+            imported_rows += 1;
+        }
+    }
+    Ok(imported_rows)
+}
 
-    Ok(StartProtocolImportSummary {
-        imported_rows,
-        total_rows,
-    })
+fn find_protocol_id_tx(
+    tx: &Transaction<'_>,
+    participant_id: &str,
+    name: &str,
+) -> Result<Option<i64>, String> {
+    tx.query_row(
+        "SELECT id FROM start_protocol WHERE participant_id = ? AND name = ? LIMIT 1",
+        params![participant_id, name],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("find start protocol id: {e}"))
+}
+
+fn find_protocol_by_bib_tx(
+    tx: &Transaction<'_>,
+    participant_id: &str,
+) -> Result<Option<(i64, String)>, String> {
+    tx.query_row(
+        r#"
+        SELECT id, name FROM start_protocol
+        WHERE TRIM(participant_id) = TRIM(?)
+        ORDER BY id ASC
+        LIMIT 1
+        "#,
+        params![participant_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("find start protocol by bib: {e}"))
+}
+
+fn ensure_course_name_tx(tx: &Transaction<'_>, raw: &str) -> Result<String, String> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("Укажите название дистанции".to_string());
+    }
+    let existing = tx
+        .query_row(
+            "SELECT name FROM courses WHERE name = ? COLLATE NOCASE LIMIT 1",
+            params![name],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("check course «{name}»: {e}"))?;
+    if let Some(existing_name) = existing {
+        return Ok(existing_name);
+    }
+    tx.execute("INSERT INTO courses(name) VALUES(?)", params![name])
+        .map_err(|e| format!("insert course «{name}»: {e}"))?;
+    Ok(name)
+}
+
+fn link_protocol_course_tx(
+    tx: &Transaction<'_>,
+    protocol_id: i64,
+    course_name: &str,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT OR IGNORE INTO start_protocol_courses(protocol_id, course_name) VALUES(?, ?)",
+        params![protocol_id, course_name],
+    )
+    .map_err(|e| format!("link course «{course_name}»: {e}"))?;
+    Ok(())
+}
+
+fn set_protocol_current_course_tx(
+    tx: &Transaction<'_>,
+    protocol_id: i64,
+    course_name: &str,
+) -> Result<(), String> {
+    let format_id = ensure_format_id_tx(tx, course_name)?;
+    tx.execute(
+        "UPDATE start_protocol SET format_id = ?, format_name = ? WHERE id = ?",
+        params![format_id, course_name, protocol_id],
+    )
+    .map_err(|e| format!("set current course «{course_name}»: {e}"))?;
+    link_protocol_course_tx(tx, protocol_id, course_name)
 }
 
 pub fn recalculate(conn: &mut Connection) -> Result<(), String> {
@@ -4677,6 +4913,77 @@ pub fn suggest_start_protocol_search(
     suggest_from_table(conn, "start_protocol", "participant_id", "name", query, limit)
 }
 
+fn start_protocol_flag_exprs(orient: bool) -> (&'static str, String) {
+    let missing_format_expr = r#"
+        (
+            sp.format_id IS NULL
+            OR TRIM(IFNULL(sp.format_name, '')) = ''
+        )
+    "#;
+    let incomplete_expr = if orient {
+        format!(
+            r#"
+        (
+            TRIM(IFNULL(sp.name, '')) = ''
+            OR {missing_format_expr}
+        )
+        "#
+        )
+    } else {
+        format!(
+            r#"
+        (
+            TRIM(IFNULL(sp.name, '')) = ''
+            OR {missing_format_expr}
+            OR TRIM(IFNULL(sp.gender, '')) = ''
+            OR (
+                TRIM(IFNULL(sp.birth_date_raw, '')) = ''
+                AND TRIM(IFNULL(sp.birth_date_iso, '')) = ''
+            )
+        )
+        "#
+        )
+    };
+    (missing_format_expr, incomplete_expr)
+}
+
+fn attach_start_protocol_courses(
+    conn: &Connection,
+    rows: &mut [StartProtocolRow],
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut by_id: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT protocol_id, course_name FROM start_protocol_courses ORDER BY course_name COLLATE NOCASE",
+        )
+        .map_err(|e| format!("prepare protocol courses: {e}"))?;
+    let mapped = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| format!("query protocol courses: {e}"))?;
+    for row in mapped {
+        let (protocol_id, course_name) = row.map_err(|e| format!("read protocol course: {e}"))?;
+        if !course_name.trim().is_empty() {
+            by_id.entry(protocol_id).or_default().push(course_name);
+        }
+    }
+    for row in rows.iter_mut() {
+        let mut courses = by_id.remove(&row.id).unwrap_or_default();
+        let current = row.format_name.trim();
+        if !current.is_empty()
+            && !courses
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(current))
+        {
+            courses.insert(0, current.to_string());
+        }
+        row.courses = courses;
+    }
+    Ok(())
+}
+
 pub fn query_start_protocol(
     conn: &Connection,
     limit: i64,
@@ -4688,25 +4995,10 @@ pub fn query_start_protocol(
 ) -> Result<(Vec<StartProtocolRow>, i64), String> {
     let safe_limit = limit.clamp(1, 2000);
     let safe_offset = offset.max(0);
-    let missing_format_expr = r#"
-        (
-            sp.format_id IS NULL
-            OR TRIM(IFNULL(sp.format_name, '')) = ''
-        )
-    "#;
-    let incomplete_expr = format!(
-        r#"
-        (
-            TRIM(IFNULL(sp.name, '')) = ''
-            OR {missing_format_expr}
-            OR TRIM(IFNULL(sp.gender, '')) = ''
-            OR (
-                TRIM(IFNULL(sp.birth_date_raw, '')) = ''
-                AND TRIM(IFNULL(sp.birth_date_iso, '')) = ''
-            )
-        )
-        "#
-    );
+    let orient = get_settings(conn)
+        .map(|s| s.sport_kind == "orient")
+        .unwrap_or(false);
+    let (missing_format_expr, incomplete_expr) = start_protocol_flag_exprs(orient);
     let mut query = format!(
         r#"
         SELECT
@@ -4758,6 +5050,7 @@ pub fn query_start_protocol(
     for row in rows {
         out.push(row.map_err(|e| format!("read start protocol row: {e}"))?);
     }
+    attach_start_protocol_courses(conn, &mut out)?;
 
     let mut count_query = String::from("SELECT COUNT(*) FROM start_protocol sp WHERE 1=1 ");
     let mut count_params: Vec<rusqlite::types::Value> = Vec::new();
@@ -7007,13 +7300,19 @@ pub fn import_courses_content(
             if raw.is_empty() {
                 continue;
             }
-            let cp = raw.parse::<i64>().map_err(|_| {
-                format!("Строка {source_row}: некорректный номер КП «{raw}»")
-            })?;
-            if cp <= 0 {
-                return Err(format!("Строка {source_row}: номер КП должен быть > 0"));
+            for token in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+                let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
+                let cp = token.parse::<i64>().map_err(|_| {
+                    format!("Строка {source_row}: некорректный номер КП «{token}»")
+                })?;
+                if cp <= 0 {
+                    return Err(format!("Строка {source_row}: номер КП должен быть > 0"));
+                }
+                controls.push(cp);
             }
-            controls.push(cp);
         }
         if controls.is_empty() {
             return Err(format!(
@@ -7346,25 +7645,10 @@ fn resolve_start_protocol_format(
 }
 
 fn load_start_protocol_row(conn: &Connection, entry_id: i64) -> Result<StartProtocolRow, String> {
-    let missing_format_expr = r#"
-        (
-            sp.format_id IS NULL
-            OR TRIM(IFNULL(sp.format_name, '')) = ''
-        )
-    "#;
-    let incomplete_expr = format!(
-        r#"
-        (
-            TRIM(IFNULL(sp.name, '')) = ''
-            OR {missing_format_expr}
-            OR TRIM(IFNULL(sp.gender, '')) = ''
-            OR (
-                TRIM(IFNULL(sp.birth_date_raw, '')) = ''
-                AND TRIM(IFNULL(sp.birth_date_iso, '')) = ''
-            )
-        )
-        "#
-    );
+    let orient = get_settings(conn)
+        .map(|s| s.sport_kind == "orient")
+        .unwrap_or(false);
+    let (missing_format_expr, incomplete_expr) = start_protocol_flag_exprs(orient);
     let query = format!(
         r#"
         SELECT
@@ -7377,6 +7661,10 @@ fn load_start_protocol_row(conn: &Connection, entry_id: i64) -> Result<StartProt
     );
     conn.query_row(&query, params![entry_id], |r| map_start_protocol_row(r, 13, 14))
         .map_err(|e| format!("load start protocol entry: {e}"))
+        .and_then(|mut row| {
+            attach_start_protocol_courses(conn, std::slice::from_mut(&mut row))?;
+            Ok(row)
+        })
 }
 
 fn next_team_id(conn: &Connection) -> Result<i64, String> {
@@ -7554,14 +7842,47 @@ pub fn add_start_protocol_entry(
     format_id: Option<i64>,
     gender: Option<String>,
     birth_date_raw: Option<String>,
+    course_name: Option<String>,
 ) -> Result<StartProtocolRow, String> {
     let pid = participant_id.trim().to_string();
     let name = name.trim().to_string();
     if pid.is_empty() || name.is_empty() {
         return Err("Поля id и имя обязательны".to_string());
     }
+    let orient = get_settings(conn)?.sport_kind == "orient";
+    let course = course_name
+        .as_ref()
+        .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|v| !v.is_empty());
 
-    let (resolved_format_id, format_name) = resolve_start_protocol_format(conn, format_id)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("add start protocol transaction: {e}"))?;
+    if orient {
+        if let Some((existing_id, _)) = find_protocol_by_bib_tx(&tx, &pid)? {
+            if let Some(ref course) = course {
+                let course = ensure_course_name_tx(&tx, course)?;
+                link_protocol_course_tx(&tx, existing_id, &course)?;
+                set_protocol_current_course_tx(&tx, existing_id, &course)?;
+            }
+            tx.execute(
+                "UPDATE start_protocol SET name = ? WHERE id = ?",
+                params![name, existing_id],
+            )
+            .map_err(|e| format!("update existing start protocol name: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("commit add start protocol: {e}"))?;
+            return load_start_protocol_row(conn, existing_id);
+        }
+    }
+
+    let (resolved_format_id, format_name) = if let Some(ref course) = course {
+        let course = ensure_course_name_tx(&tx, course)?;
+        let fid = ensure_format_id_tx(&tx, &course)?;
+        (Some(fid), course)
+    } else {
+        resolve_start_protocol_format(&*tx, format_id)?
+    };
     let gender_clean = gender.and_then(|g| {
         let t = g.trim().to_string();
         if t.is_empty() {
@@ -7582,7 +7903,7 @@ pub fn add_start_protocol_entry(
         .as_ref()
         .and_then(|d| parse_birth_date_ru(d));
 
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO start_protocol(
             participant_id, name, format_id, format_name, gender, birth_date_raw, birth_date_iso, source_row
@@ -7606,8 +7927,12 @@ pub fn add_start_protocol_entry(
             format!("add start protocol entry: {e}")
         }
     })?;
-
-    let entry_id = conn.last_insert_rowid();
+    let entry_id = tx.last_insert_rowid();
+    if !format_name.is_empty() {
+        link_protocol_course_tx(&tx, entry_id, &format_name)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit add start protocol: {e}"))?;
     load_start_protocol_row(conn, entry_id)
 }
 
@@ -7619,6 +7944,7 @@ pub fn update_start_protocol_entry(
     format_id: Option<i64>,
     gender: Option<String>,
     birth_date_raw: Option<String>,
+    course_name: Option<String>,
 ) -> Result<StartProtocolRow, String> {
     let pid = participant_id.trim().to_string();
     let name = name.trim().to_string();
@@ -7637,7 +7963,20 @@ pub fn update_start_protocol_entry(
         return Err(format!("Запись стартового протокола id={entry_id} не найдена"));
     };
 
-    let (resolved_format_id, format_name) = resolve_start_protocol_format(conn, format_id)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("update start protocol transaction: {e}"))?;
+    let course = course_name
+        .as_ref()
+        .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|v| !v.is_empty());
+    let (resolved_format_id, format_name) = if let Some(ref course) = course {
+        let course = ensure_course_name_tx(&tx, course)?;
+        let fid = ensure_format_id_tx(&tx, &course)?;
+        (Some(fid), course)
+    } else {
+        resolve_start_protocol_format(&*tx, format_id)?
+    };
 
     let gender_clean = gender.and_then(|g| {
         let t = g.trim().to_string();
@@ -7651,7 +7990,7 @@ pub fn update_start_protocol_entry(
         .as_ref()
         .and_then(|d| parse_birth_date_ru(d));
 
-    conn.execute(
+    tx.execute(
         r#"
         UPDATE start_protocol
         SET participant_id = ?, name = ?, format_id = ?, format_name = ?, gender = ?, birth_date_raw = ?, birth_date_iso = ?
@@ -7676,6 +8015,11 @@ pub fn update_start_protocol_entry(
             format!("update start protocol entry: {e}")
         }
     })?;
+    if !format_name.is_empty() {
+        link_protocol_course_tx(&tx, entry_id, &format_name)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit update start protocol: {e}"))?;
 
     if old_format_id != resolved_format_id {
         if let Some(team_id) = old_team_id.filter(|v| *v > 0) {
@@ -7689,6 +8033,127 @@ pub fn update_start_protocol_entry(
     }
 
     load_start_protocol_row(conn, entry_id)
+}
+
+pub fn delete_start_protocol_entry(conn: &Connection, entry_id: i64) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM start_protocol_courses WHERE protocol_id = ?",
+        params![entry_id],
+    )
+    .map_err(|e| format!("delete start protocol courses: {e}"))?;
+    let changed = conn
+        .execute("DELETE FROM start_protocol WHERE id = ?", params![entry_id])
+        .map_err(|e| format!("delete start protocol entry: {e}"))?;
+    if changed == 0 {
+        return Err(format!("Запись стартового протокола id={entry_id} не найдена"));
+    }
+    Ok(())
+}
+
+pub fn add_start_protocol_course(
+    conn: &Connection,
+    entry_id: i64,
+    course_name: String,
+    make_current: bool,
+) -> Result<StartProtocolRow, String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("add protocol course transaction: {e}"))?;
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM start_protocol WHERE id = ? LIMIT 1",
+            params![entry_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("check protocol for course: {e}"))?;
+    if exists.is_none() {
+        return Err(format!("Запись стартового протокола id={entry_id} не найдена"));
+    }
+    let course = ensure_course_name_tx(&tx, &course_name)?;
+    link_protocol_course_tx(&tx, entry_id, &course)?;
+    if make_current {
+        set_protocol_current_course_tx(&tx, entry_id, &course)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit protocol course: {e}"))?;
+    load_start_protocol_row(conn, entry_id)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StartPack {
+    pub revision: i64,
+    pub sport: String,
+    pub courses: Vec<StartPackCourse>,
+    pub people: Vec<StartPackPerson>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StartPackCourse {
+    pub name: String,
+    pub controls: Vec<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StartPackPerson {
+    pub id: i64,
+    pub name: String,
+    pub courses: Vec<String>,
+    pub current_course: String,
+}
+
+pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
+    let settings = get_settings(conn)?;
+    let courses = list_courses(conn)?
+        .into_iter()
+        .map(|row| StartPackCourse {
+            name: row.name,
+            controls: row.controls,
+        })
+        .collect::<Vec<_>>();
+    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false)?;
+    let mut people = Vec::new();
+    for row in rows {
+        let Ok(id) = row.participant_id.trim().parse::<i64>() else {
+            continue;
+        };
+        if id <= 0 {
+            continue;
+        }
+        people.push(StartPackPerson {
+            id,
+            name: row.name,
+            courses: if row.courses.is_empty() && !row.format_name.trim().is_empty() {
+                vec![row.format_name.trim().to_string()]
+            } else {
+                row.courses
+            },
+            current_course: row.format_name.trim().to_string(),
+        });
+    }
+    Ok(StartPack {
+        revision: start_pack_revision(settings.sport_kind.as_str(), &courses, &people),
+        sport: settings.sport_kind,
+        courses,
+        people,
+    })
+}
+
+fn start_pack_revision(sport: &str, courses: &[StartPackCourse], people: &[StartPackPerson]) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    sport.hash(&mut hasher);
+    for course in courses {
+        course.name.hash(&mut hasher);
+        course.controls.hash(&mut hasher);
+    }
+    for person in people {
+        person.id.hash(&mut hasher);
+        person.name.hash(&mut hasher);
+        person.courses.hash(&mut hasher);
+        person.current_course.hash(&mut hasher);
+    }
+    hasher.finish() as i64
 }
 
 fn sync_start_protocol_format_ids_tx(tx: &Transaction<'_>) -> Result<(), String> {
@@ -9854,9 +10319,11 @@ mod tests {
         add_cp_correction, calculate_orient_result, ManualCorrection,
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
-        import_csv_content, import_phone_snapshot, init_db, orient_course_legs, orient_start_punch_kind, parse_time,
-        query_participant_details, recalculate, resolve_orient_leg_to, set_setting_value,
-        suggested_start_time, ExclusionRule, Mark, Settings,
+        import_courses_content, import_csv_content, import_phone_snapshot,
+        import_start_protocol_content, init_db, build_start_pack,
+        list_courses, orient_course_legs, orient_start_punch_kind, parse_time,
+        query_participant_details, query_start_protocol, recalculate, resolve_orient_leg_to,
+        set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
     };
     use rusqlite::Connection;
     use std::collections::{HashMap, HashSet};
@@ -9866,6 +10333,70 @@ mod tests {
         init_db(&conn).expect("init db");
         ensure_schema_extras(&conn).expect("schema extras");
         conn
+    }
+
+    #[test]
+    fn orient_start_protocol_csv_merges_second_course() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        let csv = "номер;фио;дистанция\n8;Иванов Иван;D1\n8;Иванов Иван;D2\n9;Петров;D1\n";
+        import_start_protocol_content(&conn, csv, true).unwrap();
+        let (rows, total) = query_start_protocol(&conn, 50, 0, None, None, false, false).unwrap();
+        assert_eq!(total, 2);
+        let ivan = rows.iter().find(|r| r.participant_id == "8").unwrap();
+        assert_eq!(ivan.name, "Иванов Иван");
+        assert_eq!(ivan.format_name, "D2");
+        assert_eq!(ivan.courses.len(), 2);
+        assert!(ivan.courses.iter().any(|c| c == "D1"));
+        assert!(ivan.courses.iter().any(|c| c == "D2"));
+        let courses = list_courses(&conn).unwrap();
+        assert!(courses.iter().any(|c| c.name == "D1"));
+        assert!(courses.iter().any(|c| c.name == "D2"));
+
+        import_start_protocol_content(&conn, "номер;фио;дистанция\n8;Иванов Иван;D1\n", false)
+            .unwrap();
+        let (rows, _) = query_start_protocol(&conn, 50, 0, None, None, false, false).unwrap();
+        let ivan = rows.iter().find(|r| r.participant_id == "8").unwrap();
+        assert_eq!(ivan.format_name, "D2");
+        assert!(ivan.courses.iter().any(|c| c == "D1"));
+        assert!(ivan.courses.iter().any(|c| c == "D2"));
+    }
+
+    #[test]
+    fn import_courses_csv_fills_cp_order_and_accepts_spaces() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Иванов Иван;D1\n",
+            true,
+        )
+        .unwrap();
+        let before = list_courses(&conn).unwrap();
+        assert!(before.iter().any(|c| c.name == "D1" && c.controls.is_empty()));
+
+        import_courses_content(&conn, "D1;31;32;33\nD2;41 42,43\n", false).unwrap();
+        let courses = list_courses(&conn).unwrap();
+        let d1 = courses.iter().find(|c| c.name == "D1").unwrap();
+        let d2 = courses.iter().find(|c| c.name == "D2").unwrap();
+        assert_eq!(d1.controls, vec![31, 32, 33]);
+        assert_eq!(d2.controls, vec![41, 42, 43]);
+    }
+
+    #[test]
+    fn start_pack_revision_is_stable_for_same_protocol() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Иванов Иван;D1\n",
+            true,
+        )
+        .unwrap();
+        let a = build_start_pack(&conn).unwrap();
+        let b = build_start_pack(&conn).unwrap();
+        assert_eq!(a.revision, b.revision);
+        assert_eq!(a.people.len(), 1);
     }
 
     fn finish_csv_duplicate_bib() -> &'static str {

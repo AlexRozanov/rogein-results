@@ -1,10 +1,18 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SNAPSHOT_PATHS: &[&str] = &[
     "/sdcard/Download/rogein/chip-queue.json",
     "/storage/emulated/0/Download/rogein/chip-queue.json",
+];
+
+const START_PACK_PATHS: &[&str] = &[
+    "/sdcard/Android/data/ru.rogein.chip/files/start-pack.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/start-pack.json",
+    "/sdcard/Download/rogein/start-pack.json",
+    "/storage/emulated/0/Download/rogein/start-pack.json",
 ];
 
 pub struct PhoneSnapshotRead {
@@ -16,6 +24,35 @@ pub struct PhoneSnapshotRead {
 pub struct SnapshotDelete {
     pub deleted: bool,
     pub note: String,
+}
+
+pub fn try_read_phone_snapshot() -> Result<Option<PhoneSnapshotRead>, String> {
+    let Ok(adb) = locate_adb() else {
+        return Ok(None);
+    };
+    let Ok(serial) = connected_serial(&adb) else {
+        return Ok(None);
+    };
+    for path in SNAPSHOT_PATHS {
+        match cat_file(&adb, &serial, path)? {
+            Some(body) => {
+                return Ok(Some(PhoneSnapshotRead {
+                    serial,
+                    path: (*path).to_string(),
+                    body,
+                }));
+            }
+            None => {}
+        }
+    }
+    Ok(None)
+}
+
+pub fn phone_is_ready() -> bool {
+    locate_adb()
+        .ok()
+        .and_then(|adb| connected_serial(&adb).ok())
+        .is_some()
 }
 
 pub fn read_phone_snapshot() -> Result<PhoneSnapshotRead, String> {
@@ -198,6 +235,37 @@ fn connected_serial(adb: &Path) -> Result<String, String> {
                 .to_string(),
         ),
     }
+}
+
+pub fn push_start_pack(body: &str) -> Result<(), String> {
+    let adb = locate_adb()?;
+    let serial = connected_serial(&adb)?;
+    let local = env::temp_dir().join(format!("rogein-start-pack-{serial}.json"));
+    fs::write(&local, body).map_err(|e| format!("не удалось записать временный файл: {e}"))?;
+    let local_str = local.to_string_lossy().to_string();
+    let mut pushed = Vec::new();
+    let mut last_error = String::new();
+    for remote in START_PACK_PATHS {
+        let parent = remote.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("/sdcard");
+        let _ = run_adb(&adb, &["-s", &serial, "shell", "mkdir", "-p", parent]);
+        match run_adb(&adb, &["-s", &serial, "push", &local_str, remote]) {
+            Ok(output) if output.status.success() => {
+                pushed.push((*remote).to_string());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last_error = format!("{remote}: {}", stderr.trim());
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let _ = fs::remove_file(&local);
+    if pushed.is_empty() {
+        return Err(format!(
+            "Не удалось записать стартовый протокол на телефон. {last_error}"
+        ));
+    }
+    Ok(())
 }
 
 fn locate_adb() -> Result<PathBuf, String> {

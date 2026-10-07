@@ -27,15 +27,9 @@ type ImportSummary = {
   results_count: number;
 };
 
-type PhoneReadSummary = {
-  imported: number;
-  already_imported: number;
-  unmatched: number;
-  skipped_empty: number;
-  participants_count: number;
-  results_count: number;
-  snapshot_deleted: boolean;
-  snapshot_note: string;
+type PhonePollResult = PhoneReadSummary & {
+  pulled: boolean;
+  pack_pushed: boolean;
 };
 
 type NativeSettings = {
@@ -241,8 +235,8 @@ function persistWorkspaceUi() {
 
 function applySportWorkspaceUi(orient: boolean, sportChanged: boolean) {
   if (isArchiveMode.value) return;
-  if (orient && (activeTab.value === "start_protocol" || activeTab.value === "cp_legends")) {
-    activeTab.value = activeTab.value === "cp_legends" ? "courses" : "results";
+  if (orient && activeTab.value === "cp_legends") {
+    activeTab.value = "courses";
   }
   if (!orient && activeTab.value === "courses") {
     activeTab.value = "results";
@@ -361,6 +355,20 @@ async function openCpRemapWindow() {
 }
 
 let unlistenResultsUpdated: UnlistenFn | null = null;
+let phonePollTimer: ReturnType<typeof setInterval> | null = null;
+let phonePollInFlight = false;
+
+function formatPhoneSummary(summary: PhoneReadSummary): string {
+  const deleted = summary.snapshot_deleted
+    ? "Снимок на телефоне удалён."
+    : summary.snapshot_note || "Снимок на телефоне не удалён.";
+  const skipped =
+    summary.skipped_empty > 0 ? ` без отметок пропущены ${summary.skipped_empty}.` : "";
+  return (
+    `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
+    `Участников ${summary.participants_count}, результатов ${summary.results_count}. ${deleted}`
+  );
+}
 
 onMounted(() => {
   const restored = loadWorkspaceUiState();
@@ -377,11 +385,19 @@ onMounted(() => {
     .catch(() => {
       /* not running inside Tauri */
     });
+  phonePollTimer = setInterval(() => {
+    void pollPhoneUsb();
+  }, 4000);
+  void pollPhoneUsb();
 });
 
 onBeforeUnmount(() => {
   unlistenResultsUpdated?.();
   unlistenResultsUpdated = null;
+  if (phonePollTimer) {
+    clearInterval(phonePollTimer);
+    phonePollTimer = null;
+  }
 });
 
 async function onCsvSelected(file: File | null) {
@@ -431,16 +447,7 @@ async function readPhoneQueue() {
   nativeStatus.value = "Чтение очереди с телефона...";
   try {
     const summary = await invoke<PhoneReadSummary>("import_phone_snapshot");
-    const deleted = summary.snapshot_deleted
-      ? "Снимок на телефоне удалён."
-      : summary.snapshot_note || "Снимок на телефоне не удалён.";
-    const skipped =
-      summary.skipped_empty > 0
-        ? ` без отметок пропущены ${summary.skipped_empty}.`
-        : "";
-    nativeStatus.value =
-      `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
-      `Участников ${summary.participants_count}, результатов ${summary.results_count}. ${deleted}`;
+    nativeStatus.value = formatPhoneSummary(summary);
     pageOffset.value = 0;
     if (summary.unmatched > 0) {
       nativeFilterStatus.value = "";
@@ -454,6 +461,29 @@ async function readPhoneQueue() {
     nativeStatus.value = `Ошибка чтения с телефона: ${String(error)}`;
   } finally {
     nativeBusy.value = false;
+  }
+}
+
+async function pollPhoneUsb() {
+  if (phonePollInFlight || nativeBusy.value || isArchiveMode.value) return;
+  if (nativeSettings.value && nativeSettings.value.sport_kind !== "orient") return;
+  phonePollInFlight = true;
+  try {
+    const result = await invoke<PhonePollResult>("poll_phone_usb");
+    if (result.imported > 0 || result.unmatched > 0) {
+      nativeStatus.value = formatPhoneSummary(result);
+      pageOffset.value = 0;
+      await refreshNativeData();
+    } else if (result.pack_pushed) {
+      nativeStatus.value = "Стартовый протокол отправлен на телефон.";
+    }
+  } catch (error) {
+    const text = `Ошибка связи с телефоном: ${String(error)}`;
+    if (nativeStatus.value !== text) {
+      nativeStatus.value = text;
+    }
+  } finally {
+    phonePollInFlight = false;
   }
 }
 
@@ -812,7 +842,7 @@ async function onSortChanged(column: SortBy) {
         Загрузка результатов
       </button>
       <button
-        v-if="!isArchiveMode && !isOrient"
+        v-if="!isArchiveMode"
         class="tab-btn"
         :class="{ active: activeTab === 'start_protocol' }"
         :disabled="nativeBusy && activeTab !== 'start_protocol'"
@@ -886,6 +916,7 @@ async function onSortChanged(column: SortBy) {
         </button>
       </div>
       <p class="subtitle">
+        При USB-отладке очередь с телефона подтягивается сама, кнопка «Считать с телефона» — на крайний случай.
         При выборе файла импорт запускается автоматически.
       </p>
 
@@ -1080,20 +1111,17 @@ async function onSortChanged(column: SortBy) {
       <NativeCourses :busy="nativeBusy" @status="nativeStatus = $event" @saved="refreshNativeData" />
     </template>
 
-    <template v-else-if="activeTab === 'cp_legends' && !isOrient">
-      <NativeCpLegends :busy="nativeBusy" @status="nativeStatus = $event" />
-    </template>
-
-    <template v-else-if="!isOrient">
+    <template v-else-if="activeTab === 'start_protocol'">
       <NativeStartProtocol
         :busy="nativeBusy"
+        :is-orient="isOrient"
         @status="nativeStatus = $event"
         @teams-changed="refreshNativeData"
       />
     </template>
 
-    <template v-else>
-      <NativeCourses :busy="nativeBusy" @status="nativeStatus = $event" @saved="refreshNativeData" />
+    <template v-else-if="activeTab === 'cp_legends' && !isOrient">
+      <NativeCpLegends :busy="nativeBusy" @status="nativeStatus = $event" />
     </template>
 
     <ImportExistingDataDialog

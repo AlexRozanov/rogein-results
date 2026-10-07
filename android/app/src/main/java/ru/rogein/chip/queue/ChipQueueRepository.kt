@@ -3,16 +3,33 @@ package ru.rogein.chip.queue
 import android.content.Context
 import androidx.room.Room
 import ru.rogein.chip.parse.ChipDump
+import ru.rogein.chip.startlist.StartListStore
 import java.util.UUID
+
+sealed class EnqueueResult {
+    data class Saved(val snapshotError: String?) : EnqueueResult()
+    data class Duplicate(val logicalId: Int?, val courseName: String) : EnqueueResult()
+}
 
 class ChipQueueRepository(
     private val dao: ChipQueueDao,
     private val snapshot: ChipQueueSnapshotWriter,
+    val startList: StartListStore,
 ) {
     fun observeAll() = dao.observeAll()
 
-    /** null — снимок записан. Иначе чип уже в очереди, а текст — почему снимок не лег в Загрузки. */
-    suspend fun enqueue(dump: ChipDump, rawHex: String = ""): String? {
+    /** Saved — чип в очереди. Duplicate — этот номер уже считан на этой дистанции. */
+    suspend fun enqueue(
+        dump: ChipDump,
+        rawHex: String = "",
+        personName: String = "",
+        courseName: String = "",
+    ): EnqueueResult {
+        val course = courseName.trim()
+        val chipId = dump.logicalId
+        if (chipId != null && dao.existsByChipAndCourse(chipId, course)) {
+            return EnqueueResult.Duplicate(chipId, course)
+        }
         dao.insert(
             QueuedChipEntity(
                 id = UUID.randomUUID().toString(),
@@ -28,13 +45,21 @@ class ChipQueueRepository(
                 rawHex = rawHex,
                 createdAt = System.currentTimeMillis(),
                 ackedAt = null,
+                personName = personName,
+                courseName = course,
             ),
         )
-        return publishSnapshot()
+        return EnqueueResult.Saved(publishSnapshot())
     }
 
     suspend fun clear(): String? {
         dao.clear()
+        return publishSnapshot()
+    }
+
+    suspend fun resetForNewStart(): String? {
+        dao.clear()
+        startList.resetAll()
         return publishSnapshot()
     }
 
@@ -54,8 +79,14 @@ class ChipQueueRepository(
                 appContext,
                 ChipQueueDatabase::class.java,
                 "chip-queue.db",
-            ).build()
-            return ChipQueueRepository(db.dao(), ChipQueueSnapshotWriter(appContext))
+            )
+                .addMigrations(ChipQueueDatabase.MIGRATION_1_2, ChipQueueDatabase.MIGRATION_2_3)
+                .build()
+            return ChipQueueRepository(
+                db.dao(),
+                ChipQueueSnapshotWriter(appContext),
+                StartListStore(appContext, db.startListDao()),
+            )
         }
     }
 }

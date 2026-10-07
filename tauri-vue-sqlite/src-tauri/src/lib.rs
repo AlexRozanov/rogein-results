@@ -30,6 +30,7 @@ struct AppState {
     app_data_dir: PathBuf,
     db_path: PathBuf,
     db_lock: Mutex<()>,
+    last_start_pack_json: Mutex<String>,
 }
 
 const COURSE_MAP_FILE: &str = "course_map.bin";
@@ -38,6 +39,20 @@ const COURSE_MAP_MIME_KEY: &str = "course_map_mime";
 
 #[derive(Serialize)]
 struct PhoneReadSummary {
+    imported: i64,
+    already_imported: i64,
+    unmatched: i64,
+    skipped_empty: i64,
+    participants_count: i64,
+    results_count: i64,
+    snapshot_deleted: bool,
+    snapshot_note: String,
+}
+
+#[derive(Serialize)]
+struct PhonePollResult {
+    pulled: bool,
+    pack_pushed: bool,
     imported: i64,
     already_imported: i64,
     unmatched: i64,
@@ -398,6 +413,74 @@ fn import_csv_content(
     domain::import_csv_content(&mut conn, &csv_content, reset)
 }
 
+fn phone_read_from_import(
+    summary: PhoneImportSummary,
+    deleted: phone_sync::SnapshotDelete,
+) -> PhoneReadSummary {
+    PhoneReadSummary {
+        imported: summary.imported,
+        already_imported: summary.already_imported,
+        unmatched: summary.unmatched,
+        skipped_empty: summary.skipped_empty,
+        participants_count: summary.participants_count,
+        results_count: summary.results_count,
+        snapshot_deleted: deleted.deleted,
+        snapshot_note: deleted.note,
+    }
+}
+
+fn empty_phone_poll() -> PhonePollResult {
+    PhonePollResult {
+        pulled: false,
+        pack_pushed: false,
+        imported: 0,
+        already_imported: 0,
+        unmatched: 0,
+        skipped_empty: 0,
+        participants_count: 0,
+        results_count: 0,
+        snapshot_deleted: false,
+        snapshot_note: String::new(),
+    }
+}
+
+fn push_start_pack_if_needed(state: &AppState, force: bool) -> Result<Option<String>, String> {
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    if domain::get_settings(&conn)?.sport_kind != "orient" {
+        return Ok(None);
+    }
+    let pack = domain::build_start_pack(&conn)?;
+    if pack.people.is_empty() {
+        if force {
+            return Err("Стартовый протокол пуст — нечего отправлять.".to_string());
+        }
+        return Ok(None);
+    }
+    let body = serde_json::to_string(&pack)
+        .map_err(|e| format!("не удалось сериализовать протокол: {e}"))?;
+    let unchanged = {
+        let last = state
+            .last_start_pack_json
+            .lock()
+            .map_err(|_| "pack hash lock poisoned".to_string())?;
+        !force && last.as_str() == body
+    };
+    if unchanged {
+        return Ok(None);
+    }
+    phone_sync::push_start_pack(&body)?;
+    let mut last = state
+        .last_start_pack_json
+        .lock()
+        .map_err(|_| "pack hash lock poisoned".to_string())?;
+    *last = body;
+    Ok(Some(format!(
+        "Стартовый протокол отправлен на телефон: {} участников, {} дистанций.",
+        pack.people.len(),
+        pack.courses.len()
+    )))
+}
+
 #[tauri::command]
 fn import_phone_snapshot(state: State<'_, AppState>) -> Result<PhoneReadSummary, String> {
     let _guard = state
@@ -408,15 +491,55 @@ fn import_phone_snapshot(state: State<'_, AppState>) -> Result<PhoneReadSummary,
     let mut conn = domain::open_and_init_db(&state.db_path)?;
     let summary: PhoneImportSummary = domain::import_phone_snapshot(&mut conn, &read.body)?;
     let deleted = phone_sync::delete_snapshot_if_unchanged(&read)?;
-    Ok(PhoneReadSummary {
-        imported: summary.imported,
-        already_imported: summary.already_imported,
-        unmatched: summary.unmatched,
-        skipped_empty: summary.skipped_empty,
-        participants_count: summary.participants_count,
-        results_count: summary.results_count,
-        snapshot_deleted: deleted.deleted,
-        snapshot_note: deleted.note,
+    Ok(phone_read_from_import(summary, deleted))
+}
+
+#[tauri::command]
+fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String> {
+    if !phone_sync::phone_is_ready() {
+        return Ok(empty_phone_poll());
+    }
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let pack_pushed = match push_start_pack_if_needed(&state, false) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(_) => false,
+    };
+    let Some(read) = phone_sync::try_read_phone_snapshot()? else {
+        return Ok(PhonePollResult {
+            pack_pushed,
+            ..empty_phone_poll()
+        });
+    };
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary: PhoneImportSummary = domain::import_phone_snapshot(&mut conn, &read.body)?;
+    let deleted = phone_sync::delete_snapshot_if_unchanged(&read)?;
+    let read_summary = phone_read_from_import(summary, deleted);
+    Ok(PhonePollResult {
+        pulled: true,
+        pack_pushed,
+        imported: read_summary.imported,
+        already_imported: read_summary.already_imported,
+        unmatched: read_summary.unmatched,
+        skipped_empty: read_summary.skipped_empty,
+        participants_count: read_summary.participants_count,
+        results_count: read_summary.results_count,
+        snapshot_deleted: read_summary.snapshot_deleted,
+        snapshot_note: read_summary.snapshot_note,
+    })
+}
+
+#[tauri::command]
+fn push_start_pack_to_phone(state: State<'_, AppState>) -> Result<String, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    push_start_pack_if_needed(&state, true)?.ok_or_else(|| {
+        "Стартовый протокол пуст — нечего отправлять.".to_string()
     })
 }
 
@@ -1273,6 +1396,7 @@ fn add_start_protocol_entry(
     format_id: Option<i64>,
     gender: Option<String>,
     birth_date_raw: Option<String>,
+    course_name: Option<String>,
 ) -> Result<StartProtocolRow, String> {
     let _guard = state
         .db_lock
@@ -1286,6 +1410,7 @@ fn add_start_protocol_entry(
         format_id,
         gender,
         birth_date_raw,
+        course_name,
     )
 }
 
@@ -1298,6 +1423,7 @@ fn update_start_protocol_entry(
     format_id: Option<i64>,
     gender: Option<String>,
     birth_date_raw: Option<String>,
+    course_name: Option<String>,
 ) -> Result<StartProtocolRow, String> {
     let _guard = state
         .db_lock
@@ -1312,7 +1438,33 @@ fn update_start_protocol_entry(
         format_id,
         gender,
         birth_date_raw,
+        course_name,
     )
+}
+
+#[tauri::command]
+fn delete_start_protocol_entry(state: State<'_, AppState>, entry_id: i64) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_start_protocol_entry(&conn, entry_id)
+}
+
+#[tauri::command]
+fn add_start_protocol_course(
+    state: State<'_, AppState>,
+    entry_id: i64,
+    course_name: String,
+    make_current: bool,
+) -> Result<StartProtocolRow, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::add_start_protocol_course(&conn, entry_id, course_name, make_current)
 }
 
 #[tauri::command]
@@ -1768,6 +1920,7 @@ pub fn run() {
                 app_data_dir,
                 db_path,
                 db_lock: Mutex::new(()),
+                last_start_pack_json: Mutex::new(String::new()),
             });
 
             if cfg!(debug_assertions) {
@@ -1782,6 +1935,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import_csv_content,
             import_phone_snapshot,
+            poll_phone_usb,
+            push_start_pack_to_phone,
             import_start_protocol_content,
             get_data_presence_counts,
             get_archives_dir,
@@ -1849,6 +2004,8 @@ pub fn run() {
             set_format_settings,
             add_start_protocol_entry,
             update_start_protocol_entry,
+            delete_start_protocol_entry,
+            add_start_protocol_course,
             merge_start_protocol_team,
             leave_start_protocol_team,
             dissolve_start_protocol_team,
