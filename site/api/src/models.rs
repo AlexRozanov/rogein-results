@@ -102,6 +102,7 @@ pub struct EventDetail {
     pub map_points: JsonValue,
     pub start_cp: Option<i32>,
     pub finish_cp: Option<i32>,
+    pub revision: i64,
     pub award_groups: Vec<AwardGroupPublic>,
     pub results: Vec<ResultPublic>,
 }
@@ -123,6 +124,7 @@ pub struct EventRow {
     pub meters_per_pixel: Option<f64>,
     pub start_cp: Option<i32>,
     pub finish_cp: Option<i32>,
+    pub revision: i64,
 }
 
 #[derive(Debug, Deserialize)]

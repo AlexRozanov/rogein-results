@@ -78,7 +78,7 @@ const steps = computed<WizardStep[]>(() => {
       {
         id: "courses",
         title: "Дистанции",
-        hint: "CSV порядка КП: D1;31;32;33 (строка на дистанцию). Можно пропустить и загрузить позже во вкладке «Дистанции».",
+        hint: "CSV порядка КП: D1;31;32;33 или файл WinOrient .Courses.txt (S1-36-…-F1). Можно пропустить и загрузить позже во вкладке «Дистанции».",
       },
       finish,
     ];
@@ -414,6 +414,7 @@ async function importFinish() {
           <FilePickerButton
             button-label="Выбрать CSV дистанций"
             empty-label="Файл не выбран"
+            accept=".csv,.txt,text/csv,text/plain"
             :disabled="isBusy"
             @file-selected="coursesFile = $event"
           />

@@ -1,18 +1,25 @@
 mod models;
 mod publish;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, put};
 use axum::{Json, Router};
+use futures_core::Stream;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -23,13 +30,20 @@ use crate::models::{
     AwardGroupPublic, EventDetail, EventListItem, EventListPage, EventRow, ParticipantPublic,
     ResultPublic, UpcomingListItem,
 };
-use crate::publish::{publish_event, publish_map, PublishPayload};
+use crate::publish::{publish_event, publish_live_event, publish_map, PublishPayload};
+
+#[derive(Clone)]
+struct LiveTick {
+    slug: String,
+    revision: i64,
+}
 
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
     media_dir: PathBuf,
     publish_token: String,
+    live_tx: broadcast::Sender<LiveTick>,
 }
 
 #[tokio::main]
@@ -64,10 +78,12 @@ async fn main() -> anyhow::Result<()> {
         .context("run migrations")?;
 
     let media_service = ServeDir::new(&media_dir);
+    let (live_tx, _) = broadcast::channel(64);
     let state = Arc::new(AppState {
         pool,
         media_dir,
         publish_token,
+        live_tx,
     });
     let app = Router::new()
         .route("/api/health", get(health))
@@ -79,6 +95,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/events/{slug}/participants/{source_id}",
             get(get_participant),
         )
+        .route("/api/live/{slug}", get(get_live_event).put(put_live_event))
+        .route("/api/live/{slug}/stream", get(live_stream))
         .nest_service("/media", media_service)
         .layer(DefaultBodyLimit::max(80 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -236,11 +254,112 @@ async fn get_event(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<Json<EventDetail>, (StatusCode, String)> {
-    let event = load_event_detail(&state.pool, &slug)
+    let event = load_event_detail(&state.pool, &slug, Some("published"))
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Event not found".into()))?;
     Ok(Json(event))
+}
+
+fn normalize_slug(raw: &str) -> Result<String, (StatusCode, String)> {
+    let slug = raw.trim().to_lowercase();
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST, "Invalid slug".into()));
+    }
+    Ok(slug)
+}
+
+async fn get_live_event(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<EventDetail>, (StatusCode, String)> {
+    let slug = normalize_slug(&slug)?;
+    let event = load_event_detail(&state.pool, &slug, Some("live"))
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?;
+    Ok(Json(event))
+}
+
+async fn put_live_event(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<PublishPayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let slug = normalize_slug(&slug)?;
+    let revision = publish_live_event(&state.pool, &slug, payload)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("ALREADY_PUBLISHED") {
+                (
+                    StatusCode::CONFLICT,
+                    "Этот старт уже опубликован, online его не заменит".into(),
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, msg)
+            }
+        })?;
+    let _ = state.live_tx.send(LiveTick {
+        slug: slug.clone(),
+        revision,
+    });
+    Ok(Json(serde_json::json!({ "ok": true, "slug": slug, "revision": revision })))
+}
+
+struct LiveSse {
+    rx: tokio::sync::mpsc::Receiver<Event>,
+}
+
+impl Stream for LiveSse {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().rx.poll_recv(cx).map(|item| item.map(Ok))
+    }
+}
+
+async fn live_stream(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    let slug = normalize_slug(&slug)?;
+    let revision: i64 = sqlx::query_scalar(
+        "SELECT revision FROM events WHERE slug = $1 AND status = 'live'",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?
+    .unwrap_or(0);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(16);
+    let _ = tx.try_send(Event::default().event("revision").data(revision.to_string()));
+    let mut bcast = state.live_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match bcast.recv().await {
+                Ok(tick) if tick.slug == slug => {
+                    let event = Event::default().event("revision").data(tick.revision.to_string());
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    let stream = LiveSse { rx };
+    Ok(
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("ping"),
+        ),
+    )
 }
 
 async fn get_participant(
@@ -300,11 +419,7 @@ async fn put_event(
     Json(payload): Json<PublishPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_token(&state, &headers)?;
-    let slug = slug.trim().to_lowercase();
-    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err((StatusCode::BAD_REQUEST, "Invalid slug".into()));
-    }
+    let slug = normalize_slug(&slug)?;
     publish_event(&state.pool, &state.media_dir, &slug, payload)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -326,11 +441,7 @@ async fn put_event_map(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_token(&state, &headers)?;
-    let slug = slug.trim().to_lowercase();
-    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err((StatusCode::BAD_REQUEST, "Invalid slug".into()));
-    }
+    let slug = normalize_slug(&slug)?;
     if body.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Map body is empty".into()));
     }
@@ -362,16 +473,23 @@ async fn put_event_map(
     Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
 }
 
-async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDetail>, sqlx::Error> {
+async fn load_event_detail(
+    pool: &PgPool,
+    slug: &str,
+    status: Option<&str>,
+) -> Result<Option<EventDetail>, sqlx::Error> {
     let event = sqlx::query_as::<_, EventRow>(
         r#"
         SELECT id, slug, title, competition_date, sport_kind, status, published_at,
                map_file_name, map_mime, map_width, map_height, map_points, meters_per_pixel,
-               start_cp, finish_cp
-        FROM events WHERE slug = $1
+               start_cp, finish_cp, revision
+        FROM events
+        WHERE slug = $1
+          AND ($2::text IS NULL OR status = $2)
         "#,
     )
     .bind(slug)
+    .bind(status)
     .fetch_optional(pool)
     .await?;
     let Some(event) = event else {
@@ -441,6 +559,7 @@ async fn load_event_detail(pool: &PgPool, slug: &str) -> Result<Option<EventDeta
         map_points: event.map_points,
         start_cp: event.start_cp,
         finish_cp: event.finish_cp,
+        revision: event.revision,
         award_groups: groups,
         results,
     }))

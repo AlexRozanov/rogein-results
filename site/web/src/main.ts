@@ -25,6 +25,7 @@ const router = createRouter({
     { path: "/events", redirect: "/results" },
     { path: "/events/:slug", component: EventPage },
     { path: "/events/:slug/p/:sourceId", component: ParticipantPage },
+    { path: "/live/:slug", component: EventPage },
     { path: "/privacy", component: LegalPage, props: { doc: "privacy" } },
     { path: "/terms", component: LegalPage, props: { doc: "terms" } },
   ],

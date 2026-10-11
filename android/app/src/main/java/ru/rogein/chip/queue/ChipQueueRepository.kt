@@ -15,6 +15,7 @@ class ChipQueueRepository(
     private val dao: ChipQueueDao,
     private val snapshot: ChipQueueSnapshotWriter,
     val startList: StartListStore,
+    val event: EventStore,
 ) {
     fun observeAll() = dao.observeAll()
 
@@ -60,7 +61,36 @@ class ChipQueueRepository(
     suspend fun resetForNewStart(): String? {
         dao.clear()
         startList.resetAll()
+        event.clearEventRules()
         return publishSnapshot()
+    }
+
+    suspend fun requestLiveSend() {
+        event.markLivePending()
+        flushLiveOnce()
+    }
+
+    suspend fun flushLiveNow() {
+        event.markLivePending()
+        flushLiveOnce()
+    }
+
+    suspend fun flushLiveIfPending() {
+        val settings = event.settingsNow()
+        if (!settings.livePending && !event.isLiveSending()) return
+        flushLiveOnce()
+    }
+
+    private suspend fun flushLiveOnce() {
+        val settings = event.settingsNow()
+        event.sendLiveSnapshot(
+            settings,
+            startList.peopleNow(),
+            startList.coursesNow(),
+            dao.listAll(),
+            event.correctionsNow(),
+            event.exclusionsNow(),
+        )
     }
 
     private suspend fun publishSnapshot(): String? {
@@ -80,12 +110,17 @@ class ChipQueueRepository(
                 ChipQueueDatabase::class.java,
                 "chip-queue.db",
             )
-                .addMigrations(ChipQueueDatabase.MIGRATION_1_2, ChipQueueDatabase.MIGRATION_2_3)
+                .addMigrations(
+                    ChipQueueDatabase.MIGRATION_1_2,
+                    ChipQueueDatabase.MIGRATION_2_3,
+                    ChipQueueDatabase.MIGRATION_3_4,
+                )
                 .build()
             return ChipQueueRepository(
                 db.dao(),
                 ChipQueueSnapshotWriter(appContext),
                 StartListStore(appContext, db.startListDao()),
+                EventStore(db.eventDao()),
             )
         }
     }

@@ -12,6 +12,8 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
@@ -28,6 +30,8 @@ import ru.rogein.chip.ui.ChipFeedback
 import ru.rogein.chip.ui.ChipIo
 import ru.rogein.chip.ui.ChipQueueViewModel
 import ru.rogein.chip.ui.ChipScreen
+import ru.rogein.chip.ui.CsvImportKind
+import ru.rogein.chip.ui.CsvPicker
 import java.time.LocalTime
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,6 +50,27 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var sessionTag: Tag? = null
     private var misses = 0
+    private var pendingCsvKind: CsvImportKind? = null
+    private val openCsv = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val kind = pendingCsvKind ?: return@registerForActivityResult
+        pendingCsvKind = null
+        if (uri == null) return@registerForActivityResult
+        io.execute {
+            val text = try {
+                contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            } catch (e: Exception) {
+                runOnUiThread { viewModel.importCsvText(kind, null) }
+                return@execute
+            }
+            runOnUiThread { viewModel.importCsvText(kind, text) }
+        }
+    }
+    private val csvPicker = object : CsvPicker {
+        override fun pick(kind: CsvImportKind) {
+            pendingCsvKind = kind
+            openCsv.launch(arrayOf("text/*", "text/csv", "text/comma-separated-values", "*/*"))
+        }
+    }
 
     private val presenceTick = object : Runnable {
         override fun run() {
@@ -79,6 +104,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         viewModel.attach(object : ChipIo {
             override fun clearMarks(order: BlockOrder, pointerEnd: Int?, blockCount: Int) {
@@ -149,7 +175,7 @@ class MainActivity : ComponentActivity() {
                     background = Color(0xFFF4F1EA),
                 ),
             ) {
-                ChipScreen(viewModel)
+                ChipScreen(viewModel, csvPicker)
             }
         }
     }
@@ -163,7 +189,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.reloadStartList()
+        viewModel.reloadStartList(force = false)
         handler.postDelayed(packTick, PACK_MS)
         nfcAdapter?.enableReaderMode(
             this,

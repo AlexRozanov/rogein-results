@@ -384,6 +384,8 @@ defineExpose({ refresh });
       В поле справа введите номер и Enter / пробел; можно вставить список
       <code>32 51 34</code>. Старт и финиш задаются в настройках.
       CSV: строка на дистанцию, <code>D1;31;32;33</code> или <code>D1;31 32 33</code>.
+      Также файл WinOrient <code>.Courses.txt</code>:
+      <code>D1 3,8 30 S1-36-31-…-F1</code> — S1 старт, F1 финиш, между ними порядок КП.
     </p>
     <p v-if="removedCps.size" class="subtitle">
       Зачёркнутый КП снят в настройках для всех участников — как будто его не было на дистанции.
@@ -392,6 +394,7 @@ defineExpose({ refresh });
       <FilePickerButton
         button-label="Выбрать CSV дистанций"
         empty-label="Файл не выбран"
+        accept=".csv,.txt,text/csv,text/plain"
         :disabled="isBusy()"
         @file-selected="onFileSelected"
       />

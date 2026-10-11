@@ -36,6 +36,8 @@ type StartProtocolResponse = {
 type StartProtocolImportSummary = {
   imported_rows: number;
   total_rows: number;
+  missing_course_count?: number;
+  linked_finish_names?: number;
 };
 
 type StartProtocolFormatRow = {
@@ -52,6 +54,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   status: [message: string];
   teamsChanged: [];
+  saved: [];
 }>();
 
 const rows = ref<StartProtocolRow[]>([]);
@@ -265,6 +268,22 @@ async function onImportDialogReplace() {
   await runImport(true);
 }
 
+function startProtocolImportStatus(summary: StartProtocolImportSummary, reset: boolean) {
+  const base = reset
+    ? `Стартовый протокол загружен заново: импортировано ${summary.imported_rows}, всего в БД ${summary.total_rows}.`
+    : `Добавлены новые участники: ${summary.imported_rows}, всего в БД ${summary.total_rows}.`;
+  const missing = summary.missing_course_count ?? 0;
+  const linked = summary.linked_finish_names ?? 0;
+  const parts = [base];
+  if (linked > 0) {
+    parts.push(`В финише подставлены имена для ${linked} участников с «чип …».`);
+  }
+  if (props.isOrient && missing > 0) {
+    parts.push(`Внимание: у ${missing} участников не указана дистанция.`);
+  }
+  return parts.join(" ");
+}
+
 async function runImport(reset: boolean) {
   if (!protocolFile.value) {
     emit("status", "Выберите CSV стартового протокола.");
@@ -276,16 +295,12 @@ async function runImport(reset: boolean) {
       csvContent: content,
       reset,
     });
-    emit(
-      "status",
-      reset
-        ? `Стартовый протокол загружен заново: импортировано ${summary.imported_rows}, всего в БД ${summary.total_rows}.`
-        : `Добавлены новые участники: ${summary.imported_rows}, всего в БД ${summary.total_rows}.`,
-    );
+    emit("status", startProtocolImportStatus(summary, reset));
     pageOffset.value = 0;
     await loadFormats();
     await loadCourses();
     await refresh();
+    emit("saved");
   } catch (error) {
     emit("status", `Ошибка импорта стартового протокола: ${String(error)}`);
   }
@@ -798,13 +813,14 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       <button v-if="!props.isOrient" :disabled="props.busy" @click="openFormatsModal">Справочник форматов</button>
     </div>
     <p v-if="props.isOrient" class="subtitle">
-      CSV участников: номер;ФИО;дистанция. Повторная загрузка того же номера добавляет дистанцию, не создавая второго человека.
+      CSV участников: номер;ФИО или номер;ФИО;дистанция. Колонку дистанции можно не заполнять — будет предупреждение. Повторная загрузка того же номера добавляет дистанцию, не создавая второго человека.
       «Отправить на телефон» можно не нажимать: при USB-отладке протокол уходит сам. Кнопка — на крайний случай.
     </p>
     <div v-if="props.isOrient" class="native-row">
       <FilePickerButton
         button-label="Выбрать CSV порядка КП"
         empty-label="Файл порядка КП не выбран"
+        accept=".csv,.txt,text/csv,text/plain"
         :disabled="props.busy"
         @file-selected="onCoursesFileSelected"
       />
@@ -812,7 +828,8 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
     </div>
     <p v-if="props.isOrient" class="subtitle">
       CSV порядка КП: <code>D1;31;32;33</code> — строка на дистанцию. Можно
-      <code>D1;31 32 33</code>. Старт и финиш задаются в настройках.
+      <code>D1;31 32 33</code> или WinOrient <code>.Courses.txt</code>
+      (<code>D1 3,8 30 S1-36-…-F1</code>, S1 старт, F1 финиш). Старт и финиш станций задаются в настройках.
       <template v-if="courseRows.length">
         Сейчас:
         {{ courseRows.map((c) => c.name + " (" + c.controls.length + " КП)").join(", ") }}.

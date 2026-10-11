@@ -1117,6 +1117,7 @@ async function onSortChanged(column: SortBy) {
         :is-orient="isOrient"
         @status="nativeStatus = $event"
         @teams-changed="refreshNativeData"
+        @saved="refreshNativeData"
       />
     </template>
 

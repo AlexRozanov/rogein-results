@@ -44,14 +44,19 @@ type EventDetail = {
   map_url: string | null;
   start_cp?: number | null;
   finish_cp?: number | null;
+  revision?: number;
+  published_at?: string;
   award_groups: AwardGroup[];
   results: ResultRow[];
 };
 
 const route = useRoute();
+const isLive = computed(() => route.path.startsWith("/live/"));
 const event = ref<EventDetail | null>(null);
 const error = ref("");
 const loading = ref(true);
+const updatedAt = ref<Date | null>(null);
+const liveConnected = ref(false);
 const showSplits = ref(false);
 const compareIds = ref<Record<number, number[]>>({});
 const compareQuery = ref<Record<number, string>>({});
@@ -62,6 +67,8 @@ const navRef = ref<HTMLElement | null>(null);
 const navBarRef = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 let navResizeObserver: ResizeObserver | null = null;
+let liveSource: EventSource | null = null;
+let livePoll: number | null = null;
 
 const isOrient = computed(() => event.value?.sport_kind === "orient");
 const groupNavLabel = computed(() => (isOrient.value ? "Дистанции" : "Наградные группы"));
@@ -341,26 +348,93 @@ async function afterRender() {
   activeGroupId.value = event.value?.award_groups[0]?.id ?? null;
 }
 
-async function load() {
-  loading.value = true;
-  error.value = "";
-  event.value = null;
-  observer?.disconnect();
+function eventApiUrl() {
+  const slug = String(route.params.slug ?? "");
+  return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
+}
+
+const updatedLabel = computed(() => {
+  if (!updatedAt.value) return "";
+  return updatedAt.value.toLocaleTimeString("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+});
+
+async function load(silent = false) {
+  if (!silent) {
+    loading.value = true;
+    error.value = "";
+    if (!isLive.value) event.value = null;
+    observer?.disconnect();
+  }
   try {
-    const res = await fetch(`/api/events/${route.params.slug}`);
+    const res = await fetch(eventApiUrl());
     if (!res.ok) throw new Error(await res.text());
-    event.value = await res.json();
+    const next = (await res.json()) as EventDetail;
+    if (silent && event.value && next.revision === event.value.revision) {
+      return;
+    }
+    event.value = next;
+    updatedAt.value = next.published_at ? new Date(next.published_at) : new Date();
     await afterRender();
+    error.value = "";
   } catch (e) {
-    error.value = String(e);
-    event.value = null;
+    if (!silent || !event.value) {
+      error.value = String(e);
+      if (!silent) event.value = null;
+    }
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
+  }
+}
+
+function stopLiveUpdates() {
+  liveSource?.close();
+  liveSource = null;
+  if (livePoll != null) {
+    window.clearInterval(livePoll);
+    livePoll = null;
+  }
+}
+
+function startLivePoll() {
+  if (livePoll != null) return;
+  livePoll = window.setInterval(() => {
+    void load(true);
+  }, 4000);
+}
+
+function startLiveUpdates() {
+  stopLiveUpdates();
+  if (!isLive.value) return;
+  const slug = String(route.params.slug ?? "");
+  try {
+    liveSource = new EventSource(`/api/live/${slug}/stream`);
+    liveSource.addEventListener("revision", () => {
+      liveConnected.value = true;
+      void load(true);
+    });
+    liveSource.onopen = () => {
+      liveConnected.value = true;
+      if (livePoll != null) {
+        window.clearInterval(livePoll);
+        livePoll = null;
+      }
+    };
+    liveSource.onerror = () => {
+      liveConnected.value = false;
+      startLivePoll();
+    };
+  } catch {
+    liveConnected.value = false;
+    startLivePoll();
   }
 }
 
 onMounted(() => {
-  load();
+  load().then(() => startLiveUpdates());
   document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("keydown", onKeydown);
 });
@@ -370,7 +444,7 @@ watch(() => route.params.slug, () => {
   compareIds.value = {};
   compareQuery.value = {};
   compareMenuFor.value = null;
-  load();
+  load().then(() => startLiveUpdates());
 });
 watch(showSplits, () => {
   void nextTick(() => {
@@ -390,6 +464,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   window.removeEventListener("keydown", onKeydown);
   document.documentElement.style.removeProperty("--nav-h");
+  stopLiveUpdates();
 });
 </script>
 
@@ -397,13 +472,19 @@ onBeforeUnmount(() => {
   <p v-if="error" class="err">{{ error }}</p>
   <PageLoading v-else-if="loading" label="Загрузка результатов…" />
   <template v-else-if="event">
-    <p class="back-link">
+    <p v-if="!isLive" class="back-link">
       <router-link to="/results">← Все результаты</router-link>
     </p>
-    <h1>{{ event.title }}</h1>
+    <h1>
+      {{ event.title }}
+      <span v-if="isLive" class="live-badge">онлайн</span>
+    </h1>
     <p class="muted event-date">
       {{ event.competition_date || "дата не указана" }}
       · {{ sportKindLabel(event.sport_kind) }}
+      <template v-if="isLive && updatedLabel">
+        · обновлено {{ updatedLabel }}{{ liveConnected ? "" : " · ожидание связи" }}
+      </template>
     </p>
 
     <label v-if="isOrient" class="splits-toggle" :class="{ 'is-on': showSplits }">
@@ -574,19 +655,23 @@ onBeforeUnmount(() => {
               <td>{{ row.place ?? "—" }}</td>
               <td v-if="!isOrient">
                 <router-link
+                  v-if="!isLive"
                   class="bib"
                   :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
                 >
                   {{ row.bib }}
                 </router-link>
+                <span v-else>{{ row.bib }}</span>
               </td>
               <td class="col-name">
                 <router-link
+                  v-if="!isLive"
                   class="bib"
                   :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
                 >
                   {{ row.name }}
                 </router-link>
+                <span v-else>{{ row.name }}</span>
               </td>
               <td v-if="!isOrient">{{ row.gender || "—" }}</td>
               <td v-if="!isOrient">{{ row.age ?? "—" }}</td>

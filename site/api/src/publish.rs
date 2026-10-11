@@ -62,8 +62,8 @@ pub async fn publish_event(
     let map_points = serde_json::to_value(&payload.map_points)?;
     let event_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind, start_cp, finish_cp)
-        VALUES ($1, $2, $3, 'published', $4, $5, $6, $7, $8)
+        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind, start_cp, finish_cp, revision)
+        VALUES ($1, $2, $3, 'published', $4, $5, $6, $7, $8, 1)
         RETURNING id
         "#,
     )
@@ -78,6 +78,107 @@ pub async fn publish_event(
     .fetch_one(&mut *tx)
     .await?;
 
+    insert_event_rows(&mut tx, event_id, &payload).await?;
+
+    if let Some(map) = payload.map {
+        save_map_from_base64(&mut tx, media_dir, slug, event_id, map).await?;
+    }
+
+    complete_matching_upcoming(&mut tx, slug, event_id).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPayload) -> anyhow::Result<i64> {
+    if payload.title.trim().is_empty() {
+        bail!("title is required");
+    }
+    if payload.participants.is_empty() {
+        bail!("participants must not be empty");
+    }
+
+    let mut tx = pool.begin().await?;
+    let existing = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, status FROM events WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let event_id = match existing {
+        Some((_, status)) if status == "published" => {
+            bail!("ALREADY_PUBLISHED");
+        }
+        Some((id, _)) => {
+            sqlx::query("DELETE FROM award_groups WHERE event_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM participants WHERE event_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                UPDATE events
+                SET title = $2,
+                    competition_date = $3,
+                    sport_kind = $4,
+                    start_cp = $5,
+                    finish_cp = $6,
+                    status = 'live',
+                    published_at = now(),
+                    revision = revision + 1
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(payload.title.trim())
+            .bind(payload.competition_date)
+            .bind(normalize_sport_kind(&payload.sport_kind))
+            .bind(payload.start_cp)
+            .bind(payload.finish_cp)
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+        None => {
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO events (
+                    slug, title, competition_date, status, map_points, meters_per_pixel,
+                    sport_kind, start_cp, finish_cp, revision
+                )
+                VALUES ($1, $2, $3, 'live', '[]'::jsonb, NULL, $4, $5, $6, 1)
+                RETURNING id
+                "#,
+            )
+            .bind(slug)
+            .bind(payload.title.trim())
+            .bind(payload.competition_date)
+            .bind(normalize_sport_kind(&payload.sport_kind))
+            .bind(payload.start_cp)
+            .bind(payload.finish_cp)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+
+    insert_event_rows(&mut tx, event_id, &payload).await?;
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM events WHERE id = $1")
+        .bind(event_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(revision)
+}
+
+async fn insert_event_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    event_id: i64,
+    payload: &PublishPayload,
+) -> anyhow::Result<()> {
     let mut group_ids: HashMap<i64, i64> = HashMap::new();
     for (idx, group) in payload.award_groups.iter().enumerate() {
         if group.source_id <= 0 {
@@ -99,7 +200,7 @@ pub async fn publish_event(
         .bind(group.min_age)
         .bind(group.sort_order.unwrap_or(idx as i32))
         .bind(course_cps)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         group_ids.insert(group.source_id, id);
     }
@@ -139,7 +240,7 @@ pub async fn publish_event(
         .bind(path)
         .bind(person.distance_m)
         .bind(added_cps)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         participant_ids.insert(person.source_id, id);
     }
@@ -182,17 +283,9 @@ pub async fn publish_event(
         .bind(row.elapsed_seconds.unwrap_or(0))
         .bind(row.status.as_deref().unwrap_or("OK"))
         .bind(diagnostics)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-
-    if let Some(map) = payload.map {
-        save_map_from_base64(&mut tx, media_dir, slug, event_id, map).await?;
-    }
-
-    complete_matching_upcoming(&mut tx, slug, event_id).await?;
-
-    tx.commit().await?;
     Ok(())
 }
 

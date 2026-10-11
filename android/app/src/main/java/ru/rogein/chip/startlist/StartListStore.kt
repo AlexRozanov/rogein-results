@@ -7,6 +7,8 @@ import android.provider.MediaStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
+import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.queue.StartCourseEntity
 import ru.rogein.chip.queue.StartListDao
 import ru.rogein.chip.queue.StartMetaEntity
@@ -24,13 +26,20 @@ class StartListStore(
 
     suspend fun person(id: Int): StartPerson? = dao.person(id)?.toPerson()
 
+    suspend fun peopleNow(): List<StartPerson> = dao.listPeople().map { it.toPerson() }
+
+    suspend fun coursesNow(): List<StartCourse> = dao.listCourses().map {
+        StartCourse(it.name, parseInts(it.controlsJson))
+    }
+
     suspend fun reloadFromUsb(quiet: Boolean = false): String? {
         val file = findPackFile()
             ?: return if (quiet) null else "Файл протокола не найден. Отправьте его с компьютера по USB."
         val pack = try {
             parseStartPack(file.readText(Charsets.UTF_8))
         } catch (e: Exception) {
-            return "Не удалось прочитать протокол: ${e.message ?: "ошибка файла"}"
+            if (quiet) return null
+            return shortPackReadError(e)
         }
         if (quiet) {
             val meta = dao.meta()
@@ -94,6 +103,69 @@ class StartListStore(
                 appliedAt = System.currentTimeMillis(),
             ),
         )
+    }
+
+    suspend fun importProtocolCsv(text: String, reset: Boolean): String {
+        val rows = CsvImport.protocol(text)
+        if (reset) {
+            dao.clearPeople()
+            dao.clearMeta()
+        }
+        var imported = 0
+        var skipped = 0
+        var missingCourse = 0
+        for (row in rows) {
+            if (row.id !in 1..MAX_LOGICAL_ID) {
+                skipped += 1
+                continue
+            }
+            if (row.course.isBlank()) missingCourse += 1
+            val existing = dao.person(row.id)
+            val union = linkedSetOf<String>()
+            if (existing != null) union.addAll(parseNames(existing.coursesJson))
+            if (row.course.isNotBlank()) union.add(row.course)
+            dao.upsertPerson(
+                StartPersonEntity(
+                    logicalId = row.id,
+                    name = row.name,
+                    currentCourse = if (reset || existing == null || existing.currentCourse.isBlank()) {
+                        row.course
+                    } else {
+                        existing.currentCourse
+                    },
+                    coursesJson = JSONArray(union.toList()).toString(),
+                    origin = existing?.origin ?: ORIGIN_PHONE,
+                    localCourseTouchedAt = existing?.localCourseTouchedAt ?: 0L,
+                    issuedAt = existing?.issuedAt ?: 0L,
+                ),
+            )
+            imported += 1
+        }
+        val base = if (skipped == 0) {
+            "Протокол: $imported участников."
+        } else {
+            "Протокол: $imported участников, пропущено $skipped (номер вне 1…$MAX_LOGICAL_ID)."
+        }
+        return if (missingCourse == 0) {
+            base
+        } else {
+            "$base Внимание: у $missingCourse участников не указана дистанция."
+        }
+    }
+
+    suspend fun importCoursesCsv(text: String, reset: Boolean): String {
+        val rows = CsvImport.courses(text)
+        if (reset) dao.clearCourses()
+        for (row in rows) {
+            dao.upsertCourse(
+                StartCourseEntity(name = row.name, controlsJson = JSONArray(row.controls).toString()),
+            )
+        }
+        return "Дистанции: ${rows.size}, КП загружены."
+    }
+
+    suspend fun deletePerson(id: Int) {
+        dao.deletePerson(id)
     }
 
     suspend fun upsertLocal(id: Int, name: String, course: String, extraCourses: List<String> = emptyList()) {
@@ -181,6 +253,18 @@ class StartListStore(
         const val FILE_NAME = "start-pack.json"
         const val ORIGIN_DESKTOP = "desktop"
         const val ORIGIN_PHONE = "phone"
+    }
+}
+
+private fun shortPackReadError(e: Exception): String {
+    val msg = e.message.orEmpty()
+    return when {
+        msg.contains("EACCES", ignoreCase = true) ||
+            msg.contains("Permission denied", ignoreCase = true) ->
+            "Нет доступа к файлу протокола по USB"
+        msg.contains("open failed", ignoreCase = true) ->
+            "Не удалось открыть файл протокола"
+        else -> "Не удалось прочитать протокол"
     }
 }
 

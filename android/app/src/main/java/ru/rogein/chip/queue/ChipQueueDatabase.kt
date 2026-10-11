@@ -133,12 +133,16 @@ interface StartListDao {
         StartPersonEntity::class,
         StartCourseEntity::class,
         StartMetaEntity::class,
+        SettingEntity::class,
+        CorrectionEntity::class,
+        ExclusionEntity::class,
     ],
-    version = 3,
+    version = 4,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
     abstract fun startListDao(): StartListDao
+    abstract fun eventDao(): EventDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -180,6 +184,36 @@ abstract class ChipQueueDatabase : RoomDatabase() {
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE start_people ADD COLUMN issuedAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS event_settings (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS event_corrections (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        type TEXT NOT NULL,
+                        logicalId INTEGER,
+                        courseName TEXT NOT NULL,
+                        payloadJson TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS event_exclusions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        courseName TEXT NOT NULL,
+                        fromCp INTEGER NOT NULL,
+                        toCp INTEGER NOT NULL,
+                        maxLegSeconds INTEGER
+                    )
+                    """.trimIndent(),
+                )
             }
         }
     }

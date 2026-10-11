@@ -4,11 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import ru.rogein.chip.event.buildEventSlug
 import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.CP_FINISH
@@ -18,11 +21,28 @@ import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.parse.TestCoursePlan
 import ru.rogein.chip.queue.ChipQueueRepository
+import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.EnqueueResult
+import ru.rogein.chip.queue.EventSettings
+import ru.rogein.chip.queue.EventStore
+import ru.rogein.chip.queue.ExclusionEntity
+import ru.rogein.chip.queue.QueuedChipEntity
+import ru.rogein.chip.queue.ScoredResult
+import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
 import java.time.LocalTime
 
 enum class ChipMode { Issue, Finish, Tests }
+
+enum class AppSection { Chip, Protocol, Results, More }
+
+enum class MorePage { Menu, Removed, Exclusions, Corrections, Publish, Settings }
+
+enum class CsvImportKind { Protocol, Courses }
+
+interface CsvPicker {
+    fun pick(kind: CsvImportKind)
+}
 
 interface ChipIo {
     fun clearMarks(order: BlockOrder, pointerEnd: Int?, blockCount: Int)
@@ -54,6 +74,30 @@ class ChipQueueViewModel(
         SharingStarted.WhileSubscribed(5_000),
         emptyList(),
     )
+    val settings = repository.event.settings.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        EventSettings(),
+    )
+    val corrections = repository.event.corrections.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        emptyList(),
+    )
+    val exclusions = repository.event.exclusions.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        emptyList(),
+    )
+
+    private val _section = MutableStateFlow(AppSection.Chip)
+    val section = _section.asStateFlow()
+
+    private val _morePage = MutableStateFlow(MorePage.Menu)
+    val morePage = _morePage.asStateFlow()
+
+    private val _overwritePrompt = MutableStateFlow(false)
+    val overwritePrompt = _overwritePrompt.asStateFlow()
 
     private val _status = MutableStateFlow("Приложите чип к телефону")
     val status = _status.asStateFlow()
@@ -114,6 +158,16 @@ class ChipQueueViewModel(
 
     private var lastUid: String? = null
     private var lastAt: Long = 0
+    private var pendingCsvReset: Boolean = true
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(4_000)
+                runCatching { repository.flushLiveIfPending() }
+            }
+        }
+    }
 
     fun attach(io: ChipIo) {
         chipIo = io
@@ -122,6 +176,252 @@ class ChipQueueViewModel(
     fun attachFeedback(next: ChipFeedback) {
         feedback = next
     }
+
+    fun setSection(next: AppSection) {
+        _section.value = next
+        if (next != AppSection.More) {
+            _morePage.value = MorePage.Menu
+        }
+    }
+
+    fun setMorePage(page: MorePage) {
+        _section.value = AppSection.More
+        _morePage.value = page
+    }
+
+    fun prepareCsvImport(reset: Boolean) {
+        pendingCsvReset = reset
+    }
+
+    fun importCsvText(kind: CsvImportKind, text: String?) {
+        if (text.isNullOrBlank()) {
+            _status.value = "Не удалось прочитать файл"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                _status.value = when (kind) {
+                    CsvImportKind.Protocol -> repository.startList.importProtocolCsv(text, pendingCsvReset)
+                    CsvImportKind.Courses -> repository.startList.importCoursesCsv(text, pendingCsvReset)
+                }
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Ошибка CSV"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun saveManualPerson() {
+        val id = _newNumber.value.toIntOrNull()
+        val name = _newName.value.trim()
+        val course = _newCourse.value.trim()
+        if (id == null || id !in 1..MAX_LOGICAL_ID || name.isEmpty()) {
+            _status.value = "Укажите номер (1…$MAX_LOGICAL_ID) и ФИО"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.startList.upsertLocal(id, name, course)
+            _addingNew.value = false
+            _selectedId.value = id
+            _status.value = if (course.isEmpty()) {
+                "Участник № $id сохранён. Внимание: дистанция не указана."
+            } else {
+                "Участник № $id сохранён в протоколе"
+            }
+        }
+    }
+
+    fun deletePerson(id: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.startList.deletePerson(id)
+            if (_selectedId.value == id) {
+                _selectedId.value = null
+            }
+            _status.value = "Участник № $id удалён из протокола"
+        }
+    }
+
+    fun addRemovedCp(cp: Int) {
+        if (cp <= 0) {
+            _status.value = "Выберите КП, который есть на дистанции"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.addRemovedCp(cp)
+            repository.requestLiveSend()
+            _status.value = "КП $cp снят с дистанций для всех участников"
+        }
+    }
+
+    fun addMissingCp(logicalId: Int, courseName: String, cp: Int) {
+        if (cp <= 0) {
+            _status.value = "Выберите КП дистанции"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.addMissingCp(logicalId, courseName, cp)
+            repository.requestLiveSend()
+            _status.value = "№ $logicalId: добавлен КП $cp, результат пересчитан"
+        }
+    }
+
+    fun assignCourse(logicalId: Int, fromCourse: String, toCourse: String) {
+        val next = toCourse.trim()
+        if (next.isEmpty()) {
+            _status.value = "Выберите дистанцию"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.assignCourse(logicalId, fromCourse, next)
+            repository.requestLiveSend()
+            _status.value = "№ $logicalId: дистанция «$next», результат пересчитан"
+        }
+    }
+
+    fun deleteCorrection(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.deleteCorrection(id)
+            repository.requestLiveSend()
+            _status.value = "Корректировка отменена, результат пересчитан"
+        }
+    }
+
+    fun addExclusion(courseName: String, fromCp: Int, toCp: Int, maxMinutes: Int?) {
+        if (courseName.isBlank() || fromCp <= 0 || toCp <= 0) {
+            _status.value = "Выберите дистанцию и перегон"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.event.addExclusion(
+                    courseName,
+                    fromCp,
+                    toCp,
+                    maxMinutes?.takeIf { it > 0 }?.times(60),
+                )
+                repository.requestLiveSend()
+                _status.value = "Перегон $fromCp → $toCp исключён, результат пересчитан"
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось исключить перегон"
+            }
+        }
+    }
+
+    fun deleteExclusion(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.deleteExclusion(id)
+            repository.requestLiveSend()
+            _status.value = "Исключение перегона удалено, результат пересчитан"
+        }
+    }
+
+    fun saveSettings(next: EventSettings) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.event.saveSettings(next)
+            _status.value = "Настройки сохранены"
+        }
+    }
+
+    fun saveAndGenerateSlug(next: EventSettings) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val slug = buildEventSlug(next.competitionDate, next.title)
+            if (slug == null) {
+                repository.event.saveSettings(next)
+                _status.value = "Для slug нужны название старта и дата соревнования"
+                return@launch
+            }
+            repository.event.saveSettings(next.copy(slug = slug))
+            _status.value = "Slug: $slug"
+        }
+    }
+
+    fun testSite(baseUrl: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                val base = repository.event.testSite(baseUrl)
+                _status.value = "Сайт отвечает: $base"
+            } catch (e: Exception) {
+                _status.value = "Нет связи с сайтом: ${e.message ?: "ошибка"}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun requestPublish(next: EventSettings) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                repository.event.saveSettings(next)
+                if (next.slug.isBlank() || next.title.isBlank()) {
+                    _status.value = "Укажите slug и название старта"
+                    return@launch
+                }
+                if (repository.event.eventExists(next.apiBaseUrl, next.slug)) {
+                    _overwritePrompt.value = true
+                    return@launch
+                }
+                publishNow(next)
+            } catch (e: Exception) {
+                _status.value = "Ошибка публикации: ${e.message ?: "ошибка"}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun confirmOverwrite() {
+        _overwritePrompt.value = false
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                publishNow(repository.event.settingsNow())
+            } catch (e: Exception) {
+                _status.value = "Ошибка публикации: ${e.message ?: "ошибка"}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun cancelOverwrite() {
+        _overwritePrompt.value = false
+    }
+
+    fun sendLiveNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.flushLiveNow()
+                val note = repository.event.settingsNow().liveNote
+                if (note.isNotBlank()) _status.value = note
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось отправить online"
+            }
+        }
+    }
+
+    private suspend fun publishNow(current: EventSettings) {
+        _status.value = repository.event.publish(
+            current,
+            people.value,
+            courses.value,
+            items.value,
+            corrections.value,
+            exclusions.value,
+        )
+    }
+
+    fun scoredResults(
+        items: List<QueuedChipEntity>,
+        people: List<StartPerson>,
+        courses: List<StartCourse>,
+        settings: EventSettings,
+        corrections: List<CorrectionEntity>,
+        exclusions: List<ExclusionEntity>,
+    ): List<ScoredResult> = EventStore.score(items, people, courses, settings, corrections, exclusions)
 
     fun setMode(mode: ChipMode) {
         _mode.value = mode
@@ -149,6 +449,9 @@ class ChipQueueViewModel(
         _query.value = ""
         _addingNew.value = false
         val person = people.value.find { it.id == id }
+        _newNumber.value = person?.id?.toString().orEmpty()
+        _newName.value = person?.name.orEmpty()
+        _newCourse.value = person?.currentCourse.orEmpty()
         _testCourse.value = person?.currentCourse
             ?.takeIf { it.isNotBlank() }
             ?: person?.courses?.firstOrNull().orEmpty()
@@ -183,6 +486,21 @@ class ChipQueueViewModel(
 
     fun onNewCourse(value: String) {
         _newCourse.value = value
+        if (
+            _section.value == AppSection.Chip &&
+            _mode.value == ChipMode.Issue &&
+            _addingNew.value &&
+            _chipReady.value &&
+            value.isNotBlank()
+        ) {
+            val id = _newNumber.value.toIntOrNull()
+            val name = _newName.value.trim()
+            if (id != null && id in 1..MAX_LOGICAL_ID && name.isNotEmpty()) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    issueToChip(id, name, value)
+                }
+            }
+        }
     }
 
     fun onExtraCourse(value: String) {
@@ -216,7 +534,7 @@ class ChipQueueViewModel(
         val controls = course?.controls.orEmpty()
         val inner = controls.filter { it != CP_START && it != CP_FINISH }
         if (inner.isEmpty()) {
-            _status.value = "У дистанции $courseName нет порядка КП. Импортируйте CSV на компьютере и отправьте протокол."
+            _status.value = "У дистанции $courseName нет порядка КП. Загрузите CSV дистанций на вкладке «Протокол»."
             return
         }
         val order = blockOrder
@@ -252,9 +570,21 @@ class ChipQueueViewModel(
         }
     }
 
+    private fun issueCourseMissing(): Boolean {
+        if (_addingNew.value) return _newCourse.value.isBlank()
+        val selected = _selectedId.value?.let { id -> people.value.find { it.id == id } }
+        return selected != null && selected.currentCourse.isBlank()
+    }
+
     private fun promptStatus() {
         _status.value = when (_mode.value) {
             ChipMode.Issue -> when {
+                issueCourseMissing() ->
+                    if (_chipReady.value) {
+                        "Укажите дистанцию — без неё номер не запишется."
+                    } else {
+                        "Укажите дистанцию, затем приложите чип"
+                    }
                 _chipReady.value && (_selectedId.value != null || _addingNew.value) ->
                     "Чип на месте. Не убирайте — номер запишется."
                 _selectedId.value != null || _addingNew.value ->
@@ -347,6 +677,17 @@ class ChipQueueViewModel(
             }
             return
         }
+        if (draft.third.isBlank()) {
+            if (!_addingNew.value) {
+                _selectedId.value = draft.first
+                _newNumber.value = draft.first.toString()
+                _newName.value = draft.second
+                _newCourse.value = ""
+            }
+            _status.value = "Укажите дистанцию для № ${draft.first}, затем приложите чип."
+            signalError()
+            return
+        }
         issueToChip(draft.first, draft.second, draft.third)
     }
 
@@ -367,6 +708,7 @@ class ChipQueueViewModel(
                 signalError()
             }
             is EnqueueResult.Saved -> {
+                repository.requestLiveSend()
                 _status.value = if (result.snapshotError == null) {
                     "$who · ${dump.punches.size} отметок сохранено."
                 } else {
@@ -382,7 +724,7 @@ class ChipQueueViewModel(
             val id = _newNumber.value.toIntOrNull()
             val name = _newName.value.trim()
             val course = _newCourse.value.trim()
-            if (id == null || id !in 1..MAX_LOGICAL_ID || name.isEmpty() || course.isEmpty()) {
+            if (id == null || id !in 1..MAX_LOGICAL_ID || name.isEmpty()) {
                 return null
             }
             return Triple(id, name, course)
@@ -430,9 +772,15 @@ class ChipQueueViewModel(
 
     fun setCurrentCourse(course: String) {
         val id = _selectedId.value ?: return
+        if (course.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             repository.startList.setCurrentCourse(id, course)
-            _status.value = "Текущая дистанция: $course. Приложите чип."
+            val person = repository.startList.person(id)
+            if (_mode.value == ChipMode.Issue && _chipReady.value && person != null) {
+                issueToChip(person.id, person.name, course)
+            } else {
+                _status.value = "Текущая дистанция: $course. Приложите чип."
+            }
         }
     }
 
@@ -448,10 +796,18 @@ class ChipQueueViewModel(
         }
     }
 
-    fun reloadStartList() {
+    fun dismissStatus() {
+        promptStatus()
+    }
+
+    fun reloadStartList(force: Boolean = true) {
         viewModelScope.launch(Dispatchers.IO) {
-            _status.value = repository.startList.reloadFromUsb(quiet = false)
-                ?: "Файл протокола не найден. Отправьте его с компьютера по USB."
+            val note = repository.startList.reloadFromUsb(quiet = !force)
+            if (force) {
+                _status.value = note ?: "Файл протокола не найден"
+            } else if (note != null && !_busy.value) {
+                _status.value = note
+            }
         }
     }
 
@@ -552,7 +908,7 @@ class ChipQueueViewModel(
             _testCourse.value = ""
             _sessionSummary.value = null
             _status.value = if (snapshotError == null) {
-                "Стартовый протокол, дистанции и очередь удалены. Отправьте новый протокол с компьютера."
+                "Стартовый протокол, дистанции, очередь и корректировки удалены."
             } else {
                 "Данные старта удалены, снимок в Загрузках не обновлён: $snapshotError"
             }
