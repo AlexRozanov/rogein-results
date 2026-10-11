@@ -370,7 +370,7 @@ async function load(silent = false) {
     observer?.disconnect();
   }
   try {
-    const res = await fetch(eventApiUrl());
+    const res = await fetch(`${eventApiUrl()}?t=${Date.now()}`, { cache: "no-store" });
     if (!res.ok) throw new Error(await res.text());
     const next = (await res.json()) as EventDetail;
     if (silent && event.value && next.revision === event.value.revision) {
@@ -403,12 +403,13 @@ function startLivePoll() {
   if (livePoll != null) return;
   livePoll = window.setInterval(() => {
     void load(true);
-  }, 4000);
+  }, 3000);
 }
 
 function startLiveUpdates() {
   stopLiveUpdates();
   if (!isLive.value) return;
+  startLivePoll();
   const slug = String(route.params.slug ?? "");
   try {
     liveSource = new EventSource(`/api/live/${slug}/stream`);
@@ -418,18 +419,12 @@ function startLiveUpdates() {
     });
     liveSource.onopen = () => {
       liveConnected.value = true;
-      if (livePoll != null) {
-        window.clearInterval(livePoll);
-        livePoll = null;
-      }
     };
     liveSource.onerror = () => {
       liveConnected.value = false;
-      startLivePoll();
     };
   } catch {
     liveConnected.value = false;
-    startLivePoll();
   }
 }
 

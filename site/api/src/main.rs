@@ -12,8 +12,9 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_core::Stream;
@@ -272,13 +273,19 @@ fn normalize_slug(raw: &str) -> Result<String, (StatusCode, String)> {
 async fn get_live_event(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> Result<Json<EventDetail>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
     let event = load_event_detail(&state.pool, &slug, Some("live"))
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?;
-    Ok(Json(event))
+    Ok((
+        [(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+        )],
+        Json(event),
+    ))
 }
 
 async fn put_live_event(
@@ -324,7 +331,7 @@ impl Stream for LiveSse {
 async fn live_stream(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
     let revision: i64 = sqlx::query_scalar(
         "SELECT revision FROM events WHERE slug = $1 AND status = 'live'",
@@ -353,13 +360,23 @@ async fn live_stream(
         }
     });
     let stream = LiveSse { rx };
-    Ok(
+    Ok((
+        [
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-store"),
+            ),
+            (
+                HeaderName::from_static("x-accel-buffering"),
+                HeaderValue::from_static("no"),
+            ),
+        ],
         Sse::new(stream).keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(15))
                 .text("ping"),
         ),
-    )
+    ))
 }
 
 async fn get_participant(
