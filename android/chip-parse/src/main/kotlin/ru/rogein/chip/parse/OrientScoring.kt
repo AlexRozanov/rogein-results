@@ -54,6 +54,149 @@ fun formatElapsed(seconds: Int): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
+fun formatDayClock(seconds: Int): String {
+    val safe = seconds.coerceAtLeast(0)
+    val h = safe / 3600
+    val m = (safe % 3600) / 60
+    val s = safe % 60
+    return "%02d:%02d:%02d".format(h, m, s)
+}
+
+fun punchLegSeconds(previous: Int, current: Int): Int {
+    var delta = current - previous
+    if (delta < 0) delta += 24 * 3600
+    return delta.coerceAtLeast(0)
+}
+
+data class CourseCpProgress(
+    val cp: Int,
+    val taken: Boolean,
+    val added: Boolean,
+    val punched: Boolean,
+    val blocker: Boolean,
+)
+
+fun orientPunchWindow(marks: List<OrientMark>, startCp: Int, finishCp: Int): List<OrientMark> {
+    val sorted = marks.sortedWith(compareBy<OrientMark> { it.seconds }.thenBy { it.seq })
+    if (sorted.isEmpty()) return emptyList()
+    val startIdx = sorted.indexOfFirst { it.cp == startCp }
+    if (startIdx < 0) return sorted
+    val finishIdx = sorted.indices.reversed().firstOrNull { i ->
+        i > startIdx && sorted[i].cp == finishCp
+    }
+    val windowEnd = finishIdx ?: sorted.lastIndex
+    return sorted.subList(startIdx, windowEnd + 1)
+}
+
+fun courseProgress(
+    punches: List<Int>,
+    required: List<Int>,
+    addCounts: Map<Int, Int> = emptyMap(),
+): List<CourseCpProgress> {
+    if (required.isEmpty()) return emptyList()
+    val punched = punches.toSet()
+    val remaining = addCounts.toMutableMap()
+    var i = 0
+    var firstMiss = true
+    return required.map { cp ->
+        var q = i
+        while (q < punches.size && punches[q] != cp) q += 1
+        var taken = false
+        var added = false
+        if (q < punches.size && punches[q] == cp) {
+            taken = true
+            i = q + 1
+        } else {
+            val left = remaining[cp] ?: 0
+            if (left > 0) {
+                remaining[cp] = left - 1
+                taken = true
+                added = true
+            }
+        }
+        val blocker = !taken && firstMiss
+        if (!taken) firstMiss = false
+        CourseCpProgress(cp, taken, added, punched.contains(cp), blocker)
+    }
+}
+
+enum class PunchKind {
+    Ok,
+    Start,
+    Finish,
+    Extra,
+    OutOfOrder,
+}
+
+data class ClassifiedPunch(
+    val mark: OrientMark,
+    val kind: PunchKind,
+) {
+    val wrong: Boolean get() = kind == PunchKind.OutOfOrder
+}
+
+fun classifyActualPunches(
+    marks: List<OrientMark>,
+    courseCps: List<Int>,
+    startCp: Int,
+    finishCp: Int,
+): List<ClassifiedPunch> {
+    val sorted = marks.sortedWith(compareBy<OrientMark> { it.seconds }.thenBy { it.seq })
+    if (sorted.isEmpty()) return emptyList()
+    var startIdx = sorted.indexOfFirst { it.cp == startCp }
+    if (startIdx < 0) startIdx = 0
+    val finishIdx = sorted.indices.reversed().firstOrNull { i ->
+        i > startIdx && sorted[i].cp == finishCp
+    } ?: sorted.lastIndex
+    var next = 0
+    var broken = false
+    fun afterError(mark: OrientMark): ClassifiedPunch {
+        broken = true
+        return ClassifiedPunch(mark, PunchKind.OutOfOrder)
+    }
+    fun keep(mark: OrientMark, kind: PunchKind): ClassifiedPunch {
+        if (broken) return afterError(mark)
+        return ClassifiedPunch(mark, kind)
+    }
+    return sorted.mapIndexed { i, mark ->
+        if (i < startIdx || i > finishIdx) {
+            return@mapIndexed keep(mark, PunchKind.Extra)
+        }
+        if (i == finishIdx && mark.cp == finishCp) {
+            if (next < courseCps.size && courseCps[next] == finishCp) next += 1
+            return@mapIndexed keep(mark, PunchKind.Finish)
+        }
+        if (mark.cp == startCp && (next >= courseCps.size || courseCps[next] != startCp)) {
+            return@mapIndexed keep(mark, PunchKind.Start)
+        }
+        if (courseCps.isEmpty()) {
+            return@mapIndexed keep(mark, PunchKind.Ok)
+        }
+        if (next < courseCps.size && mark.cp == courseCps[next]) {
+            next += 1
+            val kind = when (mark.cp) {
+                startCp -> PunchKind.Start
+                finishCp -> PunchKind.Finish
+                else -> PunchKind.Ok
+            }
+            return@mapIndexed keep(mark, kind)
+        }
+        if (next < courseCps.size && courseCps.subList(next, courseCps.size).contains(mark.cp)) {
+            return@mapIndexed afterError(mark)
+        }
+        keep(mark, if (mark.cp in courseCps) PunchKind.Ok else PunchKind.Extra)
+    }
+}
+
+fun addableCourseCps(progress: List<CourseCpProgress>): List<Pair<Int, Int>> {
+    val remaining = LinkedHashMap<Int, Int>()
+    for (item in progress) {
+        if (item.taken) continue
+        remaining[item.cp] = (remaining[item.cp] ?: 0) + 1
+    }
+    return remaining.entries.map { it.toPair() }
+}
+
 fun filterCourseCps(controls: List<Int>, removed: Set<Int>): List<Int> =
     controls.filter { it !in removed }
 
@@ -191,7 +334,9 @@ fun calculateOrientResult(
     val window = sorted.subList(startIdx, windowEnd + 1)
     val punches = window.map { it.cp }
     val taken = required?.let { courseSubsequenceTaken(punches, it, addCpCounts) } ?: 0
-    val complete = required != null && taken == required.size
+    val orderBroken = required != null &&
+        classifyActualPunches(window, required, startCp, settings.finishCp).any { it.wrong }
+    val complete = required != null && taken == required.size && !orderBroken
     if (required != null && !complete) diagnostics += "course_incomplete"
     var elapsed = window.last().seconds - window.first().seconds
     if (elapsed < 0) elapsed += 24 * 3600

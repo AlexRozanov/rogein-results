@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SNAPSHOT_PATHS: &[&str] = &[
+    "/sdcard/Android/data/ru.rogein.chip/files/chip-queue.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/chip-queue.json",
     "/sdcard/Download/rogein/chip-queue.json",
     "/storage/emulated/0/Download/rogein/chip-queue.json",
 ];
@@ -34,15 +36,16 @@ pub fn try_read_phone_snapshot() -> Result<Option<PhoneSnapshotRead>, String> {
         return Ok(None);
     };
     for path in SNAPSHOT_PATHS {
-        match cat_file(&adb, &serial, path)? {
-            Some(body) => {
+        match cat_file(&adb, &serial, path) {
+            Ok(Some(body)) => {
                 return Ok(Some(PhoneSnapshotRead {
                     serial,
                     path: (*path).to_string(),
                     body,
                 }));
             }
-            None => {}
+            Ok(None) => {}
+            Err(_) => {}
         }
     }
     Ok(None)
@@ -60,19 +63,20 @@ pub fn read_phone_snapshot() -> Result<PhoneSnapshotRead, String> {
     let serial = connected_serial(&adb)?;
     let mut last_error = String::new();
     for path in SNAPSHOT_PATHS {
-        match cat_file(&adb, &serial, path)? {
-            Some(body) => {
+        match cat_file(&adb, &serial, path) {
+            Ok(Some(body)) => {
                 return Ok(PhoneSnapshotRead {
                     serial,
                     path: (*path).to_string(),
                     body,
                 });
             }
-            None => last_error = format!("нет файла {path}"),
+            Ok(None) => last_error = format!("нет файла {path}"),
+            Err(error) => last_error = error,
         }
     }
     Err(format!(
-        "На телефоне нет снимка очереди (Загрузки/rogein/chip-queue.json). {last_error}"
+        "На телефоне нет снимка очереди (chip-queue.json). {last_error}"
     ))
 }
 

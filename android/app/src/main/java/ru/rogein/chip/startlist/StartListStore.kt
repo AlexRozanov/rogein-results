@@ -33,40 +33,58 @@ class StartListStore(
     }
 
     suspend fun reloadFromUsb(quiet: Boolean = false): String? {
-        val file = findPackFile()
-            ?: return if (quiet) null else "Файл протокола не найден. Отправьте его с компьютера по USB."
-        val pack = try {
-            parseStartPack(file.readText(Charsets.UTF_8))
-        } catch (e: Exception) {
-            if (quiet) return null
-            return shortPackReadError(e)
-        }
-        if (quiet) {
-            val meta = dao.meta()
-            if (meta != null && meta.revision == pack.revision) {
-                return null
-            }
-        }
+        val hasPeople = dao.listPeople().isNotEmpty()
+        val hasCourses = dao.listCourses().isNotEmpty()
+        if (quiet && (hasPeople || hasCourses)) return null
+        val loaded = openUsbPack()
+        val pack = loaded.pack ?: return if (quiet) null else loaded.error
         merge(pack)
         return "Протокол обновлён: ${pack.people.size} участников, ${pack.courses.size} дистанций."
     }
 
+    suspend fun loadProtocolFromUsb(replace: Boolean): String {
+        val loaded = openUsbPack()
+        val pack = loaded.pack ?: return loaded.error.orEmpty()
+        applyPeople(pack, replace)
+        return "Протокол с компьютера: ${pack.people.size} участников."
+    }
+
+    suspend fun loadCoursesFromUsb(replace: Boolean): String {
+        val loaded = openUsbPack()
+        val pack = loaded.pack ?: return loaded.error.orEmpty()
+        applyCourses(pack, replace)
+        return "Дистанции с компьютера: ${pack.courses.size}."
+    }
+
     suspend fun merge(pack: StartPack) {
+        applyCourses(pack, replace = true)
+        applyPeople(pack, replace = true)
+        val incomingIds = pack.people.map { it.id }.toSet()
+        for (local in dao.listPeople()) {
+            if (local.origin == ORIGIN_DESKTOP && local.logicalId !in incomingIds) {
+                dao.deletePerson(local.logicalId)
+            }
+        }
+    }
+
+    private fun openUsbPack(): UsbPackLoad {
+        val file = findPackFile()
+            ?: return UsbPackLoad(error = "Файл протокола не найден. Отправьте его с компьютера по USB.")
+        return try {
+            UsbPackLoad(pack = parseStartPack(file.readText(Charsets.UTF_8)))
+        } catch (e: Exception) {
+            UsbPackLoad(error = shortPackReadError(e))
+        }
+    }
+
+    private suspend fun applyPeople(pack: StartPack, replace: Boolean) {
+        if (replace) {
+            dao.clearPeople()
+            dao.clearMeta()
+        }
         val meta = dao.meta()
         val appliedAt = meta?.appliedAt ?: 0L
-        val incomingIds = pack.people.map { it.id }.toSet()
         val existing = dao.listPeople()
-
-        dao.clearCourses()
-        for (course in pack.courses) {
-            dao.upsertCourse(
-                StartCourseEntity(
-                    name = course.name,
-                    controlsJson = JSONArray(course.controls).toString(),
-                ),
-            )
-        }
-
         for (person in pack.people) {
             val local = existing.find { it.logicalId == person.id }
             val union = linkedSetOf<String>()
@@ -91,18 +109,24 @@ class StartListStore(
                 ),
             )
         }
-
-        for (local in existing) {
-            if (local.origin == ORIGIN_DESKTOP && local.logicalId !in incomingIds) {
-                dao.deletePerson(local.logicalId)
-            }
-        }
         dao.upsertMeta(
             StartMetaEntity(
                 revision = pack.revision,
                 appliedAt = System.currentTimeMillis(),
             ),
         )
+    }
+
+    private suspend fun applyCourses(pack: StartPack, replace: Boolean) {
+        if (replace) dao.clearCourses()
+        for (course in pack.courses) {
+            dao.upsertCourse(
+                StartCourseEntity(
+                    name = course.name,
+                    controlsJson = JSONArray(course.controls).toString(),
+                ),
+            )
+        }
     }
 
     suspend fun importProtocolCsv(text: String, reset: Boolean): String {
@@ -166,6 +190,38 @@ class StartListStore(
 
     suspend fun deletePerson(id: Int) {
         dao.deletePerson(id)
+    }
+
+    suspend fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) error("Укажите название дистанции")
+        if (controls.any { it <= 0 }) error("Номер КП должен быть больше 0")
+        val previous = previousName?.trim().orEmpty()
+        val renaming = previous.isNotEmpty() && !previous.equals(trimmed, ignoreCase = true)
+        if (renaming) {
+            val clash = dao.listCourses().any { it.name.equals(trimmed, ignoreCase = true) }
+            if (clash) error("Дистанция «$trimmed» уже есть")
+        }
+        dao.upsertCourse(
+            StartCourseEntity(name = trimmed, controlsJson = JSONArray(controls).toString()),
+        )
+        if (renaming) {
+            for (person in dao.listPeople()) {
+                val names = parseNames(person.coursesJson).map { if (it.equals(previous, true)) trimmed else it }
+                val current = if (person.currentCourse.equals(previous, true)) trimmed else person.currentCourse
+                dao.upsertPerson(
+                    person.copy(
+                        currentCourse = current,
+                        coursesJson = JSONArray(names).toString(),
+                    ),
+                )
+            }
+            dao.deleteCourse(previous)
+        }
+    }
+
+    suspend fun deleteCourse(name: String) {
+        dao.deleteCourse(name.trim())
     }
 
     suspend fun upsertLocal(id: Int, name: String, course: String, extraCourses: List<String> = emptyList()) {
@@ -255,6 +311,11 @@ class StartListStore(
         const val ORIGIN_PHONE = "phone"
     }
 }
+
+private data class UsbPackLoad(
+    val pack: StartPack? = null,
+    val error: String? = null,
+)
 
 private fun shortPackReadError(e: Exception): String {
     val msg = e.message.orEmpty()

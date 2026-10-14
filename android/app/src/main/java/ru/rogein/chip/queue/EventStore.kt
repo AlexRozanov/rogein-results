@@ -259,7 +259,7 @@ class EventStore(
                 val assigned = assignedCourse(item.logicalId, corrections)
                 val course = assigned.ifBlank { item.courseName.ifBlank { person?.currentCourse.orEmpty() } }
                 val punches = parsePunches(item.punchesJson)
-                val adds = addCounts(item.logicalId, course, corrections)
+                val adds = addCpCounts(item.logicalId, course, corrections)
                 val calc = calculateOrientResult(
                     punches,
                     orientSettings,
@@ -312,7 +312,7 @@ class EventStore(
                 .orEmpty()
         }
 
-        private fun addCounts(logicalId: Int?, courseName: String, corrections: List<CorrectionEntity>): Map<Int, Int> {
+        fun addCpCounts(logicalId: Int?, courseName: String, corrections: List<CorrectionEntity>): Map<Int, Int> {
             if (logicalId == null) return emptyMap()
             val out = HashMap<Int, Int>()
             for (row in corrections) {

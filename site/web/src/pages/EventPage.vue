@@ -353,6 +353,11 @@ function eventApiUrl() {
   return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
 }
 
+function personHref(slug: string, sourceId: number, groupId: number) {
+  const prefix = isLive.value ? "/live" : "/events";
+  return `${prefix}/${slug}/p/${sourceId}?g=${groupId}`;
+}
+
 const updatedLabel = computed(() => {
   if (!updatedAt.value) return "";
   return updatedAt.value.toLocaleTimeString("ru-RU", {
@@ -650,23 +655,19 @@ onBeforeUnmount(() => {
               <td>{{ row.place ?? "—" }}</td>
               <td v-if="!isOrient">
                 <router-link
-                  v-if="!isLive"
                   class="bib"
-                  :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
+                  :to="personHref(event.slug, row.participant_source_id, block.group.id)"
                 >
                   {{ row.bib }}
                 </router-link>
-                <span v-else>{{ row.bib }}</span>
               </td>
               <td class="col-name">
                 <router-link
-                  v-if="!isLive"
                   class="bib"
-                  :to="`/events/${event.slug}/p/${row.participant_source_id}?g=${block.group.id}`"
+                  :to="personHref(event.slug, row.participant_source_id, block.group.id)"
                 >
                   {{ row.name }}
                 </router-link>
-                <span v-else>{{ row.name }}</span>
               </td>
               <td v-if="!isOrient">{{ row.gender || "—" }}</td>
               <td v-if="!isOrient">{{ row.age ?? "—" }}</td>

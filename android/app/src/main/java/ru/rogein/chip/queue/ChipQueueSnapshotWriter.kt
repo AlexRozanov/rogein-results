@@ -10,16 +10,45 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Полная копия очереди в Download/rogein/chip-queue.json.
- * Сама очередь в Room не очищается: десктоп забирает файл по adb и удаляет только его.
+ * Полная копия очереди: сначала в каталог приложения (его десктоп читает по adb),
+ * затем в Download/rogein/chip-queue.json. Очередь в Room не очищается.
  */
 class ChipQueueSnapshotWriter(private val context: Context) {
     fun write(items: List<QueuedChipEntity>) {
         val json = toJson(items)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            writeMediaStore(json)
-        } else {
-            writeLegacy(json)
+        var appOk = false
+        var lastError: Exception? = null
+        try {
+            writeAppFile(json)
+            appOk = true
+        } catch (e: Exception) {
+            lastError = e
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                writeMediaStore(json)
+            } else {
+                writeLegacy(json)
+            }
+        } catch (e: Exception) {
+            lastError = e
+        }
+        if (!appOk) {
+            throw when (val error = lastError) {
+                is SnapshotWriteException -> error
+                null -> SnapshotWriteException("не удалось записать снимок")
+                else -> SnapshotWriteException(error.message ?: "ошибка записи снимка")
+            }
+        }
+    }
+
+    private fun writeAppFile(json: String) {
+        val dir = context.getExternalFilesDir(null)
+            ?: throw SnapshotWriteException("нет папки приложения для снимка")
+        try {
+            File(dir, FILE_NAME).writeText(json, Charsets.UTF_8)
+        } catch (e: Exception) {
+            throw SnapshotWriteException(e.message ?: "ошибка записи снимка приложения")
         }
     }
 

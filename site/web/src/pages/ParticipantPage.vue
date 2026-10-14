@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
 import PageLoading from "../components/PageLoading.vue";
@@ -65,10 +65,12 @@ type CourseProgressItem = {
 };
 
 const route = useRoute();
+const isLive = computed(() => route.path.startsWith("/live/"));
 const person = ref<Participant | null>(null);
 const event = ref<EventDetail | null>(null);
 const error = ref("");
 const loading = ref(true);
+let livePoll: number | null = null;
 
 const personResults = computed(() => {
   if (!person.value || !event.value) return [];
@@ -368,33 +370,68 @@ function actualChipTitle(kind: string, cp: number) {
   return note ? `КП ${cp} — ${note}` : `КП ${cp}`;
 }
 
-async function load() {
-  loading.value = true;
-  error.value = "";
-  person.value = null;
-  event.value = null;
+function eventApiUrl() {
+  const slug = String(route.params.slug);
+  return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
+}
+
+async function load(silent = false) {
+  if (!silent) {
+    loading.value = true;
+    error.value = "";
+    if (!isLive.value) {
+      person.value = null;
+      event.value = null;
+    }
+  }
   try {
-    const slug = String(route.params.slug);
     const sourceId = String(route.params.sourceId);
     const [pRes, eRes] = await Promise.all([
-      fetch(`/api/events/${slug}/participants/${sourceId}`),
-      fetch(`/api/events/${slug}`),
+      fetch(`${eventApiUrl()}/participants/${sourceId}?t=${Date.now()}`, { cache: "no-store" }),
+      fetch(`${eventApiUrl()}?t=${Date.now()}`, { cache: "no-store" }),
     ]);
     if (!pRes.ok) throw new Error(await pRes.text());
     if (!eRes.ok) throw new Error(await eRes.text());
     person.value = await pRes.json();
     event.value = await eRes.json();
+    error.value = "";
   } catch (e) {
-    error.value = String(e);
-    person.value = null;
-    event.value = null;
+    if (!silent || !person.value || !event.value) {
+      error.value = String(e);
+      if (!silent) {
+        person.value = null;
+        event.value = null;
+      }
+    }
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
 }
 
-onMounted(load);
-watch(() => [route.params.slug, route.params.sourceId], load);
+function stopLivePoll() {
+  if (livePoll != null) {
+    window.clearInterval(livePoll);
+    livePoll = null;
+  }
+}
+
+function startLivePoll() {
+  stopLivePoll();
+  if (!isLive.value) return;
+  livePoll = window.setInterval(() => {
+    void load(true);
+  }, 3000);
+}
+
+onMounted(() => {
+  void load();
+  startLivePoll();
+});
+onBeforeUnmount(stopLivePoll);
+watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
+  void load();
+  startLivePoll();
+});
 </script>
 
 <template>
@@ -402,7 +439,7 @@ watch(() => [route.params.slug, route.params.sourceId], load);
   <PageLoading v-else-if="loading" label="Загрузка карточки участника…" />
   <template v-else-if="person && event">
     <p class="back-link">
-      <router-link :to="`/events/${event.slug}`">← {{ event.title }}</router-link>
+      <router-link :to="`${isLive ? '/live' : '/events'}/${event.slug}`">← {{ event.title }}</router-link>
     </p>
 
     <header class="person-head">

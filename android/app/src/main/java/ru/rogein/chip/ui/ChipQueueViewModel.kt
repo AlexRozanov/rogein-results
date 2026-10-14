@@ -16,6 +16,7 @@ import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
+import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipParser
@@ -39,6 +40,14 @@ enum class AppSection { Chip, Protocol, Results, More }
 enum class MorePage { Menu, Removed, Exclusions, Corrections, Publish, Settings }
 
 enum class CsvImportKind { Protocol, Courses }
+
+data class FinishReplacePrompt(
+    val logicalId: Int?,
+    val courseName: String,
+    val dump: ChipDump,
+    val rawHex: String,
+    val personName: String,
+)
 
 interface CsvPicker {
     fun pick(kind: CsvImportKind)
@@ -98,6 +107,9 @@ class ChipQueueViewModel(
 
     private val _overwritePrompt = MutableStateFlow(false)
     val overwritePrompt = _overwritePrompt.asStateFlow()
+
+    private val _finishReplacePrompt = MutableStateFlow<FinishReplacePrompt?>(null)
+    val finishReplacePrompt = _finishReplacePrompt.asStateFlow()
 
     private val _status = MutableStateFlow("Приложите чип к телефону")
     val status = _status.asStateFlow()
@@ -193,6 +205,32 @@ class ChipQueueViewModel(
         pendingCsvReset = reset
     }
 
+    fun loadUsbProtocol(replace: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                _status.value = repository.startList.loadProtocolFromUsb(replace)
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось загрузить протокол"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun loadUsbCourses(replace: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                _status.value = repository.startList.loadCoursesFromUsb(replace)
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось загрузить дистанции"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
     fun importCsvText(kind: CsvImportKind, text: String?) {
         if (text.isNullOrBlank()) {
             _status.value = "Не удалось прочитать файл"
@@ -240,6 +278,24 @@ class ChipQueueViewModel(
                 _selectedId.value = null
             }
             _status.value = "Участник № $id удалён из протокола"
+        }
+    }
+
+    fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.startList.saveCourse(name, controls, previousName)
+                _status.value = "Дистанция «${name.trim()}» сохранена."
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось сохранить дистанцию"
+            }
+        }
+    }
+
+    fun deleteCourse(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.startList.deleteCourse(name)
+            _status.value = "Дистанция «$name» удалена."
         }
     }
 
@@ -692,20 +748,49 @@ class ChipQueueViewModel(
     }
 
     private suspend fun handleFinishRead(
-        dump: ru.rogein.chip.parse.ChipDump,
+        dump: ChipDump,
         uid: String,
         blocks: List<ByteArray>,
     ) {
         val person = dump.logicalId?.let { repository.startList.person(it) }
         val course = person?.currentCourse.orEmpty()
-        val who = person?.let { "${it.name} · ${it.currentCourse.ifBlank { "без дистанции" }}" }
-            ?: dump.logicalId?.let { "№ $it" }
-            ?: "без номера"
-        when (val result = repository.enqueue(dump, rawBlocksToHex(blocks), person?.name.orEmpty(), course)) {
+        saveFinishDump(dump, rawBlocksToHex(blocks), person?.name.orEmpty(), course, replace = false)
+    }
+
+    fun confirmFinishReplace() {
+        val pending = _finishReplacePrompt.value ?: return
+        _finishReplacePrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            saveFinishDump(pending.dump, pending.rawHex, pending.personName, pending.courseName, replace = true)
+        }
+    }
+
+    fun cancelFinishReplace() {
+        val pending = _finishReplacePrompt.value
+        _finishReplacePrompt.value = null
+        val id = pending?.logicalId?.toString() ?: "без номера"
+        _status.value = "№ $id не перезаписан."
+    }
+
+    private suspend fun saveFinishDump(
+        dump: ChipDump,
+        rawHex: String,
+        personName: String,
+        course: String,
+        replace: Boolean,
+    ) {
+        val who = personName.ifBlank { dump.logicalId?.let { "№ $it" } ?: "без номера" }
+        val dist = course.ifBlank { "без дистанции" }
+        when (val result = repository.enqueue(dump, rawHex, personName, course, replace)) {
             is EnqueueResult.Duplicate -> {
-                val dist = result.courseName.ifBlank { "без дистанции" }
-                _status.value = "$who уже считан ($dist). Повтор не записан."
-                signalError()
+                _finishReplacePrompt.value = FinishReplacePrompt(
+                    logicalId = result.logicalId,
+                    courseName = result.courseName,
+                    dump = dump,
+                    rawHex = rawHex,
+                    personName = personName,
+                )
+                _status.value = "Данные с чипа ${result.logicalId ?: "—"} уже есть ($dist)."
             }
             is EnqueueResult.Saved -> {
                 repository.requestLiveSend()
@@ -883,6 +968,17 @@ class ChipQueueViewModel(
         blockOrder = null
         pointerEnd = null
         _sessionSummary.value = null
+    }
+
+    fun deleteQueued(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val snapshotError = repository.deleteQueued(id)
+            _status.value = if (snapshotError == null) {
+                "Участник убран из финишного протокола."
+            } else {
+                "Убран из протокола, снимок в Загрузках не обновлён: $snapshotError"
+            }
+        }
     }
 
     fun clearQueue() {

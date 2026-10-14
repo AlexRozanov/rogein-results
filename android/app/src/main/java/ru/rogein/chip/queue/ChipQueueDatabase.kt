@@ -78,8 +78,20 @@ interface ChipQueueDao {
     )
     suspend fun existsByChipAndCourse(logicalId: Int, courseName: String): Boolean
 
+    @Query(
+        """
+        DELETE FROM chip_queue
+        WHERE logicalId = :logicalId
+          AND courseName = :courseName COLLATE NOCASE
+        """,
+    )
+    suspend fun deleteByChipAndCourse(logicalId: Int, courseName: String)
+
     @Query("UPDATE chip_queue SET ackedAt = :ackedAt WHERE id = :id")
     suspend fun ack(id: String, ackedAt: Long)
+
+    @Query("DELETE FROM chip_queue WHERE id = :id")
+    suspend fun deleteById(id: String)
 
     @Query("DELETE FROM chip_queue")
     suspend fun clear()
@@ -110,6 +122,9 @@ interface StartListDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCourse(course: StartCourseEntity)
+
+    @Query("DELETE FROM start_courses WHERE name = :name COLLATE NOCASE")
+    suspend fun deleteCourse(name: String)
 
     @Query("DELETE FROM start_courses")
     suspend fun clearCourses()

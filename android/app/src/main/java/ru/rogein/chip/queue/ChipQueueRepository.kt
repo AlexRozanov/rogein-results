@@ -25,11 +25,15 @@ class ChipQueueRepository(
         rawHex: String = "",
         personName: String = "",
         courseName: String = "",
+        replace: Boolean = false,
     ): EnqueueResult {
         val course = courseName.trim()
         val chipId = dump.logicalId
         if (chipId != null && dao.existsByChipAndCourse(chipId, course)) {
-            return EnqueueResult.Duplicate(chipId, course)
+            if (!replace) {
+                return EnqueueResult.Duplicate(chipId, course)
+            }
+            dao.deleteByChipAndCourse(chipId, course)
         }
         dao.insert(
             QueuedChipEntity(
@@ -51,6 +55,12 @@ class ChipQueueRepository(
             ),
         )
         return EnqueueResult.Saved(publishSnapshot())
+    }
+
+    suspend fun deleteQueued(id: String): String? {
+        dao.deleteById(id)
+        event.markLivePending()
+        return publishSnapshot()
     }
 
     suspend fun clear(): String? {

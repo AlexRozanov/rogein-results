@@ -97,6 +97,10 @@ async fn main() -> anyhow::Result<()> {
             get(get_participant),
         )
         .route("/api/live/{slug}", get(get_live_event).put(put_live_event))
+        .route(
+            "/api/live/{slug}/participants/{source_id}",
+            get(get_live_participant),
+        )
         .route("/api/live/{slug}/stream", get(live_stream))
         .nest_service("/media", media_service)
         .layer(DefaultBodyLimit::max(80 * 1024 * 1024))
@@ -383,50 +387,29 @@ async fn get_participant(
     State(state): State<Arc<AppState>>,
     Path((slug, source_id)): Path<(String, i64)>,
 ) -> Result<Json<ParticipantPublic>, (StatusCode, String)> {
-    let row = sqlx::query_as::<_, ParticipantPublic>(
-        r#"
-        SELECT
-            p.id,
-            p.source_id,
-            p.bib,
-            p.chip_physical,
-            p.chip_logical,
-            p.name,
-            p.gender,
-            p.birth_date,
-            p.age,
-            p.team_id,
-            p.format_name,
-            p.marks,
-            p.path,
-            p.distance_m,
-            p.added_cps,
-            (
-                SELECT r.points_final
-                FROM results r
-                WHERE r.participant_id = p.id
-                ORDER BY r.id
-                LIMIT 1
-            ) AS points_final,
-            (
-                SELECT r.elapsed_seconds
-                FROM results r
-                WHERE r.participant_id = p.id
-                ORDER BY r.id
-                LIMIT 1
-            ) AS elapsed_seconds
-        FROM participants p
-        JOIN events e ON e.id = p.event_id
-        WHERE e.slug = $1 AND p.source_id = $2
-        "#,
-    )
-    .bind(&slug)
-    .bind(source_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?
-    .ok_or((StatusCode::NOT_FOUND, "Participant not found".into()))?;
+    let row = load_participant(&state.pool, &slug, source_id, None)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "Participant not found".into()))?;
     Ok(Json(row))
+}
+
+async fn get_live_participant(
+    State(state): State<Arc<AppState>>,
+    Path((slug, source_id)): Path<(String, i64)>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let slug = normalize_slug(&slug)?;
+    let row = load_participant(&state.pool, &slug, source_id, Some("live"))
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "Participant not found".into()))?;
+    Ok((
+        [(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+        )],
+        Json(row),
+    ))
 }
 
 async fn put_event(
@@ -488,6 +471,58 @@ async fn put_event_map(
         }
     })?;
     Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
+}
+
+async fn load_participant(
+    pool: &PgPool,
+    slug: &str,
+    source_id: i64,
+    status: Option<&str>,
+) -> Result<Option<ParticipantPublic>, sqlx::Error> {
+    sqlx::query_as::<_, ParticipantPublic>(
+        r#"
+        SELECT
+            p.id,
+            p.source_id,
+            p.bib,
+            p.chip_physical,
+            p.chip_logical,
+            p.name,
+            p.gender,
+            p.birth_date,
+            p.age,
+            p.team_id,
+            p.format_name,
+            p.marks,
+            p.path,
+            p.distance_m,
+            p.added_cps,
+            (
+                SELECT r.points_final
+                FROM results r
+                WHERE r.participant_id = p.id
+                ORDER BY r.id
+                LIMIT 1
+            ) AS points_final,
+            (
+                SELECT r.elapsed_seconds
+                FROM results r
+                WHERE r.participant_id = p.id
+                ORDER BY r.id
+                LIMIT 1
+            ) AS elapsed_seconds
+        FROM participants p
+        JOIN events e ON e.id = p.event_id
+        WHERE e.slug = $1
+          AND p.source_id = $2
+          AND ($3::text IS NULL OR e.status = $3)
+        "#,
+    )
+    .bind(slug)
+    .bind(source_id)
+    .bind(status)
+    .fetch_optional(pool)
+    .await
 }
 
 async fn load_event_detail(

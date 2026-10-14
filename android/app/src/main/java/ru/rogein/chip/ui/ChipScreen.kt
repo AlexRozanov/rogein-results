@@ -1,5 +1,6 @@
 package ru.rogein.chip.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
@@ -40,11 +41,14 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -87,6 +91,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
     val section by viewModel.section.collectAsStateWithLifecycle()
     val morePage by viewModel.morePage.collectAsStateWithLifecycle()
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
+    val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
     val selectedId by viewModel.selectedId.collectAsStateWithLifecycle()
     val addingNew by viewModel.addingNew.collectAsStateWithLifecycle()
@@ -101,7 +106,6 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
         viewModel.scoredResults(items, people, courses, settings, corrections, exclusions)
     }
     var confirmNewStart by remember { mutableStateOf(false) }
-    var replaceCsv by remember { mutableStateOf(true) }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
     val showStatus = !imeVisible && shouldShowStatus(status, section)
@@ -128,11 +132,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                 },
                 actions = {
                     if (section == AppSection.Chip) {
-                        CompactBarAction("Обновить", onClick = viewModel::reloadStartList)
                         CompactBarAction("Новый старт", onClick = { confirmNewStart = true })
-                        if (mode == ChipMode.Finish && items.isNotEmpty()) {
-                            CompactBarAction("Очистить", onClick = viewModel::clearQueue)
-                        }
                     }
                 },
                 expandedHeight = 48.dp,
@@ -204,6 +204,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     chipReady = chipReady,
                     busy = busy,
                     mode = mode,
+                    onDeleteQueued = viewModel::deleteQueued,
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Protocol -> ProtocolScreen(
@@ -224,22 +225,26 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     onNewCourse = viewModel::onNewCourse,
                     onSavePerson = viewModel::saveManualPerson,
                     onDeletePerson = viewModel::deletePerson,
-                    onPickProtocol = {
-                        viewModel.prepareCsvImport(replaceCsv)
+                    onUsbProtocol = viewModel::loadUsbProtocol,
+                    onUsbCourses = viewModel::loadUsbCourses,
+                    onPickProtocol = { replace ->
+                        viewModel.prepareCsvImport(replace)
                         csvPicker.pick(CsvImportKind.Protocol)
                     },
-                    onPickCourses = {
-                        viewModel.prepareCsvImport(replaceCsv)
+                    onPickCourses = { replace ->
+                        viewModel.prepareCsvImport(replace)
                         csvPicker.pick(CsvImportKind.Courses)
                     },
-                    replaceExisting = replaceCsv,
-                    onReplaceExisting = { replaceCsv = it },
+                    onSaveCourse = viewModel::saveCourse,
+                    onDeleteCourse = viewModel::deleteCourse,
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Results -> ResultsScreen(
                     results = results,
                     courses = courses,
                     corrections = corrections,
+                    startCp = settings.startCp,
+                    finishCp = settings.finishCp,
                     liveNote = settings.liveNote,
                     livePending = settings.livePending,
                     onSendLive = viewModel::sendLiveNow,
@@ -316,6 +321,25 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
             },
         )
     }
+    finishReplacePrompt?.let { prompt ->
+        val chipLabel = prompt.logicalId?.toString() ?: "—"
+        val courseLabel = prompt.courseName.ifBlank { "без дистанции" }
+        AlertDialog(
+            onDismissRequest = viewModel::cancelFinishReplace,
+            title = { Text("Перезаписать данные?") },
+            text = {
+                Text(
+                    "Данные с чипа $chipLabel уже загружены для дистанции $courseLabel.\nПерезаписать?",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmFinishReplace) { Text("Да") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelFinishReplace) { Text("Нет") }
+            },
+        )
+    }
     if (overwritePrompt) {
         AlertDialog(
             onDismissRequest = viewModel::cancelOverwrite,
@@ -349,6 +373,7 @@ private fun ChipSection(
     chipReady: Boolean,
     busy: Boolean,
     mode: ChipMode,
+    onDeleteQueued: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
@@ -436,7 +461,7 @@ private fun ChipSection(
                     .weight(1f),
             ) {
                 items(items, key = { it.id }) { item ->
-                    QueueCard(item)
+                    SwipeFinishItem(item, onDelete = { onDeleteQueued(item.id) })
                 }
             }
         }
@@ -785,6 +810,38 @@ private fun compactStatus(text: String): String {
             "Не удалось открыть файл протокола"
         t.length > 120 -> t.take(117) + "…"
         else -> t
+    }
+}
+
+@Composable
+private fun SwipeFinishItem(item: QueuedChipEntity, onDelete: () -> Unit) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                onDelete()
+                true
+            } else {
+                false
+            }
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF8B3A3A))
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Text("Удалить", color = Color.White, style = MaterialTheme.typography.titleMedium)
+            }
+        },
+        enableDismissFromStartToEnd = false,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        QueueCard(item)
     }
 }
 

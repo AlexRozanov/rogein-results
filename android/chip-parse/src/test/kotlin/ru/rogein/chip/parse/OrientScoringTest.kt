@@ -69,6 +69,147 @@ class OrientScoringTest {
     }
 
     @Test
+    fun courseProgressCountsRepeatMissesSeparately() {
+        val progress = courseProgress(listOf(241, 240), listOf(241, 250, 250, 240))
+        assertEquals(listOf(true, false, false, true), progress.map { it.taken })
+        assertEquals(listOf(250 to 2), addableCourseCps(progress))
+    }
+
+    @Test
+    fun courseProgressOneRepeatTakenFromChip() {
+        val progress = courseProgress(listOf(241, 250, 240), listOf(241, 250, 250, 240))
+        assertEquals(listOf(true, true, false, true), progress.map { it.taken })
+        assertEquals(listOf(250 to 1), addableCourseCps(progress))
+    }
+
+    @Test
+    fun classifyMarksExtraAndOutOfOrder() {
+        val marks = listOf(
+            mark(241, 10, 0),
+            mark(99, 10, 5),
+            mark(32, 10, 8),
+            mark(31, 10, 10),
+            mark(240, 10, 20),
+        )
+        val classified = classifyActualPunches(marks, listOf(31, 32), 241, 240)
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.Extra,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+            ),
+            classified.map { it.kind },
+        )
+        assertEquals(listOf(false, false, true, true, true), classified.map { it.wrong })
+    }
+
+    @Test
+    fun orientOrderRequiresSubsequenceNotJustPresence() {
+        val course = listOf(241, 30, 35, 67, 78, 240)
+        fun run(cps: List<Int>) = calculateOrientResult(
+            cps.mapIndexed { i, cp -> mark(cp, 10, i) },
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to course),
+            emptySet(),
+            emptyList(),
+            emptyMap(),
+        )
+        assertEquals(STATUS_DQ, run(listOf(241, 35, 67, 78, 240)).status)
+        assertEquals(STATUS_DQ, run(listOf(241, 30, 67, 35, 78, 240)).status)
+        assertEquals(STATUS_OK, run(listOf(241, 30, 35, 30, 67, 78, 240)).status)
+        assertEquals(STATUS_OK, run(listOf(241, 30, 35, 67, 67, 30, 78, 240)).status)
+        assertEquals(STATUS_OK, run(listOf(241, 30, 35, 67, 78, 240)).status)
+    }
+
+    @Test
+    fun swappedFirstControlsAreDsqOnRoschaD1() {
+        val course = listOf(
+            36, 31, 33, 32, 34, 59, 58, 57, 56, 39, 55, 54, 42, 46, 50,
+            51, 52, 53, 49, 48, 44, 60, 45, 43, 40, 41, 47, 37, 38,
+        )
+        fun run(inner: List<Int>) = calculateOrientResult(
+            (listOf(241) + inner + listOf(240)).mapIndexed { i, cp -> mark(cp, 10, i) },
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to course),
+            emptySet(),
+            emptyList(),
+            emptyMap(),
+        )
+        assertEquals(STATUS_OK, run(course).status)
+        assertEquals(STATUS_DQ, run(listOf(31, 36) + course.drop(2)).status)
+    }
+
+    @Test
+    fun classifyMarksKeepsAllowedExtrasAndFlagsEarlyCourseCps() {
+        val course = listOf(241, 30, 35, 67, 78, 240)
+        fun kinds(cps: List<Int>) = classifyActualPunches(
+            cps.mapIndexed { i, cp -> mark(cp, 10, i) },
+            course,
+            241,
+            240,
+        ).map { it.kind }
+
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+            ),
+            kinds(listOf(241, 35, 67, 78, 240)),
+        )
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.Ok,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+                PunchKind.OutOfOrder,
+            ),
+            kinds(listOf(241, 30, 67, 35, 78, 240)),
+        )
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Finish,
+            ),
+            kinds(listOf(241, 30, 35, 30, 67, 78, 240)),
+        )
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Finish,
+            ),
+            kinds(listOf(241, 30, 35, 67, 67, 30, 78, 240)),
+        )
+    }
+
+    @Test
+    fun courseProgressAddCoversOneRepeat() {
+        val progress = courseProgress(listOf(241, 240), listOf(241, 250, 250, 240), mapOf(250 to 1))
+        assertEquals(listOf(true, true, false, true), progress.map { it.taken })
+        assertEquals(true, progress[1].added)
+        assertEquals(listOf(250 to 1), addableCourseCps(progress))
+    }
+
+    @Test
     fun missingControlIsDsq() {
         val marks = listOf(
             mark(241, 10, 0),
