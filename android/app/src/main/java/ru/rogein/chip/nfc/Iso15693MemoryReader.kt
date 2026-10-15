@@ -7,6 +7,12 @@ import ru.rogein.chip.parse.BLOCK_SIZE
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.MIN_BLOCK_COUNT
 import ru.rogein.chip.parse.SfrChipMemory
+import ru.rogein.chip.parse.SfrChipParser
+
+data class ChipMemoryRead(
+    val blocks: List<ByteArray>,
+    val blockCount: Int,
+)
 
 class Iso15693MemoryReader {
     fun probe(tag: Tag): Boolean {
@@ -44,26 +50,66 @@ class Iso15693MemoryReader {
         }
     }
 
-    fun readAllBlocks(tag: Tag): List<ByteArray> {
+    fun readAllBlocks(tag: Tag): List<ByteArray> = readConnected(tag) { nfc, uid, _ ->
+        val limit = queryLimit(nfc, uid)
+        val blocks = ArrayList<ByteArray>(limit)
+        for (block in 0 until limit) {
+            try {
+                blocks += readBlock(nfc, uid, block)
+            } catch (e: Exception) {
+                if (blocks.size >= MIN_BLOCK_COUNT) break
+                throw e
+            }
+        }
+        if (blocks.size < MIN_BLOCK_COUNT) {
+            error("чип вернул слишком мало блоков: ${blocks.size}")
+        }
+        ChipMemoryRead(blocks, limit)
+    }.blocks
+
+    /** Блоки 3 и 4, затем 5…max(end HID, end NFC Tools). Размер чипа — из Get System Information. */
+    fun readFinish(tag: Tag): ChipMemoryRead = readConnected(tag) { nfc, uid, declared ->
+        val b3 = readBlock(nfc, uid, 3)
+        val b4 = readBlock(nfc, uid, 4)
+        val end = maxOf(SfrChipParser.maxPointerCandidate(b4, declared), 6)
+            .coerceAtMost((declared - 1).coerceAtLeast(4))
+        val size = maxOf(end + 1, MIN_BLOCK_COUNT)
+        val blocks = MutableList(size) { ByteArray(BLOCK_SIZE) }
+        blocks[3] = b3
+        blocks[4] = b4
+        var lastOk = 4
+        for (i in 5..end) {
+            try {
+                blocks[i] = readBlock(nfc, uid, i)
+                lastOk = i
+            } catch (e: Exception) {
+                if (lastOk < MIN_BLOCK_COUNT - 1) throw e
+                break
+            }
+        }
+        val ready = if (lastOk + 1 < blocks.size) blocks.take(lastOk + 1) else blocks
+        ChipMemoryRead(ready, declared)
+    }
+
+    fun readHeader(tag: Tag): ChipMemoryRead = readConnected(tag) { nfc, uid, declared ->
+        val blocks = MutableList(MIN_BLOCK_COUNT) { ByteArray(BLOCK_SIZE) }
+        blocks[3] = readBlock(nfc, uid, 3)
+        blocks[4] = readBlock(nfc, uid, 4)
+        ChipMemoryRead(blocks, declared)
+    }
+
+    private fun queryLimit(nfc: NfcV, uid: ByteArray): Int =
+        queryBlockCount(nfc, uid)?.coerceIn(MIN_BLOCK_COUNT, BLOCK_COUNT) ?: BLOCK_COUNT
+
+    private fun readConnected(
+        tag: Tag,
+        body: (NfcV, ByteArray, Int) -> ChipMemoryRead,
+    ): ChipMemoryRead {
         val nfc = NfcV.get(tag) ?: error("Метка не ISO 15693 (NfcV)")
         nfc.connect()
         try {
             val uid = tag.id
-            val declared = queryBlockCount(nfc, uid)
-            val limit = declared?.coerceIn(MIN_BLOCK_COUNT, BLOCK_COUNT) ?: BLOCK_COUNT
-            val blocks = ArrayList<ByteArray>(limit)
-            for (block in 0 until limit) {
-                try {
-                    blocks += readBlock(nfc, uid, block)
-                } catch (e: Exception) {
-                    if (blocks.size >= MIN_BLOCK_COUNT) break
-                    throw e
-                }
-            }
-            if (blocks.size < MIN_BLOCK_COUNT) {
-                error("чип вернул слишком мало блоков: ${blocks.size}")
-            }
-            return blocks
+            return body(nfc, uid, queryLimit(nfc, uid))
         } finally {
             closeQuietly(nfc)
         }

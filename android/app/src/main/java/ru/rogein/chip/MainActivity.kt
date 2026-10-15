@@ -25,10 +25,12 @@ import ru.rogein.chip.nfc.formatUid
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipMemory
+import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.queue.ChipQueueRepository
 import ru.rogein.chip.ui.ChipFeedback
 import ru.rogein.chip.ui.ChipIo
 import ru.rogein.chip.ui.ChipQueueViewModel
+import ru.rogein.chip.ui.ChipMode
 import ru.rogein.chip.ui.ChipScreen
 import ru.rogein.chip.ui.CsvImportKind
 import ru.rogein.chip.ui.CsvPicker
@@ -155,6 +157,29 @@ class MainActivity : ComponentActivity() {
                     runOnUiThread { viewModel.reportProgress("Запись прохождения $done/$total") }
                 }
             }
+
+            override fun writeStationProgram(
+                order: BlockOrder,
+                command: StationCommand,
+                controlNumber: Int?,
+                oldPointerEnd: Int?,
+                blockCount: Int,
+            ) {
+                val tag = sessionTag ?: error("Чип убран")
+                val now = LocalTime.now()
+                val plan = SfrChipMemory.stationProgramPlan(
+                    command,
+                    now.hour,
+                    now.minute,
+                    now.second,
+                    oldPointerEnd,
+                    blockCount,
+                    controlNumber,
+                )
+                write(tag, order, plan) { done, total ->
+                    runOnUiThread { viewModel.reportProgress("Запись станции $done/$total") }
+                }
+            }
         })
         viewModel.attachFeedback(object : ChipFeedback {
             override fun signalSuccess() {
@@ -222,11 +247,24 @@ class MainActivity : ComponentActivity() {
         io.execute {
             try {
                 val uid = formatUid(tag.id)
-                val blocks = synchronized(nfcLock) { reader.readAllBlocks(tag) }
+                val mode = viewModel.mode.value
+                val (blocks, declared) = synchronized(nfcLock) {
+                    when (mode) {
+                        ChipMode.Finish -> {
+                            val read = reader.readFinish(tag)
+                            read.blocks to read.blockCount
+                        }
+                        ChipMode.Station -> {
+                            val read = reader.readHeader(tag)
+                            read.blocks to read.blockCount
+                        }
+                        ChipMode.Issue, ChipMode.Tests -> reader.readAllBlocks(tag) to null
+                    }
+                }
                 sessionTag = tag
                 misses = 0
                 runOnUiThread {
-                    viewModel.onChipBlocks(uid, blocks)
+                    viewModel.onChipBlocks(uid, blocks, declared)
                     handler.postDelayed(presenceTick, PRESENCE_MS)
                 }
             } catch (e: Exception) {

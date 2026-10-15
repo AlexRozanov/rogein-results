@@ -51,6 +51,55 @@ class SfrChipMemoryTest {
     }
 
     @Test
+    fun stationProgramWritesControlBlocks() {
+        val plan = SfrChipMemory.stationProgramPlan(
+            CP_START, 12, 0, 0, oldPointerEnd = 8, blockCount = 64,
+        )
+        val byBlock = plan.associate { it.first to it.second }
+        assertArrayEquals(ByteArray(4), byBlock[3])
+        assertArrayEquals(ByteArray(4), byBlock[0])
+        assertArrayEquals(ByteArray(4), byBlock[7])
+        assertArrayEquals(ByteArray(4), byBlock[8])
+        assertFalse(byBlock.containsKey(9))
+        assertArrayEquals(byteArrayOf(0x00, 0x01, 0x00, 0x00), byBlock[4])
+        assertArrayEquals(byteArrayOf(CP_START.toByte(), 0x12, 0x00, 0x00), byBlock[5])
+        assertArrayEquals(byteArrayOf(0x00, 0x25, 0x00, 0x00), byBlock[6])
+        assertEquals(3, plan.first().first)
+    }
+
+    @Test
+    fun stationControlWritesPunchNumber() {
+        val plan = SfrChipMemory.stationProgramPlan(
+            StationCommand.Control, 8, 15, 0, oldPointerEnd = 7, blockCount = 64, controlNumber = 31,
+        )
+        val byBlock = plan.associate { it.first to it.second }
+        assertArrayEquals(byteArrayOf(0x00, 0x01, 0x00, 0x00), byBlock[4])
+        assertArrayEquals(byteArrayOf(31, 0x08, 0x15, 0x00), byBlock[5])
+        assertArrayEquals(byteArrayOf(0x00, 0x25, 0x00, 0x00), byBlock[6])
+    }
+
+    @Test
+    fun stationServiceWritesOnlyModeBlock() {
+        val plan = SfrChipMemory.stationProgramPlan(
+            StationCommand.Battery, 12, 0, 0, oldPointerEnd = 8, blockCount = 64,
+        )
+        val byBlock = plan.associate { it.first to it.second }
+        assertArrayEquals(ByteArray(4), byBlock[3])
+        assertArrayEquals(STATION_BATTERY_BLOCK, byBlock[4])
+        assertArrayEquals(ByteArray(4), byBlock[5])
+        assertArrayEquals(ByteArray(4), byBlock[6])
+        assertArrayEquals(ByteArray(4), byBlock[8])
+        val active = SfrChipMemory.stationProgramPlan(
+            StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
+        ).associate { it.first to it.second }
+        assertArrayEquals(STATION_ACTIVE_BLOCK, active[4])
+        val passive = SfrChipMemory.stationProgramPlan(
+            StationCommand.Passive, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
+        ).associate { it.first to it.second }
+        assertArrayEquals(STATION_PASSIVE_BLOCK, passive[4])
+    }
+
+    @Test
     fun punchBlockIsCpThenBcdTime() {
         assertArrayEquals(
             byteArrayOf(31, 0x10, 0x15, 0x45),

@@ -14,11 +14,13 @@ import kotlinx.coroutines.launch
 import ru.rogein.chip.event.buildEventSlug
 import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
+import ru.rogein.chip.parse.CP_CLEAR
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.Punch
+import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.parse.TestCoursePlan
 import ru.rogein.chip.parse.courseKey
@@ -34,7 +36,17 @@ import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
 import java.time.LocalTime
 
-enum class ChipMode { Issue, Finish, Tests }
+enum class ChipMode { Issue, Finish, Station, Tests }
+
+enum class StationProgram(val command: StationCommand, val title: String) {
+    Control(StationCommand.Control, "КП"),
+    Start(StationCommand.Start, "старт"),
+    Finish(StationCommand.Finish, "финиш"),
+    Clear(StationCommand.Clear, "очистка"),
+    Active(StationCommand.Active, "активный режим"),
+    Passive(StationCommand.Passive, "пассивный режим"),
+    Battery(StationCommand.Battery, "проверка батареи"),
+}
 
 enum class AppSection { Chip, Protocol, Results, More }
 
@@ -57,6 +69,14 @@ data class IssueOverwritePrompt(
     val newCourse: String,
 )
 
+data class StationWritePrompt(
+    val program: StationProgram,
+    val controlNumber: Int?,
+    val order: BlockOrder,
+    val oldPointerEnd: Int?,
+    val blockCount: Int,
+)
+
 interface CsvPicker {
     fun pick(kind: CsvImportKind)
 }
@@ -66,6 +86,13 @@ interface ChipIo {
     fun writeLogicalId(order: BlockOrder, id: Int)
     fun issue(order: BlockOrder, id: Int, pointerEnd: Int?, blockCount: Int)
     fun writeTestCourse(order: BlockOrder, id: Int, punches: List<Punch>, pointerEnd: Int?, blockCount: Int)
+    fun writeStationProgram(
+        order: BlockOrder,
+        command: StationCommand,
+        controlNumber: Int?,
+        oldPointerEnd: Int?,
+        blockCount: Int,
+    )
 }
 
 interface ChipFeedback {
@@ -121,6 +148,15 @@ class ChipQueueViewModel(
 
     private val _issueOverwritePrompt = MutableStateFlow<IssueOverwritePrompt?>(null)
     val issueOverwritePrompt = _issueOverwritePrompt.asStateFlow()
+
+    private val _stationWritePrompt = MutableStateFlow<StationWritePrompt?>(null)
+    val stationWritePrompt = _stationWritePrompt.asStateFlow()
+
+    private val _stationProgram = MutableStateFlow(StationProgram.Control)
+    val stationProgram = _stationProgram.asStateFlow()
+
+    private val _stationControlNumber = MutableStateFlow("")
+    val stationControlNumber = _stationControlNumber.asStateFlow()
 
     private val _status = MutableStateFlow("Приложите чип к телефону")
     val status = _status.asStateFlow()
@@ -497,9 +533,24 @@ class ChipQueueViewModel(
     fun setMode(mode: ChipMode) {
         _mode.value = mode
         _addingNew.value = false
+        if (mode != ChipMode.Station) {
+            _stationWritePrompt.value = null
+        }
         if (mode == ChipMode.Tests) {
             applyTestCourseFromChip()
         }
+        promptStatus()
+    }
+
+    fun setStationProgram(program: StationProgram) {
+        _stationProgram.value = program
+        _stationWritePrompt.value = null
+        promptStatus()
+    }
+
+    fun onStationControlNumber(value: String) {
+        _stationControlNumber.value = value.filter { it.isDigit() }.take(3)
+        _stationWritePrompt.value = null
         promptStatus()
     }
 
@@ -672,9 +723,31 @@ class ChipQueueViewModel(
                 else -> "Выберите участника или приложите чип"
             }
             ChipMode.Finish -> "Приложите чип — отметки сохранятся"
+            ChipMode.Station -> stationPrompt()
             ChipMode.Tests -> testsPrompt()
         }
     }
+
+    private fun stationPrompt(): String {
+        val program = _stationProgram.value
+        if (program == StationProgram.Control && parsedStationControlNumber() == null) {
+            return "Укажите номер КП (1…255, кроме 240, 241 и 243), затем приложите чип."
+        }
+        val label = stationProgramLabel(program, parsedStationControlNumber())
+        return "Станция «$label». Приложите чип — запись только после подтверждения."
+    }
+
+    private fun parsedStationControlNumber(): Int? {
+        val n = _stationControlNumber.value.toIntOrNull() ?: return null
+        return n.takeIf { it in 1..255 && it != CP_START && it != CP_FINISH && it != CP_CLEAR }
+    }
+
+    private fun stationProgramLabel(program: StationProgram, controlNumber: Int?): String =
+        if (program == StationProgram.Control) {
+            controlNumber?.let { "КП $it" } ?: "КП"
+        } else {
+            program.title
+        }
 
     fun markReading() {
         _busy.value = true
@@ -706,9 +779,9 @@ class ChipQueueViewModel(
         _status.value = text
     }
 
-    fun onChipBlocks(uid: String, blocks: List<ByteArray>) {
+    fun onChipBlocks(uid: String, blocks: List<ByteArray>, declaredBlockCount: Int? = null) {
         val now = System.currentTimeMillis()
-        if (uid == lastUid && now - lastAt < 2_000) {
+        if (uid == lastUid && now - lastAt < 2_000 && _mode.value != ChipMode.Station) {
             _busy.value = false
             return
         }
@@ -717,7 +790,11 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
-                val dump = SfrChipParser.parse(uid, blocks)
+                if (_mode.value == ChipMode.Station) {
+                    handleStationRead(blocks, declaredBlockCount)
+                    return@launch
+                }
+                val dump = SfrChipParser.parse(uid, blocks, declaredBlockCount)
                 blockOrder = dump.blockOrder
                 pointerEnd = dump.pointerEnd
                 punchCount = dump.punches.size
@@ -729,6 +806,7 @@ class ChipQueueViewModel(
                 when (_mode.value) {
                     ChipMode.Issue -> handleIssueRead(dump.logicalId)
                     ChipMode.Finish -> handleFinishRead(dump, uid, blocks)
+                    ChipMode.Station -> Unit
                     ChipMode.Tests -> handleTestsRead()
                 }
             } catch (e: Exception) {
@@ -788,7 +866,13 @@ class ChipQueueViewModel(
         uid: String,
         blocks: List<ByteArray>,
     ) {
-        val person = dump.logicalId?.let { repository.startList.person(it) }
+        val logicalId = dump.logicalId
+        if (logicalId == null) {
+            _status.value = finishChipError(blocks)
+            signalError()
+            return
+        }
+        val person = repository.startList.person(logicalId)
         val course = person?.currentCourse.orEmpty()
         saveFinishDump(dump, rawBlocksToHex(blocks), person?.name.orEmpty(), course, replace = false)
     }
@@ -1053,9 +1137,87 @@ class ChipQueueViewModel(
         }
     }
 
+    private fun finishChipError(blocks: List<ByteArray>): String {
+        val what = SfrChipParser.stationRole(blocks)?.let {
+            "Это ${SfrChipParser.stationCommandLabel(it.command, it.cp)}."
+        } ?: "На чипе нет логического номера участника. Сначала выдайте его на вкладке «Выдача»."
+        return "Этот чип нельзя принять на финише. $what"
+    }
+
     private fun handleTestsRead() {
         applyTestCourseFromChip()
         _status.value = testsPrompt()
+    }
+
+    private fun handleStationRead(blocks: List<ByteArray>, declaredBlockCount: Int?) {
+        if (_mode.value != ChipMode.Station) return
+        val count = declaredBlockCount ?: chipBlockCount
+        val b3 = blocks.getOrNull(3) ?: ByteArray(4)
+        val b4 = blocks.getOrNull(4) ?: ByteArray(4)
+        val order = SfrChipParser.wireOrder(b3, b4, count)
+        val oldEnd = SfrChipParser.maxPointerCandidate(b4, count)
+        blockOrder = order
+        pointerEnd = oldEnd
+        chipBlockCount = count
+        _chipReady.value = true
+        _chipLogicalId.value = null
+        val program = _stationProgram.value
+        val controlNumber = parsedStationControlNumber()
+        if (program == StationProgram.Control && controlNumber == null) {
+            _status.value = "Укажите номер КП (1…255, кроме 240, 241 и 243)."
+            signalError()
+            return
+        }
+        _stationWritePrompt.value = StationWritePrompt(
+            program = program,
+            controlNumber = controlNumber,
+            order = order,
+            oldPointerEnd = oldEnd.takeIf { it >= 5 },
+            blockCount = count,
+        )
+        _status.value = "Чип на месте. Подтвердите запись станции «${stationProgramLabel(program, controlNumber)}»."
+    }
+
+    fun confirmStationWrite() {
+        if (_mode.value != ChipMode.Station) {
+            _stationWritePrompt.value = null
+            return
+        }
+        val pending = _stationWritePrompt.value ?: return
+        _stationWritePrompt.value = null
+        val io = chipIo
+        val order = pending.order
+        if (!_chipReady.value || io == null) {
+            _status.value = "Чип убран. Приложите его снова и подтвердите."
+            signalError()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                io.writeStationProgram(
+                    order,
+                    pending.program.command,
+                    pending.controlNumber,
+                    pending.oldPointerEnd,
+                    pending.blockCount,
+                )
+                val label = stationProgramLabel(pending.program, pending.controlNumber)
+                _status.value = "На чип записана станция «$label». Приложите этот чип к станции."
+                signalSuccess()
+            } catch (e: Exception) {
+                forgetChip()
+                _status.value = e.message ?: "Не удалось записать программу станции"
+                signalError()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun cancelStationWrite() {
+        _stationWritePrompt.value = null
+        _status.value = "Запись станции отменена. Чип не изменён."
     }
 
     private fun forgetChip() {

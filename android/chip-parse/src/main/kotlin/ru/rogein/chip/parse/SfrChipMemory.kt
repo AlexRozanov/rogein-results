@@ -11,6 +11,78 @@ object SfrChipMemory {
         return byteArrayOf(0, bcd(hour), bcd(minute), bcd(second))
     }
 
+    /**
+     * Программатор станции: как в SFR basic, всё лишнее (номер, время очистки, отметки) — нули.
+     * Иначе финиш увидит старый логический номер.
+     * Старт/финиш/очистка/КП: блоки 4–6. Активный/пассивный/батарея: только блок 4, 5–6 обнуляются.
+     */
+    fun stationProgramPlan(
+        command: StationCommand,
+        hour: Int,
+        minute: Int,
+        second: Int,
+        oldPointerEnd: Int?,
+        blockCount: Int = BLOCK_COUNT,
+        controlNumber: Int? = null,
+    ): List<Pair<Int, ByteArray>> {
+        require(blockCount in MIN_BLOCK_COUNT..BLOCK_COUNT) { "blockCount $blockCount" }
+        val zeros = ByteArray(BLOCK_SIZE)
+        val lastWritable = blockCount - 1
+        val lastPunch = when (oldPointerEnd) {
+            null -> lastWritable
+            in 5..lastWritable -> oldPointerEnd
+            else -> lastWritable
+        }
+        val plan = ArrayList<Pair<Int, ByteArray>>(lastPunch + 4)
+        plan += 3 to zeros.copyOf()
+        plan += 0 to zeros.copyOf()
+        plan += 1 to zeros.copyOf()
+        plan += 2 to zeros.copyOf()
+        for (block in 7..lastPunch) {
+            plan += block to zeros.copyOf()
+        }
+        val cp = command.controlCp ?: controlNumber?.also(::requireStationControlNumber)
+        if (cp != null) {
+            plan += 4 to STATION_MODE_BLOCK.copyOf()
+            plan += 5 to punchBlock(cp, hour, minute, second)
+            plan += 6 to STATION_PARAM_BLOCK.copyOf()
+        } else {
+            require(command.controlCp == null && command != StationCommand.Control) {
+                "для КП нужен номер 1…255, кроме $CP_START, $CP_FINISH, $CP_CLEAR"
+            }
+            plan += 4 to command.modeBlock.copyOf()
+            plan += 5 to zeros.copyOf()
+            plan += 6 to zeros.copyOf()
+        }
+        return plan
+    }
+
+    fun stationProgramPlan(
+        cp: Int,
+        hour: Int,
+        minute: Int,
+        second: Int,
+        oldPointerEnd: Int?,
+        blockCount: Int = BLOCK_COUNT,
+    ): List<Pair<Int, ByteArray>> {
+        val command = StationCommand.fromPunchCp(cp)
+        return stationProgramPlan(
+            command,
+            hour,
+            minute,
+            second,
+            oldPointerEnd,
+            blockCount,
+            controlNumber = cp.takeIf { command == StationCommand.Control },
+        )
+    }
+
+    fun requireStationControlNumber(cp: Int) {
+        require(cp in 1..255 && cp != CP_START && cp != CP_FINISH && cp != CP_CLEAR) {
+            "номер КП станции 1…255, кроме старта $CP_START, финиша $CP_FINISH и очистки $CP_CLEAR"
+        }
+    }
+
     fun punchBlock(cp: Int, hour: Int, minute: Int, second: Int): ByteArray {
         require(cp in 1..255) { "номер КП от 1 до 255" }
         require(hour in 0..23 && minute in 0..59 && second in 0..59)

@@ -3,6 +3,7 @@ package ru.rogein.chip.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SwipeToDismissBox
@@ -98,6 +100,9 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
+    val stationWritePrompt by viewModel.stationWritePrompt.collectAsStateWithLifecycle()
+    val stationProgram by viewModel.stationProgram.collectAsStateWithLifecycle()
+    val stationControlNumber by viewModel.stationControlNumber.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
     val selectedId by viewModel.selectedId.collectAsStateWithLifecycle()
     val addingNew by viewModel.addingNew.collectAsStateWithLifecycle()
@@ -213,6 +218,10 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     people = people,
                     busy = busy,
                     mode = mode,
+                    stationProgram = stationProgram,
+                    stationControlNumber = stationControlNumber,
+                    onStationProgram = viewModel::setStationProgram,
+                    onStationControlNumber = viewModel::onStationControlNumber,
                     onDeleteQueued = viewModel::deleteQueued,
                     modifier = Modifier.weight(1f),
                 )
@@ -330,6 +339,23 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
             },
         )
     }
+    stationWritePrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = viewModel::cancelStationWrite,
+            title = { Text("Записать станцию?") },
+            text = {
+                Text(stationWriteConfirmText(prompt.program, prompt.controlNumber))
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmStationWrite) {
+                    Text("Записать", color = Color(0xFF8B3A3A))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelStationWrite) { Text("Отмена") }
+            },
+        )
+    }
     issueOverwritePrompt?.let { prompt ->
         AlertDialog(
             onDismissRequest = viewModel::cancelIssueOverwrite,
@@ -399,6 +425,10 @@ private fun ChipSection(
     people: List<StartPerson>,
     busy: Boolean,
     mode: ChipMode,
+    stationProgram: StationProgram,
+    stationControlNumber: String,
+    onStationProgram: (StationProgram) -> Unit,
+    onStationControlNumber: (String) -> Unit,
     onDeleteQueued: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -408,7 +438,8 @@ private fun ChipSection(
             selectedTabIndex = when (mode) {
                 ChipMode.Issue -> 0
                 ChipMode.Finish -> 1
-                ChipMode.Tests -> 2
+                ChipMode.Station -> 2
+                ChipMode.Tests -> 3
             },
             edgePadding = 8.dp,
         ) {
@@ -421,6 +452,11 @@ private fun ChipSection(
                 selected = mode == ChipMode.Finish,
                 onClick = { viewModel.setMode(ChipMode.Finish) },
                 text = { Text("Финиш") },
+            )
+            Tab(
+                selected = mode == ChipMode.Station,
+                onClick = { viewModel.setMode(ChipMode.Station) },
+                text = { Text("Станция") },
             )
             Tab(
                 selected = mode == ChipMode.Tests,
@@ -450,6 +486,14 @@ private fun ChipSection(
                 onCurrentCourse = viewModel::setCurrentCourse,
                 onExtraCourse = viewModel::onExtraCourse,
                 onAddCourse = viewModel::addSelectedCourse,
+                modifier = Modifier.weight(1f),
+            )
+        } else if (mode == ChipMode.Station) {
+            StationPanel(
+                program = stationProgram,
+                controlNumber = stationControlNumber,
+                onProgram = onStationProgram,
+                onControlNumber = onStationControlNumber,
                 modifier = Modifier.weight(1f),
             )
         } else if (mode == ChipMode.Tests) {
@@ -628,6 +672,131 @@ private fun IssuePanel(
             modifier = Modifier.weight(1f),
         )
     }
+}
+
+@Composable
+private fun StationPanel(
+    program: StationProgram,
+    controlNumber: String,
+    onProgram: (StationProgram) -> Unit,
+    onControlNumber: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "Программа для полевой станции. Чип после записи нельзя использовать как чип участника.",
+            color = Color(0xFF8B3A3A),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        StationChoiceGroup(
+            title = "Роль станции",
+            items = listOf(
+                StationProgram.Control,
+                StationProgram.Start,
+                StationProgram.Finish,
+                StationProgram.Clear,
+            ),
+            program = program,
+            onProgram = onProgram,
+        )
+        if (program == StationProgram.Control) {
+            OutlinedTextField(
+                value = controlNumber,
+                onValueChange = onControlNumber,
+                singleLine = true,
+                label = { Text("Номер КП") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        StationChoiceGroup(
+            title = "Режим",
+            items = listOf(StationProgram.Active, StationProgram.Passive, StationProgram.Battery),
+            program = program,
+            onProgram = onProgram,
+        )
+        Text(
+            stationProgramHint(program),
+            color = Color(0xFF5C5C5C),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun StationChoiceGroup(
+    title: String,
+    items: List<StationProgram>,
+    program: StationProgram,
+    onProgram: (StationProgram) -> Unit,
+) {
+    Text(title, style = MaterialTheme.typography.titleSmall)
+    items.forEach { item ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onProgram(item) }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(
+                selected = program == item,
+                onClick = { onProgram(item) },
+            )
+            Text(
+                stationProgramTitle(item),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+    }
+}
+
+private fun stationProgramTitle(item: StationProgram): String = when (item) {
+    StationProgram.Control -> "КП"
+    StationProgram.Start -> "Старт"
+    StationProgram.Finish -> "Финиш"
+    StationProgram.Clear -> "Очистка"
+    StationProgram.Active -> "Активный режим"
+    StationProgram.Passive -> "Пассивный режим"
+    StationProgram.Battery -> "Проверка батареи"
+}
+
+private fun stationProgramHint(program: StationProgram): String = when (program) {
+    StationProgram.Control ->
+        "Введите номер КП, приложите чип и подтвердите запись. Вместе с ролью на станцию уйдёт текущее время телефона."
+    StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
+        "Выберите тип, приложите чип и подтвердите запись. Вместе с ролью на станцию уйдёт текущее время телефона."
+    StationProgram.Active ->
+        "Станция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
+    StationProgram.Passive ->
+        "Станция снова ждёт нажатия кнопки. Карта многоразовая — удобно на снятие дистанции."
+    StationProgram.Battery ->
+        "После отметки на станции около 30 с горит светодиод, затем 1–15 миганий. Меньше 7 — заменить батарею. Часы станции сбросятся. Карта одноразовая."
+}
+
+private fun stationWriteConfirmText(program: StationProgram, controlNumber: Int?): String {
+    val wipe =
+        "Отметки и номер участника на этом чипе будут стёрты. Операция только из раздела «Станция»."
+    val body = when (program) {
+        StationProgram.Control ->
+            "На чип будет записана программа станции КП ${controlNumber ?: "—"}."
+        StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
+            "На чип будет записана программа станции «${program.title}» (КП ${program.command.controlCp})."
+        StationProgram.Active ->
+            "На чип будет записана карта активного режима.\nСтанция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
+        StationProgram.Passive ->
+            "На чип будет записана карта пассивного режима.\nСтанция снова будет ждать нажатия кнопки. Карта многоразовая."
+        StationProgram.Battery ->
+            "На чип будет записана карта сброса и проверки батареи.\nПосле отметки на станции около 30 секунд горит светодиод, затем 1–15 миганий. Меньше 7 — заменить батарею. Часы станции сбросятся. Карта одноразовая."
+    }
+    return "$body\n\n$wipe"
 }
 
 @Composable

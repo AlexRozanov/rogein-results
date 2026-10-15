@@ -1,6 +1,7 @@
 package ru.rogein.chip.parse
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -77,6 +78,32 @@ class SfrChipParserTest {
     }
 
     @Test
+    fun finishRangeFromNfcToolsDumpMatchesFullParse() {
+        val full = loadExport("/export.txt")
+        val dumpFull = SfrChipParser.parse("uid", full)
+        val end = SfrChipParser.maxPointerCandidate(full[4], full.size)
+        assertEquals(27, end)
+        assertEquals(BlockOrder.NfcTools, SfrChipParser.wireOrder(full[3], full[4], full.size))
+        val sparse = MutableList(end + 1) { ByteArray(4) }
+        sparse[3] = full[3]
+        sparse[4] = full[4]
+        for (i in 5..end) sparse[i] = full[i]
+        val dump = SfrChipParser.parse("uid", sparse, declaredBlockCount = full.size)
+        assertEquals(dumpFull.logicalId, dump.logicalId)
+        assertEquals(dumpFull.punches, dump.punches)
+        assertEquals(full.size, dump.blockCount)
+        assertEquals(BlockOrder.NfcTools, dump.blockOrder)
+    }
+
+    @Test
+    fun hidPointerUsesFirstByte() {
+        val block4 = byteArrayOf(0x06, 0, 0, 0)
+        val block3 = byteArrayOf(0x06, 0x03, 0, 0)
+        assertEquals(6, SfrChipParser.maxPointerCandidate(block4, 64))
+        assertEquals(BlockOrder.Hid, SfrChipParser.wireOrder(block3, block4, 64))
+    }
+
+    @Test
     fun hidOrderIsParsedWithoutReverse() {
         val hid = MutableList(BLOCK_COUNT) { ByteArray(4) }
         hid[1] = byteArrayOf(0x00, 0x11, 0x42, 0x41)
@@ -91,6 +118,65 @@ class SfrChipParserTest {
         assertTrue(dump.punches[0].isStart)
         assertTrue(dump.punches[1].isFinish)
     }
+
+    @Test
+    fun detectsStationProgrammerInHidAndNfcToolsOrder() {
+        val roles = listOf(
+            StationCommand.Start to CP_START,
+            StationCommand.Finish to CP_FINISH,
+            StationCommand.Clear to CP_CLEAR,
+        )
+        for ((command, cp) in roles) {
+            val hid = stationChip(command)
+            assertEquals(command, SfrChipParser.stationCommand(hid))
+            assertEquals(cp, SfrChipParser.stationProgramCp(hid))
+            assertNull(SfrChipParser.parse("uid", hid, declaredBlockCount = 64).logicalId)
+            val nfc = hid.map { it.reversed4() }
+            assertEquals(command, SfrChipParser.stationCommand(nfc))
+        }
+        assertEquals("старт", SfrChipParser.stationProgramTitle(CP_START))
+        assertEquals("финиш", SfrChipParser.stationProgramTitle(CP_FINISH))
+        assertEquals("очистка", SfrChipParser.stationProgramTitle(CP_CLEAR))
+    }
+
+    @Test
+    fun detectsOrdinaryControlStation() {
+        val hid = stationChip(StationCommand.Control, 31)
+        assertEquals(StationCommand.Control, SfrChipParser.stationCommand(hid))
+        assertEquals(31, SfrChipParser.stationProgramCp(hid))
+        val nfc = hid.map { it.reversed4() }
+        assertEquals(31, SfrChipParser.stationProgramCp(nfc))
+    }
+
+    @Test
+    fun detectsStationServiceCardsInHidAndNfcToolsOrder() {
+        for (command in listOf(StationCommand.Active, StationCommand.Passive, StationCommand.Battery)) {
+            val hid = stationChip(command)
+            assertEquals(command, SfrChipParser.stationCommand(hid))
+            assertNull(SfrChipParser.stationProgramCp(hid))
+            val nfc = hid.map { it.reversed4() }
+            assertEquals(command, SfrChipParser.stationCommand(nfc))
+        }
+    }
+
+    @Test
+    fun athleteDumpIsNotStationProgrammer() {
+        assertNull(SfrChipParser.stationCommand(loadExport("/export.txt")))
+        val empty = MutableList(7) { ByteArray(4) }
+        assertNull(SfrChipParser.stationCommand(empty))
+        assertNull(SfrChipParser.parse("uid", empty, declaredBlockCount = 64).logicalId)
+    }
+}
+
+private fun stationChip(command: StationCommand, controlNumber: Int? = null): List<ByteArray> {
+    val hid = MutableList(7) { ByteArray(4) }
+    val plan = SfrChipMemory.stationProgramPlan(
+        command, 12, 0, 0, oldPointerEnd = 7, blockCount = 64, controlNumber = controlNumber,
+    )
+    for ((index, block) in plan) {
+        if (index < hid.size) hid[index] = block
+    }
+    return hid
 }
 
 internal fun loadExport(resource: String): List<ByteArray> {
