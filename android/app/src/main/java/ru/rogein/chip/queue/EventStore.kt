@@ -25,6 +25,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.time.LocalDate
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class EventSettings(
@@ -408,22 +409,21 @@ class EventStore(
             val groups = JSONArray()
             val results = JSONArray()
             val participants = JSONArray()
+            val usedSourceIds = HashSet<Long>()
             val byCourse = scored.groupBy { courseKey(it.course) }
-            courses.forEachIndexed { index, course ->
-                val rows = byCourse[courseKey(course.name)].orEmpty()
-                if (rows.isEmpty()) return@forEachIndexed
-                val groupId = index + 1
+            fun addGroup(groupId: Int, name: String, sortOrder: Int, controls: List<Int>, rows: List<ScoredResult>) {
+                if (rows.isEmpty()) return
                 groups.put(
                     JSONObject()
                         .put("source_id", groupId)
-                        .put("name", course.name)
+                        .put("name", name)
                         .put("gender_mode", "any")
                         .put("min_age", JSONObject.NULL)
-                        .put("sort_order", index)
-                        .put("course_cps", JSONArray(filterCourseCps(course.controls, removed))),
+                        .put("sort_order", sortOrder)
+                        .put("course_cps", JSONArray(controls)),
                 )
                 for (row in rows) {
-                    val sourceId = (row.logicalId ?: (1_000_000 + row.queueId.hashCode().and(0x7fff))).toLong()
+                    val sourceId = uniqueParticipantSourceId(row, usedSourceIds)
                     results.put(
                         JSONObject()
                             .put("participant_source_id", sourceId)
@@ -462,6 +462,30 @@ class EventStore(
                     )
                 }
             }
+            val publishedKeys = HashSet<String>()
+            courses.forEachIndexed { index, course ->
+                val key = courseKey(course.name)
+                publishedKeys += key
+                addGroup(
+                    groupId = index + 1,
+                    name = course.name,
+                    sortOrder = index,
+                    controls = filterCourseCps(course.controls, removed),
+                    rows = byCourse[key].orEmpty(),
+                )
+            }
+            byCourse.entries
+                .filter { it.key !in publishedKeys }
+                .forEachIndexed { extraIndex, (_, rows) ->
+                    val sortOrder = courses.size + extraIndex
+                    addGroup(
+                        groupId = sortOrder + 1,
+                        name = rows.firstOrNull()?.course?.ifBlank { "без дистанции" } ?: "без дистанции",
+                        sortOrder = sortOrder,
+                        controls = emptyList(),
+                        rows = rows,
+                    )
+                }
             if (results.length() == 0) error("Нет результатов для публикации")
             return JSONObject()
                 .put("title", title)
@@ -474,6 +498,29 @@ class EventStore(
                 .put("results", results)
                 .put("map_points", JSONArray())
                 .toString()
+        }
+
+        /** One finish = one site participant. Same chip on D1 and D2 must not share source_id. */
+        internal fun uniqueParticipantSourceId(row: ScoredResult, used: MutableSet<Long>): Long {
+            var id = stableParticipantSourceId(row.queueId, row.logicalId)
+            while (id <= 0L || !used.add(id)) {
+                id += 1L
+                if (id <= 0L) id = 1L
+            }
+            return id
+        }
+
+        internal fun stableParticipantSourceId(queueId: String, logicalId: Int?): Long {
+            val uuid = runCatching { UUID.fromString(queueId) }.getOrNull()
+            val hashed = if (uuid != null) {
+                uuid.mostSignificantBits xor uuid.leastSignificantBits
+            } else {
+                queueId.hashCode().toLong()
+            }
+            val positive = hashed and Long.MAX_VALUE
+            if (positive > 0L) return positive
+            val chip = logicalId?.toLong() ?: 0L
+            return if (chip > 0L) chip else 1L
         }
     }
 }

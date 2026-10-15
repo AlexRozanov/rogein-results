@@ -21,6 +21,7 @@ import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.parse.TestCoursePlan
+import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.queue.ChipQueueRepository
 import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.EnqueueResult
@@ -47,6 +48,13 @@ data class FinishReplacePrompt(
     val dump: ChipDump,
     val rawHex: String,
     val personName: String,
+)
+
+data class IssueOverwritePrompt(
+    val id: Int,
+    val name: String,
+    val issuedCourse: String,
+    val newCourse: String,
 )
 
 interface CsvPicker {
@@ -111,6 +119,9 @@ class ChipQueueViewModel(
     private val _finishReplacePrompt = MutableStateFlow<FinishReplacePrompt?>(null)
     val finishReplacePrompt = _finishReplacePrompt.asStateFlow()
 
+    private val _issueOverwritePrompt = MutableStateFlow<IssueOverwritePrompt?>(null)
+    val issueOverwritePrompt = _issueOverwritePrompt.asStateFlow()
+
     private val _status = MutableStateFlow("Приложите чип к телефону")
     val status = _status.asStateFlow()
 
@@ -119,6 +130,9 @@ class ChipQueueViewModel(
 
     private val _chipReady = MutableStateFlow(false)
     val chipReady = _chipReady.asStateFlow()
+
+    private val _chipLogicalId = MutableStateFlow<Int?>(null)
+    val chipLogicalId = _chipLogicalId.asStateFlow()
 
     private val _mode = MutableStateFlow(ChipMode.Issue)
     val mode = _mode.asStateFlow()
@@ -176,6 +190,7 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(4_000)
+                runCatching { repository.republishSnapshot() }
                 runCatching { repository.flushLiveIfPending() }
             }
         }
@@ -482,11 +497,8 @@ class ChipQueueViewModel(
     fun setMode(mode: ChipMode) {
         _mode.value = mode
         _addingNew.value = false
-        if (mode == ChipMode.Tests && _testCourse.value.isBlank()) {
-            val person = _selectedId.value?.let { id -> people.value.find { it.id == id } }
-            _testCourse.value = person?.currentCourse
-                ?.takeIf { it.isNotBlank() }
-                ?: person?.courses?.firstOrNull().orEmpty()
+        if (mode == ChipMode.Tests) {
+            applyTestCourseFromChip()
         }
         promptStatus()
     }
@@ -565,6 +577,9 @@ class ChipQueueViewModel(
 
     fun onTestCourse(value: String) {
         _testCourse.value = value
+        if (_mode.value == ChipMode.Tests) {
+            promptStatus()
+        }
     }
 
     fun writeCorrectCourse() {
@@ -576,9 +591,18 @@ class ChipQueueViewModel(
     }
 
     private fun writeTestCourse(correct: Boolean) {
-        val person = _selectedId.value?.let { id -> people.value.find { it.id == id } }
+        val logicalId = _chipLogicalId.value
+        if (!_chipReady.value) {
+            _status.value = "Приложите чип — участник определится по номеру из протокола."
+            return
+        }
+        if (logicalId == null) {
+            _status.value = "На чипе нет номера. Сначала выдайте чип на вкладке «Выдача»."
+            return
+        }
+        val person = personFromChip()
         if (person == null) {
-            _status.value = "Выберите участника из протокола."
+            _status.value = "№ $logicalId нет в стартовом протоколе."
             return
         }
         val courseName = _testCourse.value.trim().ifBlank { person.currentCourse }
@@ -609,7 +633,7 @@ class ChipQueueViewModel(
                 }
                 val now = LocalTime.now()
                 val punches = TestCoursePlan.punches(cps, now.hour, now.minute, now.second)
-                io.writeTestCourse(order, person.id, punches, pointerEnd, chipBlockCount)
+                io.writeTestCourse(order, logicalId, punches, pointerEnd, chipBlockCount)
                 pointerEnd = 4 + punches.size
                 punchCount = punches.size
                 _sessionSummary.value = "№ ${person.id} · ${punches.size} отметок"
@@ -648,11 +672,7 @@ class ChipQueueViewModel(
                 else -> "Выберите участника или приложите чип"
             }
             ChipMode.Finish -> "Приложите чип — отметки сохранятся"
-            ChipMode.Tests -> when {
-                _selectedId.value == null -> "Выберите участника из протокола"
-                _chipReady.value -> "Чип на месте. Нажмите «Правильное» или «Ошибочное»."
-                else -> "Приложите чип, затем запишите прохождение"
-            }
+            ChipMode.Tests -> testsPrompt()
         }
     }
 
@@ -666,12 +686,14 @@ class ChipQueueViewModel(
     fun onReadFailed(message: String) {
         _busy.value = false
         _chipReady.value = false
+        _chipLogicalId.value = null
         _status.value = message
         signalError()
     }
 
     fun onChipGone() {
         _chipReady.value = false
+        _chipLogicalId.value = null
         blockOrder = null
         pointerEnd = null
         _sessionSummary.value = null
@@ -701,18 +723,13 @@ class ChipQueueViewModel(
                 punchCount = dump.punches.size
                 chipBlockCount = dump.blockCount
                 _chipReady.value = true
+                _chipLogicalId.value = dump.logicalId
                 val label = dump.logicalId?.let { "№ $it" } ?: "без номера"
                 _sessionSummary.value = "$label · $punchCount отметок"
                 when (_mode.value) {
                     ChipMode.Issue -> handleIssueRead(dump.logicalId)
                     ChipMode.Finish -> handleFinishRead(dump, uid, blocks)
-                    ChipMode.Tests -> {
-                        _status.value = if (_selectedId.value != null) {
-                            "Чип на месте. Нажмите «Правильное» или «Ошибочное»."
-                        } else {
-                            "Чип на месте. Выберите участника, затем запишите прохождение."
-                        }
-                    }
+                    ChipMode.Tests -> handleTestsRead()
                 }
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось прочитать чип"
@@ -745,6 +762,25 @@ class ChipQueueViewModel(
             return
         }
         issueToChip(draft.first, draft.second, draft.third)
+    }
+
+    fun confirmIssueOverwrite() {
+        val pending = _issueOverwritePrompt.value ?: return
+        _issueOverwritePrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            issueToChip(pending.id, pending.name, pending.newCourse, replace = true)
+        }
+    }
+
+    fun cancelIssueOverwrite() {
+        val pending = _issueOverwritePrompt.value
+        _issueOverwritePrompt.value = null
+        val course = pending?.issuedCourse.orEmpty()
+        _status.value = if (course.isNotBlank()) {
+            "Чип не перезаписан. Готов для дистанции $course."
+        } else {
+            "Чип не перезаписан."
+        }
     }
 
     private suspend fun handleFinishRead(
@@ -795,9 +831,9 @@ class ChipQueueViewModel(
             is EnqueueResult.Saved -> {
                 repository.requestLiveSend()
                 _status.value = if (result.snapshotError == null) {
-                    "$who · ${dump.punches.size} отметок сохранено."
+                    "$who · ${dump.punches.size} отметок сохранено, chip-queue.json записан."
                 } else {
-                    "$who · в очереди, снимок в Загрузки не записан: ${result.snapshotError}"
+                    "$who · в очереди, chip-queue.json не записан: ${result.snapshotError}"
                 }
                 signalSuccess()
             }
@@ -828,17 +864,42 @@ class ChipQueueViewModel(
         return null
     }
 
-    private suspend fun issueToChip(id: Int, name: String, course: String) {
+    private fun unfinishedIssuedCourse(id: Int): String? {
+        val person = people.value.find { it.id == id } ?: return null
+        if (!person.issued) return null
+        val issued = person.issuedCourse.ifBlank { person.currentCourse }.trim()
+        if (issued.isBlank()) return null
+        val finished = items.value.any { item ->
+            item.logicalId == id &&
+                courseKey(item.courseName.ifBlank { issued }) == courseKey(issued)
+        }
+        return if (finished) null else issued
+    }
+
+    private suspend fun issueToChip(id: Int, name: String, course: String, replace: Boolean = false) {
         val order = blockOrder
         val io = chipIo
         if (!_chipReady.value || order == null || io == null) {
             _status.value = "Приложите чип и не убирайте его."
             return
         }
+        if (!replace) {
+            val issued = unfinishedIssuedCourse(id)
+            if (issued != null) {
+                _issueOverwritePrompt.value = IssueOverwritePrompt(
+                    id = id,
+                    name = name,
+                    issuedCourse = issued,
+                    newCourse = course,
+                )
+                _status.value = "Чип уже готов для дистанции $issued."
+                return
+            }
+        }
         try {
             io.issue(order, id, pointerEnd, chipBlockCount)
             repository.startList.upsertLocal(id, name, course)
-            repository.startList.markIssued(id)
+            repository.startList.markIssued(id, course)
             _selectedId.value = null
             _addingNew.value = false
             _query.value = ""
@@ -887,6 +948,7 @@ class ChipQueueViewModel(
 
     fun reloadStartList(force: Boolean = true) {
         viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.republishSnapshot() }
             val note = repository.startList.reloadFromUsb(quiet = !force)
             if (force) {
                 _status.value = note ?: "Файл протокола не найден"
@@ -963,8 +1025,42 @@ class ChipQueueViewModel(
         return "№ $id"
     }
 
+    private fun personFromChip(): StartPerson? {
+        val id = _chipLogicalId.value ?: return null
+        return people.value.find { it.id == id }
+    }
+
+    private fun applyTestCourseFromChip() {
+        val person = personFromChip()
+        _testCourse.value = person?.currentCourse
+            ?.takeIf { it.isNotBlank() }
+            ?: person?.courses?.firstOrNull().orEmpty()
+    }
+
+    private fun testsPrompt(): String {
+        if (!_chipReady.value) {
+            return "Приложите чип — участник определится по номеру из протокола"
+        }
+        val id = _chipLogicalId.value
+            ?: return "На чипе нет номера. Сначала выдайте чип на вкладке «Выдача»."
+        val person = personFromChip()
+            ?: return "№ $id нет в стартовом протоколе."
+        val course = _testCourse.value.trim().ifBlank { person.currentCourse }
+        return if (course.isBlank()) {
+            "№ ${person.id} · ${person.name}. Выберите дистанцию."
+        } else {
+            "№ ${person.id} · ${person.name}. Нажмите «Правильное» или «Ошибочное»."
+        }
+    }
+
+    private fun handleTestsRead() {
+        applyTestCourseFromChip()
+        _status.value = testsPrompt()
+    }
+
     private fun forgetChip() {
         _chipReady.value = false
+        _chipLogicalId.value = null
         blockOrder = null
         pointerEnd = null
         _sessionSummary.value = null
@@ -1002,6 +1098,7 @@ class ChipQueueViewModel(
             _query.value = ""
             _extraCourse.value = ""
             _testCourse.value = ""
+            _chipLogicalId.value = null
             _sessionSummary.value = null
             _status.value = if (snapshotError == null) {
                 "Стартовый протокол, дистанции, очередь и корректировки удалены."

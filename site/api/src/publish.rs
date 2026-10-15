@@ -184,6 +184,9 @@ async fn insert_event_rows(
         if group.source_id <= 0 {
             bail!("award group source_id must be positive");
         }
+        if group_ids.contains_key(&group.source_id) {
+            bail!("duplicate award group source_id {}", group.source_id);
+        }
         let gender = group.gender_mode.as_deref().unwrap_or("any");
         let course_cps = serde_json::to_value(&group.course_cps)?;
         let id: i64 = sqlx::query_scalar(
@@ -209,6 +212,12 @@ async fn insert_event_rows(
     for person in &payload.participants {
         if person.source_id <= 0 {
             bail!("participant source_id must be positive");
+        }
+        if participant_ids.contains_key(&person.source_id) {
+            bail!(
+                "duplicate participant source_id {} — один чип на нескольких дистанциях публикуйте как разные результаты",
+                person.source_id
+            );
         }
         if person.name.trim().is_empty() {
             bail!("participant name is required");

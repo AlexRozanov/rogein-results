@@ -106,6 +106,7 @@ class StartListStore(
                     origin = ORIGIN_DESKTOP,
                     localCourseTouchedAt = if (keepLocalCurrent) local!!.localCourseTouchedAt else 0L,
                     issuedAt = local?.issuedAt ?: 0L,
+                    issuedCourse = local?.issuedCourse.orEmpty(),
                 ),
             )
         }
@@ -161,6 +162,7 @@ class StartListStore(
                     origin = existing?.origin ?: ORIGIN_PHONE,
                     localCourseTouchedAt = existing?.localCourseTouchedAt ?: 0L,
                     issuedAt = existing?.issuedAt ?: 0L,
+                    issuedCourse = existing?.issuedCourse.orEmpty(),
                 ),
             )
             imported += 1
@@ -209,9 +211,11 @@ class StartListStore(
             for (person in dao.listPeople()) {
                 val names = parseNames(person.coursesJson).map { if (it.equals(previous, true)) trimmed else it }
                 val current = if (person.currentCourse.equals(previous, true)) trimmed else person.currentCourse
+                val issued = if (person.issuedCourse.equals(previous, true)) trimmed else person.issuedCourse
                 dao.upsertPerson(
                     person.copy(
                         currentCourse = current,
+                        issuedCourse = issued,
                         coursesJson = JSONArray(names).toString(),
                     ),
                 )
@@ -239,14 +243,19 @@ class StartListStore(
                 origin = existing?.origin ?: ORIGIN_PHONE,
                 localCourseTouchedAt = System.currentTimeMillis(),
                 issuedAt = existing?.issuedAt ?: 0L,
+                issuedCourse = existing?.issuedCourse.orEmpty(),
             ),
         )
     }
 
-    suspend fun markIssued(id: Int) {
+    suspend fun markIssued(id: Int, course: String = "") {
         val existing = dao.person(id) ?: return
-        if (existing.issuedAt > 0L) return
-        dao.upsertPerson(existing.copy(issuedAt = System.currentTimeMillis()))
+        dao.upsertPerson(
+            existing.copy(
+                issuedAt = System.currentTimeMillis(),
+                issuedCourse = course.trim().ifBlank { existing.issuedCourse.ifBlank { existing.currentCourse } },
+            ),
+        )
     }
 
     suspend fun setCurrentCourse(id: Int, course: String) {
@@ -337,6 +346,7 @@ private fun StartPersonEntity.toPerson(): StartPerson {
         courses = if (courses.isEmpty() && currentCourse.isNotBlank()) listOf(currentCourse) else courses,
         currentCourse = currentCourse,
         issued = issuedAt > 0L,
+        issuedCourse = issuedCourse.ifBlank { if (issuedAt > 0L) currentCourse else "" },
     )
 }
 

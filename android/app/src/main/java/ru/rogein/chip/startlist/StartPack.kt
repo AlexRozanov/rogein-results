@@ -21,6 +21,7 @@ data class StartPerson(
     val courses: List<String>,
     val currentCourse: String,
     val issued: Boolean = false,
+    val issuedCourse: String = "",
 )
 
 fun parseStartPack(json: String): StartPack {

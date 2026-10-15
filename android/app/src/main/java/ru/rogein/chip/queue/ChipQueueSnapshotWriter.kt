@@ -5,50 +5,88 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
 /**
- * Полная копия очереди: сначала в каталог приложения (его десктоп читает по adb),
- * затем в Download/rogein/chip-queue.json. Очередь в Room не очищается.
+ * Полная копия очереди рядом со start-pack.json: каталог приложения и Download/rogein.
+ * Очередь в Room не очищается.
  */
 class ChipQueueSnapshotWriter(private val context: Context) {
-    fun write(items: List<QueuedChipEntity>) {
+    fun write(items: List<QueuedChipEntity>): List<String> {
         val json = toJson(items)
-        var appOk = false
-        var lastError: Exception? = null
-        try {
-            writeAppFile(json)
-            appOk = true
-        } catch (e: Exception) {
-            lastError = e
+        val written = LinkedHashSet<String>()
+        val errors = mutableListOf<String>()
+        for (file in fileTargets()) {
+            try {
+                writeFile(file, json)
+                written += file.absolutePath
+            } catch (e: Exception) {
+                errors += "${file.absolutePath}: ${e.message ?: e.javaClass.simpleName}"
+            }
         }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
                 writeMediaStore(json)
-            } else {
-                writeLegacy(json)
-            }
-        } catch (e: Exception) {
-            lastError = e
-        }
-        if (!appOk) {
-            throw when (val error = lastError) {
-                is SnapshotWriteException -> error
-                null -> SnapshotWriteException("не удалось записать снимок")
-                else -> SnapshotWriteException(error.message ?: "ошибка записи снимка")
+                written += "Downloads/rogein/$FILE_NAME"
+            } catch (e: Exception) {
+                errors += "MediaStore: ${e.message ?: e.javaClass.simpleName}"
             }
         }
+        if (written.isEmpty()) {
+            throw SnapshotWriteException(
+                errors.joinToString("; ").ifBlank { "не удалось записать $FILE_NAME" },
+            )
+        }
+        Log.i(TAG, "wrote $FILE_NAME to ${written.joinToString()}")
+        if (errors.isNotEmpty()) {
+            Log.w(TAG, "snapshot extra errors: ${errors.joinToString()}")
+        }
+        return written.toList()
     }
 
-    private fun writeAppFile(json: String) {
-        val dir = context.getExternalFilesDir(null)
-            ?: throw SnapshotWriteException("нет папки приложения для снимка")
-        try {
-            File(dir, FILE_NAME).writeText(json, Charsets.UTF_8)
-        } catch (e: Exception) {
-            throw SnapshotWriteException(e.message ?: "ошибка записи снимка приложения")
+    private fun fileTargets(): List<File> {
+        val files = LinkedHashSet<File>()
+        files += File(context.filesDir, FILE_NAME)
+        context.getExternalFilesDir(null)?.let { files += File(it, FILE_NAME) }
+        files += File(
+            Environment.getExternalStorageDirectory(),
+            "Android/data/${context.packageName}/files/$FILE_NAME",
+        )
+        files += File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "$DIR_NAME/$FILE_NAME",
+        )
+        return files.distinctBy { it.absoluteFile.normalize().path }
+    }
+
+    private fun writeFile(file: File, json: String) {
+        val parent = file.parentFile
+            ?: throw SnapshotWriteException("нет папки для ${file.path}")
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw SnapshotWriteException("не удалось создать ${parent.path}")
+        }
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        val tmp = File(parent, "${file.name}.tmp")
+        FileOutputStream(tmp).use { out ->
+            out.write(bytes)
+            out.flush()
+            out.fd.sync()
+        }
+        if (file.exists() && !file.delete()) {
+            tmp.copyTo(file, overwrite = true)
+            tmp.delete()
+        } else if (!tmp.renameTo(file)) {
+            tmp.copyTo(file, overwrite = true)
+            tmp.delete()
+        }
+        file.setReadable(true, false)
+        file.setWritable(true, true)
+        if (!file.isFile || file.length() != bytes.size.toLong()) {
+            throw SnapshotWriteException("файл не записался: ${file.path}")
         }
     }
 
@@ -93,18 +131,14 @@ class ChipQueueSnapshotWriter(private val context: Context) {
             put(MediaStore.MediaColumns.DISPLAY_NAME, FILE_NAME)
             put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
             put(MediaStore.MediaColumns.RELATIVE_PATH, relative)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = resolver.insert(collection, values)
             ?: throw SnapshotWriteException("не удалось создать файл в Загрузках")
         try {
-            resolver.openOutputStream(uri)?.use { stream ->
+            resolver.openOutputStream(uri, "w")?.use { stream ->
                 stream.write(json.toByteArray(Charsets.UTF_8))
+                stream.flush()
             } ?: throw SnapshotWriteException("не удалось открыть файл в Загрузках")
-            val published = ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
-            }
-            resolver.update(uri, published, null, null)
         } catch (e: SnapshotWriteException) {
             resolver.delete(uri, null, null)
             throw e
@@ -114,24 +148,10 @@ class ChipQueueSnapshotWriter(private val context: Context) {
         }
     }
 
-    private fun writeLegacy(json: String) {
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            DIR_NAME,
-        )
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw SnapshotWriteException("не удалось создать папку Загрузки/rogein")
-        }
-        try {
-            File(dir, FILE_NAME).writeText(json, Charsets.UTF_8)
-        } catch (e: Exception) {
-            throw SnapshotWriteException(e.message ?: "ошибка записи снимка")
-        }
-    }
-
     companion object {
         const val DIR_NAME = "rogein"
         const val FILE_NAME = "chip-queue.json"
+        private const val TAG = "ChipQueueSnapshot"
     }
 }
 

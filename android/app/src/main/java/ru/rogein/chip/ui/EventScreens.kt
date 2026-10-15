@@ -1,32 +1,48 @@
 package ru.rogein.chip.ui
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -40,23 +56,43 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import ru.rogein.chip.parse.CP_FINISH
+import ru.rogein.chip.parse.OrientMark
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.STATUS_DNS
 import ru.rogein.chip.parse.STATUS_DQ
 import ru.rogein.chip.parse.STATUS_ERR
 import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.addableCourseCps
+import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.classifyActualPunches
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.courseProgress
@@ -78,6 +114,7 @@ private val Cream = Color(0xFFF4F1EA)
 private val Muted = Color(0xFF5C5C5C)
 private val Danger = Color(0xFF8B3A3A)
 private val OkGreen = Color(0xFF1B4D3E)
+private val CompactBarPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
 private val Warn = Color(0xFF8A5A00)
 
 @Composable
@@ -111,6 +148,15 @@ fun ProtocolScreen(
     var confirmDelete by remember { mutableStateOf<StartPerson?>(null) }
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
+    val personNumberFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(addingNew, pane) {
+        if (addingNew && pane == ProtocolPane.People) {
+            delay(40)
+            runCatching { personNumberFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
     val filtered = people.filter { person ->
         val q = query.trim().lowercase().replace('ё', 'е')
         if (q.isEmpty()) true
@@ -120,74 +166,112 @@ fun ProtocolScreen(
         name.isNotBlank() && courses.none { it.name.equals(name, true) }
     }.distinct()
     val withoutCourse = people.count { it.currentCourse.isBlank() }
+    var loadMenu by remember { mutableStateOf(false) }
+    var requestAddCourse by remember { mutableStateOf(false) }
+    val summary = buildList {
+        if (courses.isNotEmpty()) {
+            add(courses.joinToString { "${it.name} (${it.controls.size} КП)" })
+        }
+        if (withoutCourse > 0) add("$withoutCourse без дистанции")
+        if (unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
+    }.joinToString(" · ")
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         OutlinedTextField(
             value = query,
             onValueChange = onQuery,
             singleLine = true,
-            label = { Text(if (pane == ProtocolPane.People) "Найти в протоколе" else "Найти дистанцию") },
+            placeholder = {
+                Text(if (pane == ProtocolPane.People) "Номер или фамилия" else "Название дистанции")
+            },
+            textStyle = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ProtocolTab(
+                label = "Участники",
                 selected = pane == ProtocolPane.People,
                 onClick = { pane = ProtocolPane.People },
-                label = { Text("Участники") },
             )
-            FilterChip(
+            ProtocolTab(
+                label = "Дистанции",
                 selected = pane == ProtocolPane.Courses,
                 onClick = { pane = ProtocolPane.Courses },
-                label = { Text("Дистанции") },
             )
-        }
-        if (!searching) {
-            ProtocolLoadRow(
-                label = "С компьютера",
-                onProtocol = {
-                    askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
-                },
-                onCourses = {
-                    askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
-                },
-            )
-            ProtocolLoadRow(
-                label = "Файл CSV",
-                onProtocol = {
-                    askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
-                },
-                onCourses = {
-                    askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
-                },
-            )
-            val summary = buildList {
-                if (courses.isNotEmpty()) {
-                    add(courses.joinToString { "${it.name} (${it.controls.size} КП)" })
-                }
-                if (withoutCourse > 0) add("$withoutCourse без дистанции")
-                if (unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
-            }.joinToString(" · ")
-            if (summary.isNotEmpty()) {
-                Text(
-                    summary,
-                    color = if (withoutCourse > 0 || unknownCourses.isNotEmpty()) Danger else Muted,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (pane == ProtocolPane.People) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onNew) { Text("Добавить") }
+            Spacer(modifier = Modifier.weight(1f))
+            if (!searching) {
+                if (pane == ProtocolPane.People) {
+                    TextButton(
+                        onClick = onNew,
+                        contentPadding = CompactBarPadding,
+                    ) { Text("Добавить") }
                     if (selected != null || addingNew) {
-                        TextButton(onClick = onClearSelection) { Text("Свернуть") }
+                        TextButton(
+                            onClick = onClearSelection,
+                            contentPadding = CompactBarPadding,
+                        ) { Text("Свернуть") }
+                    }
+                } else {
+                    TextButton(
+                        onClick = { requestAddCourse = true },
+                        contentPadding = CompactBarPadding,
+                    ) { Text("Новая") }
+                }
+                if (selected == null && !addingNew) {
+                Box {
+                    TextButton(
+                        onClick = { loadMenu = true },
+                        contentPadding = CompactBarPadding,
+                    ) { Text("Загрузить") }
+                    DropdownMenu(expanded = loadMenu, onDismissRequest = { loadMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Протокол с компьютера") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Дистанции с компьютера") },
+                            onClick = {
+                                loadMenu = false
+                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Протокол CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Дистанции CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
+                            },
+                        )
                     }
                 }
+                }
             }
+        }
+        if (!searching && summary.isNotEmpty()) {
+            Text(
+                summary,
+                color = if (withoutCourse > 0 || unknownCourses.isNotEmpty()) Danger else Muted,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         if (pane == ProtocolPane.People && !searching && (addingNew || selected != null)) {
             OutlinedTextField(
@@ -196,14 +280,21 @@ fun ProtocolScreen(
                 enabled = addingNew,
                 singleLine = true,
                 label = { Text("Номер чипа") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Next,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(personNumberFocus),
             )
             OutlinedTextField(
                 value = newName,
                 onValueChange = onNewName,
                 singleLine = true,
                 label = { Text("ФИО") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
                 modifier = Modifier.fillMaxWidth(),
             )
             CourseChoice("Дистанция", courses.map { it.name }, newCourse, onNewCourse)
@@ -259,6 +350,8 @@ fun ProtocolScreen(
             CoursesPanel(
                 courses = courses,
                 query = query,
+                requestAdd = requestAddCourse,
+                onRequestAddConsumed = { requestAddCourse = false },
                 onSave = onSaveCourse,
                 onDelete = onDeleteCourse,
                 modifier = Modifier
@@ -320,24 +413,22 @@ private data class ProtocolLoad(
 )
 
 @Composable
-private fun ProtocolLoadRow(
+private fun ProtocolTab(
     label: String,
-    onProtocol: () -> Unit,
-    onCourses: () -> Unit,
+    selected: Boolean,
+    onClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            label,
-            color = Muted,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = onProtocol) { Text("Протокол") }
-        TextButton(onClick = onCourses) { Text("Дистанции") }
-    }
+    Text(
+        label,
+        color = if (selected) OkGreen else Muted,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (selected) OkGreen.copy(alpha = 0.12f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
 }
 
 private fun askProtocolLoad(
@@ -384,6 +475,8 @@ private enum class ProtocolPane { People, Courses }
 private fun CoursesPanel(
     courses: List<StartCourse>,
     query: String,
+    requestAdd: Boolean,
+    onRequestAddConsumed: () -> Unit,
     onSave: (String, List<Int>, String?) -> Unit,
     onDelete: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -392,22 +485,47 @@ private fun CoursesPanel(
     var adding by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf<String?>(null) }
+    val newCourseFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(requestAdd) {
+        if (requestAdd) {
+            adding = true
+            newName = ""
+            onRequestAddConsumed()
+        }
+    }
+    LaunchedEffect(adding) {
+        if (adding) {
+            delay(40)
+            runCatching { newCourseFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
     val q = query.trim().lowercase().replace('ё', 'е')
     val visible = if (q.isEmpty()) courses else courses.filter { it.name.lowercase().replace('ё', 'е').contains(q) }
+    val listState = rememberLazyListState()
+    var listCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     Column(modifier = modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { adding = true; newName = "" }) { Text("Новая дистанция") }
-        }
         if (adding) {
             OutlinedTextField(
                 value = newName,
                 onValueChange = { newName = it },
                 singleLine = true,
                 label = { Text("Название") },
-                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        val name = newName.trim()
+                        if (name.isEmpty()) return@KeyboardActions
+                        onSave(name, emptyList(), null)
+                        expanded = name
+                        adding = false
+                        newName = ""
+                    },
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(newCourseFocus),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -425,10 +543,12 @@ private fun CoursesPanel(
             }
         }
         LazyColumn(
+            state = listState,
             verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .weight(1f)
+                .onGloballyPositioned { listCoords = it },
             contentPadding = PaddingValues(bottom = 16.dp),
         ) {
             if (visible.isEmpty()) {
@@ -444,6 +564,8 @@ private fun CoursesPanel(
                 CourseEditorCard(
                     course = course,
                     expanded = course.name.equals(expanded, true),
+                    listState = listState,
+                    listCoordinates = { listCoords },
                     onToggle = { expanded = if (course.name.equals(expanded, true)) null else course.name },
                     onSave = onSave,
                     onDelete = { confirmDelete = course.name },
@@ -476,12 +598,15 @@ private fun CoursesPanel(
 private fun CourseEditorCard(
     course: StartCourse,
     expanded: Boolean,
+    listState: LazyListState,
+    listCoordinates: () -> LayoutCoordinates?,
     onToggle: () -> Unit,
     onSave: (String, List<Int>, String?) -> Unit,
     onDelete: () -> Unit,
 ) {
     var name by remember(course.name) { mutableStateOf(course.name) }
     var addCp by remember(course.name) { mutableStateOf("") }
+    val addBottomFocus = remember { FocusRequester() }
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -517,11 +642,24 @@ private fun CourseEditorCard(
             }
             ReorderableCpList(
                 cps = course.controls,
+                listState = listState,
+                listCoordinates = listCoordinates,
                 onMove = { from, to ->
                     if (from == to) return@ReorderableCpList
                     val next = course.controls.toMutableList()
                     val item = next.removeAt(from)
                     next.add(to, item)
+                    onSave(course.name, next, course.name)
+                },
+                onChange = { index, cp ->
+                    if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
+                    val next = course.controls.toMutableList()
+                    next[index] = cp
+                    onSave(course.name, next, course.name)
+                },
+                onInsertAfter = { index, cp ->
+                    val next = course.controls.toMutableList()
+                    next.add((index + 1).coerceIn(0, next.size), cp)
                     onSave(course.name, next, course.name)
                 },
                 onDelete = { index ->
@@ -538,8 +676,20 @@ private fun CourseEditorCard(
                     onValueChange = { addCp = it.filter { ch -> ch.isDigit() }.take(3) },
                     singleLine = true,
                     label = { Text("Добавить КП") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            val cp = addCp.toIntOrNull() ?: return@KeyboardActions
+                            onSave(course.name, course.controls + cp, course.name)
+                            addCp = ""
+                        },
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(addBottomFocus),
                 )
                 TextButton(
                     enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
@@ -547,6 +697,7 @@ private fun CourseEditorCard(
                         val cp = addCp.toIntOrNull() ?: return@TextButton
                         onSave(course.name, course.controls + cp, course.name)
                         addCp = ""
+                        runCatching { addBottomFocus.requestFocus() }
                     },
                 ) { Text("Добавить") }
             }
@@ -559,60 +710,328 @@ private fun CourseEditorCard(
 @Composable
 private fun ReorderableCpList(
     cps: List<Int>,
+    listState: LazyListState,
+    listCoordinates: () -> LayoutCoordinates?,
     onMove: (Int, Int) -> Unit,
+    onChange: (Int, Int) -> Unit,
+    onInsertAfter: (Int, Int) -> Unit,
     onDelete: (Int) -> Unit,
 ) {
     val density = LocalDensity.current
-    val rowPx = with(density) { 44.dp.toPx() }
-    var dragging by remember { mutableStateOf<Int?>(null) }
+    val focusManager = LocalFocusManager.current
+    val rowPx = with(density) { 56.dp.toPx() }
+    var dragFrom by remember { mutableStateOf<Int?>(null) }
     var dragDy by remember { mutableStateOf(0f) }
+    var pointerYInViewport by remember { mutableStateOf(0f) }
+    var menuFor by remember { mutableStateOf<Int?>(null) }
+    var editingIndex by remember { mutableStateOf<Int?>(null) }
+    var editValue by remember { mutableStateOf(TextFieldValue("")) }
+    var addAfter by remember { mutableStateOf<Int?>(null) }
+    var addValue by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf<Int?>(null) }
+    val editFocus = remember { FocusRequester() }
+    val addFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    var editHadFocus by remember { mutableStateOf(false) }
+    fun commitEdit() {
+        val index = editingIndex ?: return
+        val cp = editValue.text.toIntOrNull()
+        editingIndex = null
+        editHadFocus = false
+        focusManager.clearFocus()
+        if (cp != null && cp > 0) onChange(index, cp)
+    }
+    fun selectAllEdit() {
+        val text = editValue.text
+        editValue = TextFieldValue(text, TextRange(0, text.length))
+    }
+    LaunchedEffect(editingIndex) {
+        editHadFocus = false
+        if (editingIndex != null) {
+            delay(16)
+            runCatching { editFocus.requestFocus() }
+            keyboard?.show()
+            delay(30)
+            selectAllEdit()
+        }
+    }
+    LaunchedEffect(addAfter) {
+        if (addAfter != null) {
+            delay(80)
+            runCatching { addFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    val from = dragFrom
+    val dragTo = if (from == null) {
+        null
+    } else {
+        (from + (dragDy / rowPx).roundToInt()).coerceIn(0, cps.lastIndex)
+    }
+    fun pointerInViewport(row: LayoutCoordinates?, local: Offset): Float? {
+        val list = listCoordinates() ?: return null
+        if (row == null || !row.isAttached || !list.isAttached) return null
+        return list.windowToLocal(row.localToWindow(local)).y
+    }
+    LaunchedEffect(from != null) {
+        if (from == null) return@LaunchedEffect
+        while (isActive && dragFrom != null) {
+            val viewportH = listState.layoutInfo.viewportSize.height.toFloat()
+            if (viewportH > 0f) {
+                val edge = rowPx.coerceAtLeast(48f)
+                val y = pointerYInViewport
+                val factor = when {
+                    y < edge -> -((edge - y) / edge).coerceIn(0f, 1f)
+                    y > viewportH - edge -> ((y - (viewportH - edge)) / edge).coerceIn(0f, 1f)
+                    else -> 0f
+                }
+                if (factor != 0f) {
+                    val scrolled = listState.scrollBy(factor * rowPx * 0.45f)
+                    if (scrolled != 0f) dragDy += scrolled
+                }
+            }
+            delay(16)
+        }
+    }
+    Box(modifier = Modifier.fillMaxWidth()) {
     Column(modifier = Modifier.fillMaxWidth()) {
         cps.forEachIndexed { index, cp ->
+            val isDragging = from == index
+            val isEditing = editingIndex == index
+            val slotShift = when {
+                from == null || dragTo == null || index == from -> 0f
+                from < dragTo && index in (from + 1)..dragTo -> -rowPx
+                dragTo < from && index in dragTo until from -> rowPx
+                else -> 0f
+            }
+            val animatedShift by animateFloatAsState(
+                targetValue = slotShift,
+                label = "cp-shift-$index",
+            )
+            val translationY = if (isDragging) dragDy else animatedShift
+            val spacerClicks = remember { MutableInteractionSource() }
+            var rowCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
-                    .pointerInput(cps, index) {
+                    .zIndex(if (isDragging) 2f else 0f)
+                    .heightIn(min = 56.dp)
+                    .graphicsLayer {
+                        this.translationY = translationY
+                        shadowElevation = if (isDragging) 10f else 0f
+                    }
+                    .background(if (isDragging) Color(0xFFD7E6DF) else Color.Transparent)
+                    .onGloballyPositioned { rowCoords = it }
+                    .pointerInput(index) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = {
-                                dragging = index
+                            onDragStart = { start ->
+                                menuFor = null
+                                if (editingIndex != null) commitEdit()
+                                dragFrom = index
                                 dragDy = 0f
+                                pointerInViewport(rowCoords, start)?.let { pointerYInViewport = it }
                             },
                             onDragEnd = {
-                                dragging = null
+                                val start = dragFrom
+                                val dy = dragDy
+                                dragFrom = null
                                 dragDy = 0f
-                            },
-                            onDragCancel = {
-                                dragging = null
-                                dragDy = 0f
-                            },
-                            onDrag = { _, dragAmount ->
-                                val from = dragging ?: return@detectDragGesturesAfterLongPress
-                                dragDy += dragAmount.y
-                                val shift = (dragDy / rowPx).toInt()
-                                if (shift != 0) {
-                                    val to = (from + shift).coerceIn(0, cps.lastIndex)
-                                    if (to != from) {
-                                        onMove(from, to)
-                                        dragging = to
-                                        dragDy -= shift * rowPx
-                                    }
+                                if (start != null) {
+                                    val end = (start + (dy / rowPx).roundToInt()).coerceIn(0, cps.lastIndex)
+                                    if (end != start) onMove(start, end)
                                 }
                             },
+                            onDragCancel = {
+                                dragFrom = null
+                                dragDy = 0f
+                            },
+                            onDrag = { change, dragAmount ->
+                                if (dragFrom == null) return@detectDragGesturesAfterLongPress
+                                dragDy += dragAmount.y
+                                pointerInViewport(rowCoords, change.position)?.let { pointerYInViewport = it }
+                            },
                         )
-                    },
+                    }
+                    .padding(start = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("≡", color = Muted, modifier = Modifier.padding(end = 8.dp))
-                Text(
-                    "${index + 1}.  $cp",
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f),
-                    fontFamily = FontFamily.Monospace,
+                if (isEditing) {
+                    OutlinedTextField(
+                        value = editValue,
+                        onValueChange = { next ->
+                            val digits = next.text.filter { ch -> ch.isDigit() }.take(3)
+                            editValue = if (digits == next.text) next else TextFieldValue(digits, TextRange(digits.length))
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { commitEdit() }),
+                        modifier = Modifier
+                            .widthIn(min = 80.dp, max = 128.dp)
+                            .padding(vertical = 4.dp)
+                            .focusRequester(editFocus)
+                            .onFocusChanged { state ->
+                                if (state.isFocused) {
+                                    editHadFocus = true
+                                } else if (editHadFocus && editingIndex == index) {
+                                    commitEdit()
+                                }
+                            },
+                    )
+                } else {
+                    Text(
+                        cp.toString(),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .clickable {
+                                menuFor = null
+                                if (editingIndex != null && editingIndex != index) commitEdit()
+                                editingIndex = index
+                                val text = cp.toString()
+                                editValue = TextFieldValue(text, TextRange(0, text.length))
+                            }
+                            .padding(10.dp),
+                    )
+                }
+                Spacer(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 56.dp)
+                        .then(
+                            if (editingIndex != null) {
+                                Modifier.clickable(
+                                    indication = null,
+                                    interactionSource = spacerClicks,
+                                ) { commitEdit() }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 )
-                TextButton(onClick = { onDelete(index) }) { Text("×", color = Danger) }
+                Box {
+                    IconButton(
+                        onClick = {
+                            if (editingIndex != null) commitEdit()
+                            menuFor = if (menuFor == index) null else index
+                        },
+                    ) {
+                        Icon(Icons.Default.Menu, contentDescription = "Действия с КП", tint = Muted)
+                    }
+                    DropdownMenu(
+                        expanded = menuFor == index,
+                        onDismissRequest = { menuFor = null },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Добавить КП") },
+                            onClick = {
+                                menuFor = null
+                                addAfter = index
+                                addValue = ""
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Вверх") },
+                            enabled = index > 0,
+                            onClick = {
+                                menuFor = null
+                                onMove(index, index - 1)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Вниз") },
+                            enabled = index < cps.lastIndex,
+                            onClick = {
+                                menuFor = null
+                                onMove(index, index + 1)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Удалить", color = Danger) },
+                            onClick = {
+                                menuFor = null
+                                confirmDelete = index
+                            },
+                        )
+                    }
+                }
             }
         }
+    }
+    if (from != null && dragTo != null) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(0, (dragTo * rowPx).roundToInt()) }
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(OkGreen),
+        )
+    }
+    }
+    addAfter?.let { index ->
+        AlertDialog(
+            onDismissRequest = { addAfter = null },
+            title = { Text("Добавить КП") },
+            text = {
+                OutlinedTextField(
+                    value = addValue,
+                    onValueChange = { addValue = it.filter { ch -> ch.isDigit() }.take(3) },
+                    singleLine = true,
+                    label = { Text("Номер КП") },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            val cp = addValue.toIntOrNull() ?: return@KeyboardActions
+                            val after = addAfter ?: return@KeyboardActions
+                            addAfter = null
+                            addValue = ""
+                            onInsertAfter(after, cp)
+                        },
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(addFocus),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = addValue.toIntOrNull()?.let { it > 0 } == true,
+                    onClick = {
+                        val cp = addValue.toIntOrNull() ?: return@TextButton
+                        val after = addAfter ?: return@TextButton
+                        addAfter = null
+                        addValue = ""
+                        onInsertAfter(after, cp)
+                    },
+                ) { Text("Добавить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { addAfter = null }) { Text("Отмена") }
+            },
+        )
+    }
+    confirmDelete?.let { index ->
+        val cp = cps.getOrNull(index)
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить КП${if (cp != null) " $cp" else ""}?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = null
+                        onDelete(index)
+                    },
+                ) { Text("Удалить", color = Danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = null }) { Text("Отмена") }
+            },
+        )
     }
 }
 
@@ -884,7 +1303,8 @@ private fun ResultRowDetails(
     )
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
     val window = orientPunchWindow(row.punches, startCp, finishCp)
-    val addable = addableCourseCps(courseProgress(window.map { it.cp }, required, addCounts))
+    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp)
+    val addable = addableCourseCps(courseProgress(expanded.map { it.cp }, required))
     var marksOpen by remember { mutableStateOf(false) }
     var courseChangeOpen by remember { mutableStateOf(false) }
     Column(
@@ -937,7 +1357,7 @@ private fun ResultRowDetails(
     }
     if (marksOpen) {
         UsedMarksDialog(
-            row = row,
+            punches = expanded,
             required = required,
             startCp = startCp,
             finishCp = finishCp,
@@ -959,13 +1379,13 @@ private fun ResultRowDetails(
 
 @Composable
 private fun UsedMarksDialog(
-    row: ScoredResult,
+    punches: List<OrientMark>,
     required: List<Int>,
     startCp: Int,
     finishCp: Int,
     onDismiss: () -> Unit,
 ) {
-    val classified = classifyActualPunches(row.punches, required, startCp, finishCp)
+    val classified = classifyActualPunches(punches, required, startCp, finishCp)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = null,
@@ -994,7 +1414,7 @@ private fun UsedMarksDialog(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             Text(
-                                mark.cp.toString(),
+                                if (mark.added) "${mark.cp}*" else mark.cp.toString(),
                                 modifier = Modifier.width(44.dp),
                                 fontFamily = FontFamily.Monospace,
                                 color = color,

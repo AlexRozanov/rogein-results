@@ -210,6 +210,51 @@ class OrientScoringTest {
     }
 
     @Test
+    fun addCpInsertsAtFirstCorrectPosition() {
+        val course = listOf(36, 31, 44, 56)
+        val punches = listOf(31, 36, 44, 45)
+        val expanded = applyAddedCps(
+            punches.mapIndexed { i, cp -> mark(cp, 10, i) },
+            course,
+            mapOf(31 to 1),
+        )
+        assertEquals(listOf(31, 36, 31, 44, 45), expanded.map { it.cp })
+        assertEquals(listOf(false, false, true, false, false), expanded.map { it.added })
+    }
+
+    @Test
+    fun addCpAfterEarlyWrongOrderIsOkWhenCourseComplete() {
+        val marks = listOf(
+            mark(241, 10, 0),
+            mark(31, 10, 5),
+            mark(36, 10, 6),
+            mark(44, 10, 8),
+            mark(240, 10, 20),
+        )
+        val without = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to listOf(36, 31, 44)),
+            emptySet(),
+            emptyList(),
+            emptyMap(),
+        )
+        assertEquals(STATUS_DQ, without.status)
+        val withAdd = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to listOf(36, 31, 44)),
+            emptySet(),
+            emptyList(),
+            mapOf(31 to 1),
+        )
+        assertEquals(STATUS_OK, withAdd.status)
+        assertEquals(3, withAdd.taken)
+    }
+
+    @Test
     fun missingControlIsDsq() {
         val marks = listOf(
             mark(241, 10, 0),

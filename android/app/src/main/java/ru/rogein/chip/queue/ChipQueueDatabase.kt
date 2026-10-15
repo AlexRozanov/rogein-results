@@ -38,6 +38,7 @@ data class StartPersonEntity(
     val origin: String,
     val localCourseTouchedAt: Long,
     val issuedAt: Long = 0L,
+    val issuedCourse: String = "",
 )
 
 @Entity(tableName = "start_courses")
@@ -152,7 +153,7 @@ interface StartListDao {
         CorrectionEntity::class,
         ExclusionEntity::class,
     ],
-    version = 4,
+    version = 5,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
@@ -229,6 +230,13 @@ abstract class ChipQueueDatabase : RoomDatabase() {
                     )
                     """.trimIndent(),
                 )
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE start_people ADD COLUMN issuedCourse TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE start_people SET issuedCourse = currentCourse WHERE issuedAt > 0")
             }
         }
     }

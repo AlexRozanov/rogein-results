@@ -103,6 +103,8 @@ class ChipQueueRepository(
         )
     }
 
+    suspend fun republishSnapshot(): String? = publishSnapshot()
+
     private suspend fun publishSnapshot(): String? {
         return try {
             snapshot.write(dao.listAll())
@@ -124,6 +126,7 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_1_2,
                     ChipQueueDatabase.MIGRATION_2_3,
                     ChipQueueDatabase.MIGRATION_3_4,
+                    ChipQueueDatabase.MIGRATION_4_5,
                 )
                 .build()
             return ChipQueueRepository(

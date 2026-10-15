@@ -3,6 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const APP_ID: &str = "ru.rogein.chip";
+
+const SNAPSHOT_RUN_AS: &[&str] = &[
+    "files/chip-queue.json",
+    "/sdcard/Android/data/ru.rogein.chip/files/chip-queue.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/chip-queue.json",
+];
+
 const SNAPSHOT_PATHS: &[&str] = &[
     "/sdcard/Android/data/ru.rogein.chip/files/chip-queue.json",
     "/storage/emulated/0/Android/data/ru.rogein.chip/files/chip-queue.json",
@@ -35,20 +43,7 @@ pub fn try_read_phone_snapshot() -> Result<Option<PhoneSnapshotRead>, String> {
     let Ok(serial) = connected_serial(&adb) else {
         return Ok(None);
     };
-    for path in SNAPSHOT_PATHS {
-        match cat_file(&adb, &serial, path) {
-            Ok(Some(body)) => {
-                return Ok(Some(PhoneSnapshotRead {
-                    serial,
-                    path: (*path).to_string(),
-                    body,
-                }));
-            }
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-    Ok(None)
+    read_snapshot_body(&adb, &serial)
 }
 
 pub fn phone_is_ready() -> bool {
@@ -61,75 +56,65 @@ pub fn phone_is_ready() -> bool {
 pub fn read_phone_snapshot() -> Result<PhoneSnapshotRead, String> {
     let adb = locate_adb()?;
     let serial = connected_serial(&adb)?;
-    let mut last_error = String::new();
-    for path in SNAPSHOT_PATHS {
-        match cat_file(&adb, &serial, path) {
+    read_snapshot_body(&adb, &serial)?.ok_or_else(|| {
+        "На телефоне нет снимка очереди (chip-queue.json). Считайте финиш в приложении и не закрывайте его."
+            .to_string()
+    })
+}
+
+fn read_snapshot_body(adb: &Path, serial: &str) -> Result<Option<PhoneSnapshotRead>, String> {
+    for rel in SNAPSHOT_RUN_AS {
+        match cat_run_as(adb, serial, rel) {
             Ok(Some(body)) => {
-                return Ok(PhoneSnapshotRead {
-                    serial,
+                return Ok(Some(PhoneSnapshotRead {
+                    serial: serial.to_string(),
+                    path: format!("run-as {APP_ID} {rel}"),
+                    body,
+                }));
+            }
+            Ok(None) | Err(_) => {}
+        }
+    }
+    for path in SNAPSHOT_PATHS {
+        match cat_file(adb, serial, path) {
+            Ok(Some(body)) => {
+                return Ok(Some(PhoneSnapshotRead {
+                    serial: serial.to_string(),
                     path: (*path).to_string(),
                     body,
-                });
+                }));
             }
-            Ok(None) => last_error = format!("нет файла {path}"),
-            Err(error) => last_error = error,
+            Ok(None) | Err(_) => {}
         }
     }
-    Err(format!(
-        "На телефоне нет снимка очереди (chip-queue.json). {last_error}"
-    ))
+    Ok(None)
 }
 
-/// Удаляет файл только если его содержимое всё ещё совпадает с прочитанным.
-pub fn delete_snapshot_if_unchanged(read: &PhoneSnapshotRead) -> Result<SnapshotDelete, String> {
-    let adb = locate_adb()?;
-    match cat_file(&adb, &read.serial, &read.path) {
-        Ok(None) => {
-            return Ok(SnapshotDelete {
-                deleted: true,
-                note: String::new(),
-            });
-        }
-        Ok(Some(current)) if current != read.body => {
-            return Ok(SnapshotDelete {
-                deleted: false,
-                note: "На телефоне уже новый снимок, он оставлен.".to_string(),
-            });
-        }
-        Ok(Some(_)) => {}
-        Err(error) => {
-            return Ok(SnapshotDelete {
-                deleted: false,
-                note: format!("Импорт выполнен, снимок не удалён: {error}"),
-            });
-        }
+fn cat_run_as(adb: &Path, serial: &str, rel: &str) -> Result<Option<String>, String> {
+    let output = run_adb(
+        adb,
+        &["-s", serial, "exec-out", "run-as", APP_ID, "cat", rel],
+    )?;
+    if !output.status.success() {
+        return Ok(None);
     }
-
-    for path in SNAPSHOT_PATHS {
-        let _ = run_adb(&adb, &["-s", &read.serial, "shell", "rm", "-f", path]);
+    let body = String::from_utf8(output.stdout)
+        .map_err(|_| "снимок очереди не в UTF-8".to_string())?;
+    if body.trim().is_empty() {
+        return Ok(None);
     }
-    delete_via_media_store(&adb, &read.serial);
-
-    match cat_file(&adb, &read.serial, &read.path) {
-        Ok(None) => Ok(SnapshotDelete {
-            deleted: true,
-            note: String::new(),
-        }),
-        Ok(Some(current)) if current != read.body => Ok(SnapshotDelete {
-            deleted: false,
-            note: "На телефоне уже новый снимок, он оставлен.".to_string(),
-        }),
-        Ok(Some(_)) => Ok(SnapshotDelete {
-            deleted: false,
-            note: "Импорт выполнен, но файл снимка на телефоне удалить не удалось.".to_string(),
-        }),
-        Err(error) => Ok(SnapshotDelete {
-            deleted: false,
-            note: format!("Импорт выполнен, снимок не удалён: {error}"),
-        }),
-    }
+    Ok(Some(body))
 }
 
+/// Снимок на телефоне оставляем: его перезаписывает приложение, десктоп читает повторно.
+pub fn delete_snapshot_if_unchanged(_read: &PhoneSnapshotRead) -> Result<SnapshotDelete, String> {
+    Ok(SnapshotDelete {
+        deleted: false,
+        note: String::new(),
+    })
+}
+
+#[allow(dead_code)]
 fn delete_via_media_store(adb: &Path, serial: &str) {
     for uri in [
         "content://media/external/downloads",

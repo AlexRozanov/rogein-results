@@ -359,14 +359,12 @@ let phonePollTimer: ReturnType<typeof setInterval> | null = null;
 let phonePollInFlight = false;
 
 function formatPhoneSummary(summary: PhoneReadSummary): string {
-  const deleted = summary.snapshot_deleted
-    ? "Снимок на телефоне удалён."
-    : summary.snapshot_note || "Снимок на телефоне не удалён.";
+  const extra = summary.snapshot_note ? ` ${summary.snapshot_note}` : "";
   const skipped =
     summary.skipped_empty > 0 ? ` без отметок пропущены ${summary.skipped_empty}.` : "";
   return (
     `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
-    `Участников ${summary.participants_count}, результатов ${summary.results_count}. ${deleted}`
+    `Участников ${summary.participants_count}, результатов ${summary.results_count}.${extra}`
   );
 }
 
