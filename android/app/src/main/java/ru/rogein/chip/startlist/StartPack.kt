@@ -22,7 +22,9 @@ data class StartPerson(
     val currentCourse: String,
     val issued: Boolean = false,
     val issuedCourse: String = "",
-)
+) {
+    val displayName: String get() = name.ifBlank { "без ФИО" }
+}
 
 fun parseStartPack(json: String): StartPack {
     val root = JSONObject(json)

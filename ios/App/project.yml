@@ -1,0 +1,42 @@
+name: MalahitChip
+options:
+  bundleIdPrefix: ru.rogein
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+packages:
+  SfrKit:
+    path: ../SfrKit
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    DEVELOPMENT_TEAM: ""
+targets:
+  MalahitChip:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Малахит
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        NFCReaderUsageDescription: Чтение и запись чипов SFR
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+    entitlements:
+      path: MalahitChip.entitlements
+    dependencies:
+      - package: SfrKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.rogein.chip
+        CODE_SIGN_ENTITLEMENTS: MalahitChip.entitlements
+        INFOPLIST_KEY_NFCReaderUsageDescription: Чтение и запись чипов SFR
+        SUPPORTS_MACCATALYST: false

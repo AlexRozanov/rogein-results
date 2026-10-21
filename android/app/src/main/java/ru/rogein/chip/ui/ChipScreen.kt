@@ -291,8 +291,9 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                         people = people,
                         courses = courses,
                         corrections = corrections,
+                        startCp = settings.startCp,
+                        finishCp = settings.finishCp,
                         onAddCp = viewModel::addMissingCp,
-                        onAssignCourse = viewModel::assignCourse,
                         onDeleteCorrection = viewModel::deleteCorrection,
                     )
                     MorePage.Publish -> PublishScreen(
@@ -476,6 +477,11 @@ private fun ChipSection(
                 newName = newName,
                 newCourse = newCourse,
                 extraCourse = extraCourse,
+                numberTaken = if (addingNew) {
+                    newNumber.toIntOrNull()?.let { id -> people.find { it.id == id } }
+                } else {
+                    null
+                },
                 onQuery = viewModel::onQuery,
                 onSelect = hideKeyboardOnSelect,
                 onNew = viewModel::startNewPerson,
@@ -559,6 +565,7 @@ private fun IssuePanel(
     newName: String,
     newCourse: String,
     extraCourse: String,
+    numberTaken: StartPerson?,
     onQuery: (String) -> Unit,
     onSelect: (Int) -> Unit,
     onNew: () -> Unit,
@@ -595,70 +602,106 @@ private fun IssuePanel(
             modifier = Modifier.fillMaxWidth(),
         )
         if (!searching) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!addingNew && selected == null) {
                 TextButton(onClick = onNew) { Text("Новый") }
-                if (selected != null || addingNew) {
-                    TextButton(onClick = onClearSelection) { Text("Снять выделение") }
-                }
             }
             if (addingNew) {
-                OutlinedTextField(
-                    value = newNumber,
-                    onValueChange = onNewNumber,
-                    singleLine = true,
-                    label = { Text("Номер чипа") },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Next,
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(numberFocus),
-                )
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = onNewName,
-                    singleLine = true,
-                    label = { Text("ФИО") },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (newCourse.isBlank()) {
-                    Text(
-                        "Укажите дистанцию, чтобы выдать чип.",
-                        color = Color(0xFF8B3A3A),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                EditorCard(
+                    title = "Новый участник",
+                    onClose = onClearSelection,
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = newNumber,
+                            onValueChange = onNewNumber,
+                            singleLine = true,
+                            isError = numberTaken != null,
+                            label = { Text("Номер") },
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Next,
+                            ),
+                            modifier = Modifier
+                                .weight(0.35f)
+                                .focusRequester(numberFocus),
+                        )
+                        OutlinedTextField(
+                            value = newName,
+                            onValueChange = onNewName,
+                            singleLine = true,
+                            label = { Text("ФИО") },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            modifier = Modifier.weight(0.65f),
+                        )
+                    }
+                    if (numberTaken != null) {
+                        Text(
+                            "№ ${numberTaken.id} уже в протоколе (${numberTaken.name.ifBlank { "участник" }}). Выберите его из списка.",
+                            color = Color(0xFF8B3A3A),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (newCourse.isBlank()) {
+                        Text(
+                            "Укажите дистанцию, чтобы выдать чип.",
+                            color = Color(0xFF8B3A3A),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    CourseChips("Дистанция", courses, newCourse, onNewCourse)
                 }
-                CourseChips("Дистанция", courses, newCourse, onNewCourse)
             } else if (selected != null) {
-                Text("${selected.id} · ${selected.name}", style = MaterialTheme.typography.titleMedium)
-                if (selected.currentCourse.isBlank()) {
-                    Text(
-                        "Укажите дистанцию, чтобы выдать чип.",
-                        color = Color(0xFF8B3A3A),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                val names = (selected.courses + courses).distinct()
-                CourseChips("Дистанция", names, selected.currentCourse, onCurrentCourse)
-                val extras = courses.filter { name -> selected.courses.none { it.equals(name, true) } }
-                if (selected.currentCourse.isBlank() || extras.isNotEmpty() || extraCourse.isNotEmpty()) {
-                    if (selected.currentCourse.isBlank()) {
+                EditorCard(
+                    title = "№ ${selected.id} · ${selected.displayName}",
+                    onClose = onClearSelection,
+                ) {
+                    val own = selected.courses.ifEmpty {
+                        listOfNotNull(selected.currentCourse.takeIf { it.isNotBlank() })
+                    }
+                    val extras = courses.filter { name -> own.none { it.equals(name, true) } }
+                    if (own.isNotEmpty()) {
+                        CourseChips("Дистанция", own, selected.currentCourse, onCurrentCourse)
+                    } else if (courses.isNotEmpty()) {
+                        if (selected.currentCourse.isBlank()) {
+                            Text(
+                                "Укажите дистанцию, чтобы выдать чип.",
+                                color = Color(0xFF8B3A3A),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        CourseChips("Дистанция", courses, selected.currentCourse, onCurrentCourse)
+                    } else {
+                        Text(
+                            "Укажите дистанцию, чтобы выдать чип.",
+                            color = Color(0xFF8B3A3A),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         OutlinedTextField(
                             value = extraCourse,
                             onValueChange = onExtraCourse,
                             singleLine = true,
-                            label = { Text("Или введите дистанцию") },
+                            label = { Text("Дистанция") },
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        TextButton(onClick = onAddCourse, enabled = extraCourse.isNotBlank()) {
-                            Text("Указать дистанцию")
-                        }
-                    } else if (extras.isNotEmpty() || extraCourse.isNotEmpty()) {
-                        CourseChips("Ещё дистанция", extras, extraCourse, onExtraCourse)
-                        TextButton(onClick = onAddCourse, enabled = extraCourse.isNotBlank()) {
-                            Text("Добавить дистанцию")
+                        CompactTextButton("Указать", onAddCourse, enabled = extraCourse.isNotBlank())
+                    }
+                    if (extras.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                CourseChips("Ещё дистанция", extras, extraCourse, onExtraCourse)
+                            }
+                            CompactTextButton(
+                                "Добавить",
+                                onAddCourse,
+                                enabled = extraCourse.isNotBlank(),
+                            )
                         }
                     }
                 }
@@ -840,7 +883,7 @@ private fun TestsPanel(
                 style = MaterialTheme.typography.bodyMedium,
             )
             else -> {
-                Text("${person.id} · ${person.name}", style = MaterialTheme.typography.titleMedium)
+                Text("${person.id} · ${person.displayName}", style = MaterialTheme.typography.titleMedium)
                 val names = person.courses.ifEmpty { courseNames }
                     .ifEmpty { listOfNotNull(testCourse.takeIf { it.isNotBlank() }) }
                 val extra = courseNames.filter { name -> names.none { it.equals(name, true) } }
@@ -889,9 +932,9 @@ private fun CourseChips(
     current: String,
     onSelect: (String) -> Unit,
 ) {
-    Text(label, color = Color(0xFF5C5C5C))
+    Text(label, color = Color(0xFF5C5C5C), style = MaterialTheme.typography.labelSmall)
     Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
@@ -900,7 +943,7 @@ private fun CourseChips(
             FilterChip(
                 selected = name.equals(current, ignoreCase = true),
                 onClick = { onSelect(name) },
-                label = { Text(name) },
+                label = { Text(name, style = MaterialTheme.typography.labelLarge) },
             )
         }
     }
@@ -959,7 +1002,7 @@ private fun PersonHits(
             val issuedMark = if (person.issued) " · выдан" else ""
             val courseMark = person.currentCourse.ifBlank { "без дистанции" }
             Text(
-                text = "${person.id}  ${person.name}  $courseMark$issuedMark",
+                text = "${person.id}  ${person.displayName}  $courseMark$issuedMark",
                 color = when {
                     person.issued -> Green
                     person.currentCourse.isBlank() -> Color(0xFF8B3A3A)

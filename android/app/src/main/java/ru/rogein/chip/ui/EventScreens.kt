@@ -10,8 +10,10 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,7 +41,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -116,6 +122,85 @@ private val Danger = Color(0xFF8B3A3A)
 private val OkGreen = Color(0xFF1B4D3E)
 private val CompactBarPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
 private val Warn = Color(0xFF8A5A00)
+
+@Composable
+internal fun EditorCard(
+    title: String? = null,
+    primaryLabel: String? = null,
+    onPrimary: (() -> Unit)? = null,
+    primaryEnabled: Boolean = true,
+    onClose: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    deleteLabel: String = "Удалить",
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardWhite),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (!title.isNullOrBlank() || onClose != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        title.orEmpty(),
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (onClose != null) {
+                        CompactTextButton("Закрыть", onClose)
+                    }
+                }
+            }
+            content()
+            if (onPrimary != null || onDelete != null) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (onPrimary != null && primaryLabel != null) {
+                        Button(
+                            onClick = onPrimary,
+                            enabled = primaryEnabled,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp),
+                        ) {
+                            Text(primaryLabel, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                    if (onDelete != null) {
+                        CompactTextButton(deleteLabel, onDelete, Danger)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CompactTextButton(
+    label: String,
+    onClick: () -> Unit,
+    color: Color = OkGreen,
+    enabled: Boolean = true,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 32.dp),
+    ) {
+        Text(label, color = color, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+    }
+}
 
 @Composable
 fun ProtocolScreen(
@@ -212,12 +297,6 @@ fun ProtocolScreen(
                         onClick = onNew,
                         contentPadding = CompactBarPadding,
                     ) { Text("Добавить") }
-                    if (selected != null || addingNew) {
-                        TextButton(
-                            onClick = onClearSelection,
-                            contentPadding = CompactBarPadding,
-                        ) { Text("Свернуть") }
-                    }
                 } else {
                     TextButton(
                         onClick = { requestAddCourse = true },
@@ -274,37 +353,50 @@ fun ProtocolScreen(
             )
         }
         if (pane == ProtocolPane.People && !searching && (addingNew || selected != null)) {
-            OutlinedTextField(
-                value = newNumber,
-                onValueChange = onNewNumber,
-                enabled = addingNew,
-                singleLine = true,
-                label = { Text("Номер чипа") },
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Number,
-                    imeAction = ImeAction.Next,
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(personNumberFocus),
-            )
-            OutlinedTextField(
-                value = newName,
-                onValueChange = onNewName,
-                singleLine = true,
-                label = { Text("ФИО") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            CourseChoice("Дистанция", courses.map { it.name }, newCourse, onNewCourse)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSavePerson) { Text(if (addingNew) "Сохранить" else "Обновить") }
-                if (selected != null && !addingNew) {
-                    TextButton(onClick = { confirmDelete = selected }) {
-                        Text("Удалить", color = Danger)
-                    }
+            EditorCard(
+                title = if (addingNew) {
+                    "Новый участник"
+                } else {
+                    "№ ${selected?.id} · ${selected?.displayName.orEmpty()}"
+                },
+                primaryLabel = if (addingNew) "Сохранить" else "Обновить",
+                onPrimary = onSavePerson,
+                onClose = onClearSelection,
+                onDelete = if (selected != null && !addingNew) {
+                    { confirmDelete = selected }
+                } else {
+                    null
+                },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = newNumber,
+                        onValueChange = onNewNumber,
+                        enabled = addingNew,
+                        singleLine = true,
+                        label = { Text("Номер") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Next,
+                        ),
+                        modifier = Modifier
+                            .weight(0.35f)
+                            .focusRequester(personNumberFocus),
+                    )
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = onNewName,
+                        singleLine = true,
+                        label = { Text("ФИО") },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
+                        modifier = Modifier.weight(0.65f),
+                    )
                 }
+                CourseChoice("Дистанция", courses.map { it.name }, newCourse, onNewCourse)
             }
         }
         if (pane == ProtocolPane.People) {
@@ -328,7 +420,7 @@ fun ProtocolScreen(
                     val issuedMark = if (person.issued) " · выдан" else ""
                     val courseMark = person.currentCourse.ifBlank { "без дистанции" }
                     Text(
-                        text = "${person.id}  ${person.name}  $courseMark$issuedMark",
+                        text = "${person.id}  ${person.displayName}  $courseMark$issuedMark",
                         color = when {
                             person.issued -> OkGreen
                             person.currentCourse.isBlank() -> Danger
@@ -364,7 +456,7 @@ fun ProtocolScreen(
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text("Удалить № ${person.id}?") },
-            text = { Text("${person.name} будет убран из протокола на телефоне.") },
+            text = { Text("${person.displayName} будет убран из протокола на телефоне.") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -507,39 +599,41 @@ private fun CoursesPanel(
     var listCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     Column(modifier = modifier.fillMaxSize()) {
         if (adding) {
-            OutlinedTextField(
-                value = newName,
-                onValueChange = { newName = it },
-                singleLine = true,
-                label = { Text("Название") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(
-                    onDone = {
-                        val name = newName.trim()
-                        if (name.isEmpty()) return@KeyboardActions
+            EditorCard(
+                title = "Новая дистанция",
+                primaryLabel = "Создать",
+                primaryEnabled = newName.isNotBlank(),
+                onPrimary = {
+                    val name = newName.trim()
+                    if (name.isNotEmpty()) {
                         onSave(name, emptyList(), null)
                         expanded = name
                         adding = false
                         newName = ""
-                    },
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(newCourseFocus),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        val name = newName.trim()
-                        if (name.isEmpty()) return@Button
-                        onSave(name, emptyList(), null)
-                        expanded = name
-                        adding = false
-                        newName = ""
-                    },
-                    enabled = newName.isNotBlank(),
-                ) { Text("Создать") }
-                TextButton(onClick = { adding = false }) { Text("Отмена") }
+                    }
+                },
+                onClose = { adding = false },
+            ) {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    singleLine = true,
+                    label = { Text("Название") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            val name = newName.trim()
+                            if (name.isEmpty()) return@KeyboardActions
+                            onSave(name, emptyList(), null)
+                            expanded = name
+                            adding = false
+                            newName = ""
+                        },
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(newCourseFocus),
+                )
             }
         }
         LazyColumn(
@@ -625,83 +719,88 @@ private fun CourseEditorCard(
             Text(if (expanded) "▾" else "▸", color = Muted)
         }
         if (expanded) {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                singleLine = true,
-                label = { Text("Название") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
-                TextButton(onClick = { onSave(name.trim(), course.controls, course.name) }) {
-                    Text("Переименовать")
-                }
-            }
-            if (course.controls.isEmpty()) {
-                Text("КП нет. Добавьте номера в порядке дистанции.", color = Muted, style = MaterialTheme.typography.bodySmall)
-            }
-            ReorderableCpList(
-                cps = course.controls,
-                listState = listState,
-                listCoordinates = listCoordinates,
-                onMove = { from, to ->
-                    if (from == to) return@ReorderableCpList
-                    val next = course.controls.toMutableList()
-                    val item = next.removeAt(from)
-                    next.add(to, item)
-                    onSave(course.name, next, course.name)
-                },
-                onChange = { index, cp ->
-                    if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
-                    val next = course.controls.toMutableList()
-                    next[index] = cp
-                    onSave(course.name, next, course.name)
-                },
-                onInsertAfter = { index, cp ->
-                    val next = course.controls.toMutableList()
-                    next.add((index + 1).coerceIn(0, next.size), cp)
-                    onSave(course.name, next, course.name)
-                },
-                onDelete = { index ->
-                    onSave(course.name, course.controls.filterIndexed { i, _ -> i != index }, course.name)
-                },
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            EditorCard(
+                onClose = onToggle,
+                onDelete = onDelete,
+                deleteLabel = "Удалить дистанцию",
             ) {
                 OutlinedTextField(
-                    value = addCp,
-                    onValueChange = { addCp = it.filter { ch -> ch.isDigit() }.take(3) },
+                    value = name,
+                    onValueChange = { name = it },
                     singleLine = true,
-                    label = { Text("Добавить КП") },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done,
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            val cp = addCp.toIntOrNull() ?: return@KeyboardActions
+                    label = { Text("Название") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
+                    TextButton(onClick = { onSave(name.trim(), course.controls, course.name) }) {
+                        Text("Переименовать")
+                    }
+                }
+                if (course.controls.isEmpty()) {
+                    Text("КП нет. Добавьте номера в порядке дистанции.", color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+                ReorderableCpList(
+                    cps = course.controls,
+                    listState = listState,
+                    listCoordinates = listCoordinates,
+                    onMove = { from, to ->
+                        if (from == to) return@ReorderableCpList
+                        val next = course.controls.toMutableList()
+                        val item = next.removeAt(from)
+                        next.add(to, item)
+                        onSave(course.name, next, course.name)
+                    },
+                    onChange = { index, cp ->
+                        if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
+                        val next = course.controls.toMutableList()
+                        next[index] = cp
+                        onSave(course.name, next, course.name)
+                    },
+                    onInsertAfter = { index, cp ->
+                        val next = course.controls.toMutableList()
+                        next.add((index + 1).coerceIn(0, next.size), cp)
+                        onSave(course.name, next, course.name)
+                    },
+                    onDelete = { index ->
+                        onSave(course.name, course.controls.filterIndexed { i, _ -> i != index }, course.name)
+                    },
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = addCp,
+                        onValueChange = { addCp = it.filter { ch -> ch.isDigit() }.take(3) },
+                        singleLine = true,
+                        label = { Text("Добавить КП") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                val cp = addCp.toIntOrNull() ?: return@KeyboardActions
+                                onSave(course.name, course.controls + cp, course.name)
+                                addCp = ""
+                            },
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(addBottomFocus),
+                    )
+                    TextButton(
+                        enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
+                        onClick = {
+                            val cp = addCp.toIntOrNull() ?: return@TextButton
                             onSave(course.name, course.controls + cp, course.name)
                             addCp = ""
+                            runCatching { addBottomFocus.requestFocus() }
                         },
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(addBottomFocus),
-                )
-                TextButton(
-                    enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
-                    onClick = {
-                        val cp = addCp.toIntOrNull() ?: return@TextButton
-                        onSave(course.name, course.controls + cp, course.name)
-                        addCp = ""
-                        runCatching { addBottomFocus.requestFocus() }
-                    },
-                ) { Text("Добавить") }
+                    ) { Text("Добавить") }
+                }
             }
-            TextButton(onClick = onDelete) { Text("Удалить дистанцию", color = Danger) }
         }
         HorizontalDivider()
     }
@@ -1275,6 +1374,7 @@ private fun ResultProtocolRow(
                 removedCps = removedCps,
                 startCp = startCp,
                 finishCp = finishCp,
+                onClose = onToggle,
                 onAddCp = onAddCp,
                 onAssignCourse = onAssignCourse,
                 onDeleteCorrection = onDeleteCorrection,
@@ -1292,6 +1392,7 @@ private fun ResultRowDetails(
     removedCps: Set<Int>,
     startCp: Int,
     finishCp: Int,
+    onClose: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
@@ -1304,12 +1405,12 @@ private fun ResultRowDetails(
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
     val window = orientPunchWindow(row.punches, startCp, finishCp)
     val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp)
-    val addable = addableCourseCps(courseProgress(expanded.map { it.cp }, required))
+    val addable = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
     var marksOpen by remember { mutableStateOf(false) }
     var courseChangeOpen by remember { mutableStateOf(false) }
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+    EditorCard(
+        onClose = onClose,
+        modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
     ) {
         Text(
             "${statusLabel(row.calc.status)} · ${row.calc.taken} КП · ${formatElapsed(row.calc.elapsedSeconds)}",
@@ -1335,7 +1436,9 @@ private fun ResultRowDetails(
                     value.substringBefore(" ").toIntOrNull()?.let { onAddCp(id, row.course, it) }
                 }
             }
-            val personal = corrections.filter { it.type == "add_cp" || it.type == "assign_course" }
+            val personal = corrections.filter {
+                (it.type == "add_cp" || it.type == "assign_course") && it.logicalId == id
+            }
             if (personal.isNotEmpty()) {
                 Text("Персональные корректировки", color = Muted, style = MaterialTheme.typography.bodySmall)
                 personal.forEach { item ->
@@ -1516,6 +1619,9 @@ fun RemovedCpsScreen(
     val available = courses.flatMap { it.controls }.distinct().sorted()
         .filter { it !in removedNums && it != CP_START && it != CP_FINISH }
     var selected by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(available) {
+        if (selected != null && selected !in available) selected = null
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1532,9 +1638,14 @@ fun RemovedCpsScreen(
         } else if (available.isEmpty()) {
             Text("Все КП с дистанций уже сняты.", color = Muted)
         } else {
-            CourseChoice("КП на дистанциях", available.map { it.toString() }, selected?.toString().orEmpty()) {
-                selected = it.toIntOrNull()
-            }
+            ChoiceMenu(
+                label = "КП на дистанциях",
+                options = available,
+                current = selected,
+                placeholder = "Выберите КП",
+                optionLabel = { "КП $it" },
+                onSelect = { selected = it },
+            )
             Button(onClick = { selected?.let(onAdd) }, enabled = selected != null) {
                 Text("Снять КП")
             }
@@ -1568,15 +1679,20 @@ fun ExclusionsScreen(
 ) {
     val removed = EventStore.removedCps(corrections)
     var courseName by remember { mutableStateOf(courses.firstOrNull()?.name.orEmpty()) }
-    var fromCp by remember { mutableStateOf<Int?>(null) }
-    var toCp by remember { mutableStateOf<Int?>(null) }
+    var selectedLeg by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var maxMinutes by remember { mutableStateOf("") }
-    var formOpen by remember { mutableStateOf(false) }
-    val selected = courses.find { it.name.equals(courseName, true) }
-    val legs = selected?.let { EventStore.legsFor(it, settings, removed) }.orEmpty()
+    val selectedCourse = courses.find { it.name.equals(courseName, true) }
     val used = exclusions.filter { it.courseName.equals(courseName, true) }
         .map { it.fromCp to it.toCp }
         .toSet()
+    val legs = selectedCourse?.let { EventStore.legsFor(it, settings, removed) }.orEmpty()
+        .filter { it !in used }
+    LaunchedEffect(courseName) {
+        selectedLeg = null
+    }
+    LaunchedEffect(legs) {
+        if (selectedLeg != null && selectedLeg !in legs) selectedLeg = null
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1591,8 +1707,55 @@ fun ExclusionsScreen(
         if (courses.isEmpty()) {
             Text("Сначала загрузите дистанции.", color = Danger)
         } else {
-            Button(onClick = { formOpen = true }, enabled = courses.isNotEmpty()) {
-                Text("Добавить исключение")
+            ChoiceMenu(
+                label = "Дистанция",
+                options = courses.map { it.name },
+                current = courseName.ifBlank { null },
+                placeholder = "Выберите дистанцию",
+                optionLabel = { it },
+                onSelect = { courseName = it },
+            )
+            if (legs.isEmpty()) {
+                Text(
+                    if (selectedCourse == null) "Выберите дистанцию." else "Все перегоны этой дистанции уже исключены.",
+                    color = Muted,
+                )
+            } else {
+                ChoiceMenu(
+                    label = "Перегон",
+                    options = legs,
+                    current = selectedLeg,
+                    placeholder = "Выберите перегон",
+                    optionLabel = { (from, to) ->
+                        "${formatCp(from, settings)} → ${formatCp(to, settings)}"
+                    },
+                    onSelect = { selectedLeg = it },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = maxMinutes,
+                    onValueChange = { maxMinutes = it.filter { ch -> ch.isDigit() }.take(3) },
+                    singleLine = true,
+                    label = { Text("Макс. мин") },
+                    placeholder = { Text("нет") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.width(108.dp),
+                )
+                Button(
+                    onClick = {
+                        val leg = selectedLeg ?: return@Button
+                        onAdd(courseName, leg.first, leg.second, maxMinutes.toIntOrNull())
+                        selectedLeg = null
+                        maxMinutes = ""
+                    },
+                    enabled = selectedLeg != null && courseName.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Добавить") }
             }
         }
         if (exclusions.isEmpty()) {
@@ -1613,69 +1776,6 @@ fun ExclusionsScreen(
             }
         }
     }
-    if (formOpen) {
-        AlertDialog(
-            onDismissRequest = { formOpen = false },
-            title = { Text("Исключить перегон") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CourseChoice("Дистанция", courses.map { it.name }, courseName) { next ->
-                        courseName = next
-                        fromCp = null
-                        toCp = null
-                    }
-                    if (legs.isEmpty()) {
-                        Text("У дистанции нет перегонов.", color = Muted)
-                    } else {
-                        CourseChoice(
-                            "Перегон",
-                            legs.map { (from, to) ->
-                                val mark = if (from to to in used) " (уже исключён)" else ""
-                                "${formatCp(from, settings)} → ${formatCp(to, settings)}$mark"
-                            },
-                            if (fromCp != null && toCp != null) {
-                                "${formatCp(fromCp!!, settings)} → ${formatCp(toCp!!, settings)}"
-                            } else {
-                                ""
-                            },
-                        ) { label ->
-                            val clean = label.substringBefore(" (")
-                            val parts = clean.split(" → ")
-                            val from = parts.getOrNull(0)?.substringBefore(" ")?.toIntOrNull()
-                            val to = parts.getOrNull(1)?.substringBefore(" ")?.toIntOrNull()
-                            if (from != null && to != null && from to to !in used) {
-                                fromCp = from
-                                toCp = to
-                            }
-                        }
-                    }
-                    OutlinedTextField(
-                        value = maxMinutes,
-                        onValueChange = { maxMinutes = it.filter { ch -> ch.isDigit() }.take(3) },
-                        singleLine = true,
-                        label = { Text("Макс. время, мин (пусто = без лимита)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = fromCp != null && toCp != null && courseName.isNotBlank(),
-                    onClick = {
-                        onAdd(courseName, fromCp ?: return@TextButton, toCp ?: return@TextButton, maxMinutes.toIntOrNull())
-                        formOpen = false
-                        fromCp = null
-                        toCp = null
-                        maxMinutes = ""
-                    },
-                ) { Text("Добавить") }
-            },
-            dismissButton = {
-                TextButton(onClick = { formOpen = false }) { Text("Отмена") }
-            },
-        )
-    }
 }
 
 @Composable
@@ -1684,21 +1784,28 @@ fun CorrectionsScreen(
     people: List<StartPerson>,
     courses: List<StartCourse>,
     corrections: List<CorrectionEntity>,
+    startCp: Int,
+    finishCp: Int,
     onAddCp: (Int, String, Int) -> Unit,
-    onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
 ) {
     val personal = corrections.filter { it.logicalId != null && (it.type == "add_cp" || it.type == "assign_course") }
-    var personId by remember { mutableStateOf<Int?>(results.firstOrNull()?.logicalId ?: people.firstOrNull()?.id) }
-    var courseName by remember {
-        mutableStateOf(results.firstOrNull()?.course ?: people.firstOrNull()?.currentCourse.orEmpty())
+    val removedCps = EventStore.removedCps(corrections)
+    val candidates = results.mapNotNull { row ->
+        val id = row.logicalId ?: return@mapNotNull null
+        val missed = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
+        if (missed.isEmpty()) null else Triple(row, id, missed)
     }
+    var personId by remember { mutableStateOf<Int?>(null) }
     var addCp by remember { mutableStateOf<Int?>(null) }
-    val selectedPerson = people.find { it.id == personId }
-    val selectedResult = results.find { it.logicalId == personId }
-    val effectiveCourse = selectedResult?.course ?: courseName.ifBlank { selectedPerson?.currentCourse.orEmpty() }
-    val required = courses.find { it.name.equals(effectiveCourse, true) }?.controls.orEmpty()
-        .filter { it != CP_START && it != CP_FINISH }
+    LaunchedEffect(candidates.map { it.second }) {
+        if (personId != null && candidates.none { it.second == personId }) {
+            personId = null
+            addCp = null
+        }
+    }
+    val selected = candidates.find { it.second == personId }
+    val missed = selected?.third.orEmpty()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1707,40 +1814,53 @@ fun CorrectionsScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(
-            "Как на карточке участника в десктопе: добавить взятие КП или сменить дистанцию. Результат пересчитывается сразу.",
+            "Только участники с невзятыми КП. После выбора появляется список пропущенных пунктов — как в финишном протоколе.",
             color = Muted,
         )
-        val personLabels = (results.mapNotNull { row ->
-            row.logicalId?.let { id -> "$id · ${row.name}" }
-        } + people.map { "${it.id} · ${it.name}" }).distinct()
-        CourseChoice("Участник", personLabels, personId?.let { id ->
-            val name = results.find { it.logicalId == id }?.name ?: people.find { it.id == id }?.name
-            "$id · ${name.orEmpty()}"
-        }.orEmpty()) { label ->
-            personId = label.substringBefore(" ·").toIntOrNull()
-        }
-        CourseChoice("Дистанция", courses.map { it.name }, effectiveCourse) { next ->
-            courseName = next
-            personId?.let { onAssignCourse(it, effectiveCourse, next) }
-        }
-        if (required.isNotEmpty()) {
-            CourseChoice("Добавить КП", required.map { it.toString() }, addCp?.toString().orEmpty()) {
-                addCp = it.toIntOrNull()
-            }
-            Button(
-                enabled = personId != null && addCp != null,
-                onClick = {
-                    val id = personId ?: return@Button
-                    val cp = addCp ?: return@Button
-                    onAddCp(id, effectiveCourse, cp)
+        if (candidates.isEmpty()) {
+            Text("Нет участников с пропущенными КП.", color = Muted)
+        } else {
+            ChoiceMenu(
+                label = "Участник",
+                options = candidates,
+                current = selected,
+                placeholder = "Выберите участника",
+                optionLabel = { (row, id, rowMissed) ->
+                    val left = rowMissed.sumOf { item -> item.second }
+                    "$id · ${row.name} · не хватает $left"
                 },
-            ) { Text("Добавить взятие КП") }
+                onSelect = {
+                    personId = it.second
+                    addCp = null
+                },
+            )
+            if (selected != null) {
+                ChoiceMenu(
+                    label = "Невзятые КП",
+                    options = missed,
+                    current = missed.find { it.first == addCp },
+                    placeholder = "Выберите КП",
+                    optionLabel = { (cp, count) -> if (count > 1) "$cp (ещё $count)" else "КП $cp" },
+                    onSelect = { addCp = it.first },
+                )
+                Button(
+                    enabled = addCp != null,
+                    onClick = {
+                        val id = personId ?: return@Button
+                        val cp = addCp ?: return@Button
+                        onAddCp(id, selected.first.course, cp)
+                        addCp = null
+                    },
+                ) { Text("Добавить взятие КП") }
+            }
         }
         if (personal.isEmpty()) {
             Text("Персональных корректировок нет", color = Muted)
         } else {
             personal.forEach { row ->
-                val who = people.find { it.id == row.logicalId }?.name ?: "№ ${row.logicalId}"
+                val who = results.find { it.logicalId == row.logicalId }?.name
+                    ?: people.find { it.id == row.logicalId }?.name
+                    ?: ""
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1904,6 +2024,72 @@ fun EventSettingsScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun <T> ChoiceMenu(
+    label: String,
+    options: List<T>,
+    current: T?,
+    placeholder: String,
+    enabled: Boolean = true,
+    optionLabel: (T) -> String,
+    onSelect: (T) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val open = expanded && enabled && options.isNotEmpty()
+    ExposedDropdownMenuBox(
+        expanded = open,
+        onExpandedChange = { if (enabled && options.isNotEmpty()) expanded = it },
+    ) {
+        OutlinedTextField(
+            value = current?.let(optionLabel).orEmpty(),
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled && options.isNotEmpty(),
+            singleLine = true,
+            label = { Text(label) },
+            placeholder = { Text(placeholder) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(open) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled && options.isNotEmpty())
+                .fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = open,
+            onDismissRequest = { expanded = false },
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(optionLabel(option)) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun addableCpsFor(
+    row: ScoredResult,
+    courses: List<StartCourse>,
+    corrections: List<CorrectionEntity>,
+    removedCps: Set<Int>,
+    startCp: Int,
+    finishCp: Int,
+): List<Pair<Int, Int>> {
+    val id = row.logicalId ?: return emptyList()
+    val required = filterCourseCps(
+        courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+        removedCps,
+    )
+    val addCounts = EventStore.addCpCounts(id, row.course, corrections)
+    val window = orientPunchWindow(row.punches, startCp, finishCp)
+    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp)
+    return addableCourseCps(courseProgress(expanded.map { it.cp }, required))
+}
+
 @Composable
 fun CourseChoice(
     label: String,
@@ -1911,7 +2097,7 @@ fun CourseChoice(
     current: String,
     onSelect: (String) -> Unit,
 ) {
-    Text(label, color = Muted)
+    Text(label, color = Muted, style = MaterialTheme.typography.labelSmall)
     ChipRow(options, current, onSelect)
 }
 
