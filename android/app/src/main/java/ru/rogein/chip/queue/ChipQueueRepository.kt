@@ -16,8 +16,13 @@ class ChipQueueRepository(
     private val snapshot: ChipQueueSnapshotWriter,
     val startList: StartListStore,
     val event: EventStore,
+    private val archive: StartArchiveStore,
 ) {
     fun observeAll() = dao.observeAll()
+
+    fun observeStarts() = archive.observe()
+
+    suspend fun ensureCurrentStart() = archive.ensureCurrent()
 
     /** Saved — чип в очереди. Duplicate — этот номер уже считан на этой дистанции. */
     suspend fun enqueue(
@@ -68,12 +73,29 @@ class ChipQueueRepository(
         return publishSnapshot()
     }
 
-    suspend fun resetForNewStart(): String? {
-        dao.clear()
-        startList.resetAll()
-        event.clearEventRules()
-        return publishSnapshot()
+    suspend fun resetForNewStart(): String {
+        val message = archive.createNewStart()
+        startList.forgetUsbPack()
+        publishSnapshot()
+        return message
     }
+
+    suspend fun openStart(id: Long): String {
+        val message = archive.openStart(id)
+        publishSnapshot()
+        event.markLivePending()
+        return message
+    }
+
+    suspend fun deleteStart(id: Long): String {
+        val message = archive.deleteStart(id)
+        publishSnapshot()
+        event.markLivePending()
+        return message
+    }
+
+    suspend fun exportCsv(startId: Long? = null): List<Pair<String, String>> =
+        archive.exportCsv(startId)
 
     suspend fun requestLiveSend() {
         event.markLivePending()
@@ -127,6 +149,7 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_2_3,
                     ChipQueueDatabase.MIGRATION_3_4,
                     ChipQueueDatabase.MIGRATION_4_5,
+                    ChipQueueDatabase.MIGRATION_5_6,
                 )
                 .build()
             return ChipQueueRepository(
@@ -134,6 +157,7 @@ class ChipQueueRepository(
                 ChipQueueSnapshotWriter(appContext),
                 StartListStore(appContext, db.startListDao()),
                 EventStore(db.eventDao()),
+                StartArchiveStore(db),
             )
         }
     }

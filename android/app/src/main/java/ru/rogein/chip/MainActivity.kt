@@ -1,5 +1,7 @@
 package ru.rogein.chip
 
+import android.content.ClipData
+import android.content.Intent
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.nfc.NfcAdapter
@@ -15,6 +17,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.FileProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
@@ -34,6 +37,8 @@ import ru.rogein.chip.ui.ChipMode
 import ru.rogein.chip.ui.ChipScreen
 import ru.rogein.chip.ui.CsvImportKind
 import ru.rogein.chip.ui.CsvPicker
+import ru.rogein.chip.ui.CsvShare
+import java.io.File
 import java.time.LocalTime
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -71,6 +76,45 @@ class MainActivity : ComponentActivity() {
         override fun pick(kind: CsvImportKind) {
             pendingCsvKind = kind
             openCsv.launch(arrayOf("text/*", "text/csv", "text/comma-separated-values", "*/*"))
+        }
+    }
+    private val csvShare = object : CsvShare {
+        override fun share(files: List<Pair<String, String>>) {
+            if (files.isEmpty()) return
+            val dir = File(cacheDir, "export").apply {
+                mkdirs()
+                listFiles()?.forEach { it.delete() }
+            }
+            val uris = ArrayList<android.net.Uri>(files.size)
+            for ((name, content) in files) {
+                val file = File(dir, name)
+                file.writeText(content, Charsets.UTF_8)
+                uris += FileProvider.getUriForFile(
+                    this@MainActivity,
+                    "${packageName}.files",
+                    file,
+                )
+            }
+            val intent = if (uris.size == 1) {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/csv"
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                    clipData = ClipData.newRawUri(files[0].first, uris[0])
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } else {
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "text/csv"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    val clip = ClipData.newRawUri(files[0].first, uris[0])
+                    for (i in 1 until uris.size) {
+                        clip.addItem(ClipData.Item(uris[i]))
+                    }
+                    clipData = clip
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }
+            startActivity(Intent.createChooser(intent, "Экспорт CSV"))
         }
     }
 
@@ -200,7 +244,7 @@ class MainActivity : ComponentActivity() {
                     background = Color(0xFFF4F1EA),
                 ),
             ) {
-                ChipScreen(viewModel, csvPicker)
+                ChipScreen(viewModel, csvPicker, csvShare)
             }
         }
     }

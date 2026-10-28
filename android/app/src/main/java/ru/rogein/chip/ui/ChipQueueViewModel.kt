@@ -50,7 +50,7 @@ enum class StationProgram(val command: StationCommand, val title: String) {
 
 enum class AppSection { Chip, Protocol, Results, More }
 
-enum class MorePage { Menu, Removed, Exclusions, Corrections, Publish, Settings }
+enum class MorePage { Menu, Starts, Removed, Exclusions, Corrections, Publish, Settings }
 
 enum class CsvImportKind { Protocol, Courses }
 
@@ -79,6 +79,10 @@ data class StationWritePrompt(
 
 interface CsvPicker {
     fun pick(kind: CsvImportKind)
+}
+
+interface CsvShare {
+    fun share(files: List<Pair<String, String>>)
 }
 
 interface ChipIo {
@@ -129,6 +133,11 @@ class ChipQueueViewModel(
         emptyList(),
     )
     val exclusions = repository.event.exclusions.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        emptyList(),
+    )
+    val savedStarts = repository.observeStarts().stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         emptyList(),
@@ -200,6 +209,9 @@ class ChipQueueViewModel(
     private val _sessionSummary = MutableStateFlow<String?>(null)
     val sessionSummary = _sessionSummary.asStateFlow()
 
+    private val _csvExport = MutableStateFlow<List<Pair<String, String>>?>(null)
+    val csvExport = _csvExport.asStateFlow()
+
     @Volatile
     private var chipIo: ChipIo? = null
 
@@ -224,6 +236,7 @@ class ChipQueueViewModel(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.ensureCurrentStart() }
             while (isActive) {
                 delay(4_000)
                 runCatching { repository.republishSnapshot() }
@@ -1300,22 +1313,67 @@ class ChipQueueViewModel(
 
     fun resetForNewStart() {
         viewModelScope.launch(Dispatchers.IO) {
-            val snapshotError = repository.resetForNewStart()
-            lastUid = null
-            lastAt = 0
-            _selectedId.value = null
-            _addingNew.value = false
-            _query.value = ""
-            _extraCourse.value = ""
-            _testCourse.value = ""
-            _chipLogicalId.value = null
-            _sessionSummary.value = null
-            _status.value = if (snapshotError == null) {
-                "Стартовый протокол, дистанции, очередь и корректировки удалены."
-            } else {
-                "Данные старта удалены, снимок в Загрузках не обновлён: $snapshotError"
+            try {
+                val message = repository.resetForNewStart()
+                resetSessionUi()
+                _status.value = message
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось начать новый старт"
             }
         }
+    }
+
+    fun openStart(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val message = repository.openStart(id)
+                resetSessionUi()
+                _status.value = message
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось открыть старт"
+            }
+        }
+    }
+
+    fun deleteStart(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val message = repository.deleteStart(id)
+                resetSessionUi()
+                _status.value = message
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось удалить старт"
+            }
+        }
+    }
+
+    fun exportCsv(startId: Long? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _csvExport.value = repository.exportCsv(startId)
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось экспортировать CSV"
+            }
+        }
+    }
+
+    fun consumeCsvExport() {
+        _csvExport.value = null
+    }
+
+    private fun resetSessionUi() {
+        lastUid = null
+        lastAt = 0
+        _selectedId.value = null
+        _addingNew.value = false
+        _query.value = ""
+        _extraCourse.value = ""
+        _testCourse.value = ""
+        _chipLogicalId.value = null
+        _sessionSummary.value = null
+        _finishReplacePrompt.value = null
+        _issueOverwritePrompt.value = null
+        _overwritePrompt.value = false
     }
 
     private fun signalSuccess() {

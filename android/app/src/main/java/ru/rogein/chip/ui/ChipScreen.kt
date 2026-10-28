@@ -70,7 +70,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.QueuedChipEntity
+import ru.rogein.chip.queue.StartArchiveStore
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.startlist.StartCourse
@@ -85,13 +87,15 @@ private val Cream = Color(0xFFF4F1EA)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
+fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: CsvShare) {
     val items by viewModel.items.collectAsStateWithLifecycle()
     val people by viewModel.people.collectAsStateWithLifecycle()
     val courses by viewModel.courses.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val corrections by viewModel.corrections.collectAsStateWithLifecycle()
     val exclusions by viewModel.exclusions.collectAsStateWithLifecycle()
+    val savedStarts by viewModel.savedStarts.collectAsStateWithLifecycle()
+    val csvExport by viewModel.csvExport.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val mode by viewModel.mode.collectAsStateWithLifecycle()
@@ -118,6 +122,27 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
         viewModel.scoredResults(items, people, courses, settings, corrections, exclusions)
     }
     var confirmNewStart by remember { mutableStateOf(false) }
+    val visibleStarts = remember(savedStarts, settings, items, people) {
+        savedStarts.map { start ->
+            if (!start.current) start
+            else start.copy(
+                label = StartArchiveStore.label(
+                    settings.title,
+                    settings.slug,
+                    settings.competitionDate,
+                ),
+                date = settings.competitionDate,
+                slug = settings.slug,
+                chipCount = items.size,
+                personCount = people.size,
+            )
+        }
+    }
+    LaunchedEffect(csvExport) {
+        val files = csvExport ?: return@LaunchedEffect
+        csvShare.share(files)
+        viewModel.consumeCsvExport()
+    }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
     val showStatus = !imeVisible && shouldShowStatus(status, section)
@@ -265,6 +290,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     finishCp = settings.finishCp,
                     liveNote = settings.liveNote,
                     livePending = settings.livePending,
+                    liveUrl = EventStore.liveViewerUrl(settings),
+                    liveShareText = EventStore.liveShareText(settings),
                     onSendLive = viewModel::sendLiveNow,
                     onAddCp = viewModel::addMissingCp,
                     onAssignCourse = viewModel::assignCourse,
@@ -272,6 +299,13 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                 )
                 AppSection.More -> when (morePage) {
                     MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage)
+                    MorePage.Starts -> StartsScreen(
+                        starts = visibleStarts,
+                        onOpen = viewModel::openStart,
+                        onDelete = viewModel::deleteStart,
+                        onExport = { viewModel.exportCsv(it) },
+                        onNewStart = { confirmNewStart = true },
+                    )
                     MorePage.Removed -> RemovedCpsScreen(
                         courses = courses,
                         corrections = corrections,
@@ -316,13 +350,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
     if (confirmNewStart) {
         AlertDialog(
             onDismissRequest = { confirmNewStart = false },
-            title = { Text("Начать новый старт?") },
-            text = {
-                Text(
-                    "Будут безвозвратно удалены стартовый протокол, дистанции, очередь финиша и корректировки. " +
-                        "Адрес сайта и токен останутся. Это нужно перед загрузкой следующего старта.",
-                )
-            },
+            title = { Text("Новый старт?") },
+            text = { Text("Текущий сохранится в списке стартов.") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -330,7 +359,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                         viewModel.resetForNewStart()
                     },
                 ) {
-                    Text("Удалить всё", color = Color(0xFF8B3A3A))
+                    Text("Начать")
                 }
             },
             dismissButton = {
@@ -545,6 +574,7 @@ private fun topTitle(section: AppSection, morePage: MorePage): String = when (se
     AppSection.Results -> "Результаты"
     AppSection.More -> when (morePage) {
         MorePage.Menu -> "Ещё"
+        MorePage.Starts -> "Старты"
         MorePage.Removed -> "Снятые КП"
         MorePage.Exclusions -> "Исключение перегонов"
         MorePage.Corrections -> "Персональные корректировки"

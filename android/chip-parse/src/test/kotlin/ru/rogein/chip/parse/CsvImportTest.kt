@@ -22,6 +22,16 @@ class CsvImportTest {
     }
 
     @Test
+    fun protocolReadsExcelUtf8BomAndCommas() {
+        val rows = CsvImport.protocol("\uFEFF1,Асылхузин Ринат,D1\r\n2,Атлетова Мария,D1\r\n")
+        assertEquals(2, rows.size)
+        assertEquals(1, rows[0].id)
+        assertEquals("Асылхузин Ринат", rows[0].name)
+        assertEquals("D1", rows[0].course)
+        assertEquals(2, rows[1].id)
+    }
+
+    @Test
     fun protocolAllowsBlankCourseCell() {
         val rows = CsvImport.protocol("номер;ФИО;дистанция\n8;Иванов Иван;\n9;Петров;D2\n")
         assertEquals("", rows[0].course)

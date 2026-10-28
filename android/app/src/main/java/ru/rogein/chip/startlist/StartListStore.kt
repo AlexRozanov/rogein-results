@@ -280,6 +280,10 @@ class StartListStore(
         deletePackFiles()
     }
 
+    fun forgetUsbPack() {
+        deletePackFiles()
+    }
+
     private fun findPackFile(): File? {
         val candidates = listOf(
             File(context.getExternalFilesDir(null), FILE_NAME),

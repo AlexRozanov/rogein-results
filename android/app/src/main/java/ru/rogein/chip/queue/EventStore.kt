@@ -375,6 +375,22 @@ class EventStore(
                 settings.slug.isNotBlank() &&
                 settings.title.isNotBlank()
 
+        fun liveViewerUrl(baseUrl: String, slug: String): String? {
+            val base = baseUrl.trim().trimEnd('/')
+            val id = slug.trim()
+            if (base.isEmpty() || id.isEmpty()) return null
+            return "$base/live/$id"
+        }
+
+        fun liveViewerUrl(settings: EventSettings): String? =
+            liveViewerUrl(settings.apiBaseUrl, settings.slug)
+
+        fun liveShareText(settings: EventSettings): String? {
+            val url = liveViewerUrl(settings) ?: return null
+            val title = settings.title.trim()
+            return if (title.isEmpty()) url else "$title\n$url"
+        }
+
         private fun normalizeBase(url: String): String = url.trim().trimEnd('/')
 
         private fun request(method: String, url: String, body: String?, token: String?): Pair<Int, String> {

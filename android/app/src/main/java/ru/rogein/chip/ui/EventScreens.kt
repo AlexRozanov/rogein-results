@@ -1,6 +1,7 @@
 package ru.rogein.chip.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,7 +21,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,8 +37,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -55,6 +62,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,13 +76,21 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +102,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
@@ -111,9 +130,22 @@ import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.EventSettings
 import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.ExclusionEntity
+import ru.rogein.chip.queue.SavedStart
 import ru.rogein.chip.queue.ScoredResult
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.graphics.Bitmap
+import android.view.WindowManager
+import android.widget.Toast
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 
 private val CardWhite = Color.White
 private val Cream = Color(0xFFF4F1EA)
@@ -183,6 +215,234 @@ internal fun EditorCard(
             }
         }
     }
+}
+
+@Composable
+internal fun LiveLinkRow(
+    url: String,
+    shareText: String,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val shown = url.removePrefix("https://").removePrefix("http://")
+    val qr = remember(url) { liveQrBitmap(url) }
+    var qrOpen by remember { mutableStateOf(false) }
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                shown,
+                color = OkGreen,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable { copyLiveLink(context, url) },
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { copyLiveLink(context, url) },
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = ContentCopyIcon,
+                        contentDescription = "Копировать ссылку",
+                        tint = OkGreen,
+                    )
+                }
+                IconButton(
+                    onClick = { shareLiveLink(context, shareText) },
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Поделиться",
+                        tint = OkGreen,
+                    )
+                }
+            }
+        }
+        if (qr != null) {
+            Image(
+                bitmap = qr,
+                contentDescription = "QR-код результатов",
+                modifier = Modifier
+                    .size(120.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.White)
+                    .clickable { qrOpen = true }
+                    .padding(4.dp),
+            )
+        }
+    }
+    if (qrOpen && qr != null) {
+        LiveQrFullscreen(qr = qr, onDismiss = { qrOpen = false })
+    }
+}
+
+@Composable
+private fun LiveQrFullscreen(qr: ImageBitmap, onDismiss: () -> Unit) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        val view = LocalView.current
+        DisposableEffect(view) {
+            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+            val activityWindow = view.context.findActivity()?.window
+            val previousDialog = dialogWindow?.attributes?.screenBrightness
+            val previousActivity = activityWindow?.attributes?.screenBrightness
+            fun setBrightness(window: android.view.Window?, value: Float) {
+                window ?: return
+                val lp = window.attributes
+                lp.screenBrightness = value
+                window.attributes = lp
+            }
+            setBrightness(dialogWindow, 1f)
+            setBrightness(activityWindow, 1f)
+            dialogWindow?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activityWindow?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            onDispose {
+                setBrightness(
+                    dialogWindow,
+                    previousDialog ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE,
+                )
+                setBrightness(
+                    activityWindow,
+                    previousActivity ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE,
+                )
+                dialogWindow?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activityWindow?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.White)
+                .clickable { onDismiss() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                bitmap = qr,
+                contentDescription = "QR-код результатов",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp)
+                    .aspectRatio(1f),
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(4.dp),
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = Color.Black)
+            }
+            Text(
+                "Нажмите, чтобы закрыть",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp),
+            )
+        }
+    }
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun copyLiveLink(context: Context, url: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("live", url))
+    Toast.makeText(context, "Ссылка скопирована", Toast.LENGTH_SHORT).show()
+}
+
+private fun liveQrBitmap(url: String): ImageBitmap? {
+    return try {
+        val size = 1024
+        val matrix = QRCodeWriter().encode(
+            url,
+            BarcodeFormat.QR_CODE,
+            size,
+            size,
+            mapOf(EncodeHintType.MARGIN to 1, EncodeHintType.CHARACTER_SET to "UTF-8"),
+        )
+        val pixels = IntArray(size * size)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                pixels[y * size + x] = if (matrix[x, y]) 0xFF1B4D3E.toInt() else 0xFFFFFFFF.toInt()
+            }
+        }
+        Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).apply {
+            setPixels(pixels, 0, size, 0, 0, size, size)
+        }.asImageBitmap()
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private val ContentCopyIcon: ImageVector = ImageVector.Builder(
+    name = "ContentCopy",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(
+        fill = SolidColor(Color.Black),
+        pathFillType = PathFillType.NonZero,
+    ) {
+        moveTo(16f, 1f)
+        horizontalLineTo(4f)
+        curveTo(2.9f, 1f, 2f, 1.9f, 2f, 3f)
+        verticalLineTo(17f)
+        horizontalLineTo(4f)
+        verticalLineTo(3f)
+        horizontalLineTo(16f)
+        verticalLineTo(1f)
+        close()
+        moveTo(19f, 5f)
+        horizontalLineTo(8f)
+        curveTo(6.9f, 5f, 6f, 5.9f, 6f, 7f)
+        verticalLineTo(21f)
+        curveTo(6f, 22.1f, 6.9f, 23f, 8f, 23f)
+        horizontalLineTo(19f)
+        curveTo(20.1f, 23f, 21f, 22.1f, 21f, 21f)
+        verticalLineTo(7f)
+        curveTo(21f, 5.9f, 20.1f, 5f, 19f, 5f)
+        close()
+        moveTo(19f, 21f)
+        horizontalLineTo(8f)
+        verticalLineTo(7f)
+        horizontalLineTo(19f)
+        verticalLineTo(21f)
+        close()
+    }
+}.build()
+
+private fun shareLiveLink(context: Context, text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+        putExtra(Intent.EXTRA_SUBJECT, "Результаты online")
+    }
+    context.startActivity(Intent.createChooser(intent, "Результаты online"))
 }
 
 @Composable
@@ -1143,6 +1403,8 @@ fun ResultsScreen(
     finishCp: Int,
     liveNote: String,
     livePending: Boolean,
+    liveUrl: String?,
+    liveShareText: String?,
     onSendLive: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
     onAssignCourse: (Int, String, String) -> Unit,
@@ -1185,6 +1447,13 @@ fun ResultsScreen(
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+        if (liveUrl != null) {
+            LiveLinkRow(
+                url = liveUrl,
+                shareText = liveShareText ?: liveUrl,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
         }
         OutlinedTextField(
             value = query,
@@ -1581,8 +1850,99 @@ private fun CourseChangeDialog(
 }
 
 @Composable
+fun StartsScreen(
+    starts: List<SavedStart>,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
+    onExport: (Long) -> Unit,
+    onNewStart: () -> Unit,
+) {
+    var pendingDelete by remember { mutableStateOf<SavedStart?>(null) }
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        item {
+            Text(
+                "Текущий старт не удаляется при «Новый старт» — он остаётся в этом списке. CSV читает десктоп: финишный дамп, стартовый протокол и дистанции.",
+                color = Muted,
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onNewStart) { Text("Новый старт") }
+            }
+        }
+        if (starts.isEmpty()) {
+            item { Text("Сохранённых стартов нет.", color = Muted) }
+        }
+        items(starts, key = { it.id }) { start ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CardWhite),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable(enabled = !start.current) { onOpen(start.id) },
+                        ) {
+                            Text(start.label, style = MaterialTheme.typography.titleMedium)
+                            val bits = buildList {
+                                if (start.date.isNotBlank()) add(start.date)
+                                add("${start.personCount} уч.")
+                                add("${start.chipCount} чипов")
+                                if (start.current) add("текущий")
+                            }
+                            Text(bits.joinToString(" · "), color = Muted, style = MaterialTheme.typography.bodySmall)
+                            if (!start.current) {
+                                Text("Нажмите, чтобы открыть", color = OkGreen, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        CompactTextButton("CSV", onClick = { onExport(start.id) })
+                        if (!start.current) {
+                            IconButton(onClick = { pendingDelete = start }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Удалить старт", tint = Danger)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pendingDelete?.let { start ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Удалить старт?") },
+            text = {
+                Text(
+                    "«${start.label}» будет удалён безвозвратно: протокол, дистанции, считанные чипы и корректировки. " +
+                        "Сначала экспортируйте CSV, если данные ещё нужны.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDelete = null
+                        onDelete(start.id)
+                    },
+                ) {
+                    Text("Удалить", color = Danger)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Отмена") }
+            },
+        )
+    }
+}
+
+@Composable
 fun MoreMenu(onOpen: (MorePage) -> Unit) {
     val items = listOf(
+        MorePage.Starts to "Старты и экспорт",
         MorePage.Removed to "Снятые КП",
         MorePage.Exclusions to "Исключение перегонов",
         MorePage.Corrections to "Персональные корректировки",
@@ -1948,6 +2308,17 @@ fun PublishScreen(
             },
             enabled = !busy,
         ) { Text("Собрать slug из даты и названия") }
+        val previewUrl = EventStore.liveViewerUrl(api, slug)
+        if (previewUrl != null) {
+            LiveLinkRow(
+                url = previewUrl,
+                shareText = EventStore.liveShareText(
+                    settings.copy(apiBaseUrl = api, slug = slug, title = title),
+                ) ?: previewUrl,
+            )
+        } else {
+            Text("Ссылка на результаты появится, когда заполнены адрес сайта и slug.", color = Muted)
+        }
         Button(
             onClick = {
                 onPublish(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title))

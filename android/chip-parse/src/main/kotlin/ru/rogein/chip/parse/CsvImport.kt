@@ -60,7 +60,10 @@ object CsvImport {
     }
 
     private fun logicalLines(text: String): List<String> =
-        text.split('\n').map { it.trimEnd('\r') }.filter { it.isNotBlank() }
+        text.removePrefix("\uFEFF")
+            .split('\n')
+            .map { it.trimEnd('\r').removePrefix("\uFEFF") }
+            .filter { it.isNotBlank() }
 
     private fun detectDelimiter(line: String): Char {
         val tabs = line.count { it == '\t' }

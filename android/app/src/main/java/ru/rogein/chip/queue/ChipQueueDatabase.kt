@@ -8,6 +8,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.Update
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
@@ -54,6 +55,20 @@ data class StartMetaEntity(
     val appliedAt: Long,
 )
 
+@Entity(tableName = "starts")
+data class StartArchiveEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val competitionDate: String,
+    val slug: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val chipCount: Int,
+    val personCount: Int,
+    val isCurrent: Boolean,
+    val payloadJson: String,
+)
+
 @Dao
 interface ChipQueueDao {
     @Query("SELECT * FROM chip_queue ORDER BY createdAt DESC")
@@ -65,7 +80,7 @@ interface ChipQueueDao {
     @Query("SELECT * FROM chip_queue ORDER BY createdAt ASC")
     suspend fun listAll(): List<QueuedChipEntity>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(item: QueuedChipEntity)
 
     @Query(
@@ -143,22 +158,51 @@ interface StartListDao {
     suspend fun upsertMeta(meta: StartMetaEntity)
 }
 
+@Dao
+interface StartArchiveDao {
+    @Query("SELECT * FROM starts ORDER BY isCurrent DESC, updatedAt DESC")
+    fun observeAll(): Flow<List<StartArchiveEntity>>
+
+    @Query("SELECT * FROM starts ORDER BY updatedAt DESC")
+    suspend fun listAll(): List<StartArchiveEntity>
+
+    @Query("SELECT * FROM starts WHERE isCurrent = 1 LIMIT 1")
+    suspend fun current(): StartArchiveEntity?
+
+    @Query("SELECT * FROM starts WHERE id = :id LIMIT 1")
+    suspend fun byId(id: Long): StartArchiveEntity?
+
+    @Insert
+    suspend fun insert(row: StartArchiveEntity): Long
+
+    @Update
+    suspend fun update(row: StartArchiveEntity)
+
+    @Query("UPDATE starts SET isCurrent = 0")
+    suspend fun clearCurrent()
+
+    @Query("DELETE FROM starts WHERE id = :id")
+    suspend fun delete(id: Long)
+}
+
 @Database(
     entities = [
         QueuedChipEntity::class,
         StartPersonEntity::class,
         StartCourseEntity::class,
         StartMetaEntity::class,
+        StartArchiveEntity::class,
         SettingEntity::class,
         CorrectionEntity::class,
         ExclusionEntity::class,
     ],
-    version = 5,
+    version = 6,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
     abstract fun startListDao(): StartListDao
     abstract fun eventDao(): EventDao
+    abstract fun startArchiveDao(): StartArchiveDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -237,6 +281,46 @@ abstract class ChipQueueDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE start_people ADD COLUMN issuedCourse TEXT NOT NULL DEFAULT ''")
                 db.execSQL("UPDATE start_people SET issuedCourse = currentCourse WHERE issuedAt > 0")
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS starts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        title TEXT NOT NULL,
+                        competitionDate TEXT NOT NULL,
+                        slug TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        chipCount INTEGER NOT NULL,
+                        personCount INTEGER NOT NULL,
+                        isCurrent INTEGER NOT NULL,
+                        payloadJson TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                val now = System.currentTimeMillis()
+                db.execSQL(
+                    """
+                    INSERT INTO starts (
+                        title, competitionDate, slug, createdAt, updatedAt,
+                        chipCount, personCount, isCurrent, payloadJson
+                    )
+                    SELECT
+                        COALESCE((SELECT value FROM event_settings WHERE `key` = 'title'), ''),
+                        COALESCE((SELECT value FROM event_settings WHERE `key` = 'competition_date'), ''),
+                        COALESCE((SELECT value FROM event_settings WHERE `key` = 'slug'), ''),
+                        $now,
+                        $now,
+                        (SELECT COUNT(*) FROM chip_queue),
+                        (SELECT COUNT(*) FROM start_people),
+                        1,
+                        ''
+                    """.trimIndent(),
+                )
             }
         }
     }
