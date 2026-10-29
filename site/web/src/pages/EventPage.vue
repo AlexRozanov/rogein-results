@@ -11,6 +11,8 @@ import {
   type SplitCol,
 } from "../orientSplits";
 
+type SourceId = number | string;
+
 type AwardGroup = {
   id: number;
   source_id: number;
@@ -20,7 +22,7 @@ type AwardGroup = {
 
 type ResultRow = {
   award_group_id: number;
-  participant_source_id: number;
+  participant_source_id: SourceId;
   bib: string;
   name: string;
   gender: string | null;
@@ -58,7 +60,7 @@ const loading = ref(true);
 const updatedAt = ref<Date | null>(null);
 const liveConnected = ref(false);
 const showSplits = ref(false);
-const compareIds = ref<Record<number, number[]>>({});
+const compareIds = ref<Record<number, string[]>>({});
 const compareQuery = ref<Record<number, string>>({});
 const compareMenuFor = ref<number | null>(null);
 const activeGroupId = ref<number | null>(null);
@@ -111,7 +113,7 @@ const displayedResults = computed(() => {
       };
     }
     const idSet = new Set(selected);
-    const viewRows = block.rows.filter((row) => idSet.has(row.participant_source_id));
+    const viewRows = block.rows.filter((row) => idSet.has(sourceKey(row.participant_source_id)));
     const viewSplitCells = block.splitCols.length
       ? buildSplitCells(viewRows, block.splitCols, startCp)
       : viewRows.map(() => []);
@@ -136,7 +138,7 @@ function normName(value: string) {
 function selectedRows(block: { group: AwardGroup; rows: ResultRow[] }) {
   const ids = compareIds.value[block.group.id] ?? [];
   return ids
-    .map((id) => block.rows.find((row) => row.participant_source_id === id))
+    .map((id) => block.rows.find((row) => sourceKey(row.participant_source_id) === id))
     .filter((row): row is ResultRow => Boolean(row));
 }
 
@@ -144,7 +146,7 @@ function compareSuggestions(block: { group: AwardGroup; rows: ResultRow[] }) {
   const q = normName(compareQuery.value[block.group.id] ?? "");
   const selected = new Set(compareIds.value[block.group.id] ?? []);
   return block.rows.filter((row) => {
-    if (selected.has(row.participant_source_id)) return false;
+    if (selected.has(sourceKey(row.participant_source_id))) return false;
     return !q || normName(row.name).includes(q);
   });
 }
@@ -168,16 +170,17 @@ function onCompareInput(groupId: number, event: Event) {
 
 function addToCompare(groupId: number, row: ResultRow) {
   const current = compareIds.value[groupId] ?? [];
-  if (current.includes(row.participant_source_id)) return;
-  compareIds.value = { ...compareIds.value, [groupId]: [...current, row.participant_source_id] };
+  const id = sourceKey(row.participant_source_id);
+  if (current.includes(id)) return;
+  compareIds.value = { ...compareIds.value, [groupId]: [...current, id] };
   compareQuery.value = { ...compareQuery.value, [groupId]: "" };
   compareMenuFor.value = groupId;
 }
 
-function removeFromCompare(groupId: number, id: number) {
+function removeFromCompare(groupId: number, id: SourceId) {
   compareIds.value = {
     ...compareIds.value,
-    [groupId]: (compareIds.value[groupId] ?? []).filter((item) => item !== id),
+    [groupId]: (compareIds.value[groupId] ?? []).filter((item) => item !== sourceKey(id)),
   };
 }
 
@@ -353,9 +356,13 @@ function eventApiUrl() {
   return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
 }
 
-function personHref(slug: string, sourceId: number, groupId: number) {
+function sourceKey(id: SourceId) {
+  return String(id);
+}
+
+function personHref(slug: string, sourceId: SourceId, groupId: number) {
   const prefix = isLive.value ? "/live" : "/events";
-  return `${prefix}/${slug}/p/${sourceId}?g=${groupId}`;
+  return `${prefix}/${slug}/p/${sourceKey(sourceId)}?g=${groupId}`;
 }
 
 const updatedLabel = computed(() => {

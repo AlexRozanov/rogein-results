@@ -1409,6 +1409,9 @@ fun ResultsScreen(
     onAddCp: (Int, String, Int) -> Unit,
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    canPrint: Boolean = false,
+    onPrint: (ScoredResult) -> Unit = {},
+    onPickFinishCsv: () -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
@@ -1436,6 +1439,9 @@ fun ResultsScreen(
         ) {
             TextButton(onClick = onSendLive, enabled = results.isNotEmpty()) {
                 Text("Отправить в online")
+            }
+            TextButton(onClick = onPickFinishCsv) {
+                Text("Загрузить CSV")
             }
             if (liveNote.isNotBlank() || livePending) {
                 Text(
@@ -1517,6 +1523,8 @@ fun ResultsScreen(
                             onAddCp = onAddCp,
                             onAssignCourse = onAssignCourse,
                             onDeleteCorrection = onDeleteCorrection,
+                            canPrint = canPrint,
+                            onPrint = onPrint,
                         )
                     }
                 }
@@ -1577,6 +1585,8 @@ private fun ResultProtocolRow(
     finishCp: Int,
     onToggle: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
+    canPrint: Boolean = false,
+    onPrint: (ScoredResult) -> Unit = {},
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
 ) {
@@ -1647,6 +1657,8 @@ private fun ResultProtocolRow(
                 onAddCp = onAddCp,
                 onAssignCourse = onAssignCourse,
                 onDeleteCorrection = onDeleteCorrection,
+                canPrint = canPrint,
+                onPrint = onPrint,
             )
         }
         HorizontalDivider()
@@ -1665,6 +1677,8 @@ private fun ResultRowDetails(
     onAddCp: (Int, String, Int) -> Unit,
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    canPrint: Boolean,
+    onPrint: (ScoredResult) -> Unit,
 ) {
     val id = row.logicalId
     val required = filterCourseCps(
@@ -1734,6 +1748,8 @@ private fun ResultRowDetails(
             startCp = startCp,
             finishCp = finishCp,
             onDismiss = { marksOpen = false },
+            canPrint = canPrint,
+            onPrint = { onPrint(row) },
         )
     }
     if (courseChangeOpen && id != null) {
@@ -1756,6 +1772,8 @@ private fun UsedMarksDialog(
     startCp: Int,
     finishCp: Int,
     onDismiss: () -> Unit,
+    canPrint: Boolean,
+    onPrint: () -> Unit,
 ) {
     val classified = classifyActualPunches(punches, required, startCp, finishCp)
     AlertDialog(
@@ -1812,6 +1830,11 @@ private fun UsedMarksDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
+        dismissButton = {
+            if (canPrint) {
+                TextButton(onClick = onPrint) { Text("Печать") }
+            }
         },
     )
 }
@@ -1943,6 +1966,7 @@ fun StartsScreen(
 fun MoreMenu(onOpen: (MorePage) -> Unit) {
     val items = listOf(
         MorePage.Starts to "Старты и экспорт",
+        MorePage.Printer to "Принтер",
         MorePage.Removed to "Снятые КП",
         MorePage.Exclusions to "Исключение перегонов",
         MorePage.Corrections to "Персональные корректировки",

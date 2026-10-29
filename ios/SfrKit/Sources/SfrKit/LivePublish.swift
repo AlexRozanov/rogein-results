@@ -262,11 +262,11 @@ public enum LivePublish {
             lsb = UInt64(bytes.8) << 56 | UInt64(bytes.9) << 48 | UInt64(bytes.10) << 40 | UInt64(bytes.11) << 32
                 | UInt64(bytes.12) << 24 | UInt64(bytes.13) << 16 | UInt64(bytes.14) << 8 | UInt64(bytes.15)
             let hashed = Int64(bitPattern: msb) ^ Int64(bitPattern: lsb)
-            let positive = hashed & Int64.max
+            let positive = hashed & 0x7FFF_FFFF
             if positive > 0 { return positive }
         }
         let hashed = Int64(truncatingIfNeeded: queueId.hashValue)
-        let positive = hashed & Int64.max
+        let positive = hashed & 0x7FFF_FFFF
         if positive > 0 { return positive }
         if let chip = logicalId, chip > 0 { return Int64(chip) }
         return 1

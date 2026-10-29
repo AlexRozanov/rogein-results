@@ -1,7 +1,12 @@
 use chrono::{NaiveDate, DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use sqlx::FromRow;
 use sqlx::types::JsonValue;
+
+/// Browser JSON.parse() cannot keep integers above 2^53. Send ids as strings.
+fn serialize_source_id<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
 
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct EventListItem {
@@ -48,6 +53,7 @@ pub struct ResultPublic {
     pub id: i64,
     pub award_group_id: i64,
     pub participant_id: i64,
+    #[serde(serialize_with = "serialize_source_id")]
     pub participant_source_id: i64,
     pub bib: String,
     pub name: String,
@@ -68,6 +74,7 @@ pub struct ResultPublic {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct ParticipantPublic {
     pub id: i64,
+    #[serde(serialize_with = "serialize_source_id")]
     pub source_id: i64,
     pub bib: String,
     pub chip_physical: Option<String>,

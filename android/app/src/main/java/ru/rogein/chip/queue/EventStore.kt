@@ -533,7 +533,8 @@ class EventStore(
             } else {
                 queueId.hashCode().toLong()
             }
-            val positive = hashed and Long.MAX_VALUE
+            // Keep ids inside JS Number.MAX_SAFE_INTEGER so live links survive JSON.parse.
+            val positive = hashed and 0x7FFF_FFFFL
             if (positive > 0L) return positive
             val chip = logicalId?.toLong() ?: 0L
             return if (chip > 0L) chip else 1L

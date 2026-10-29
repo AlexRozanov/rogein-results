@@ -23,10 +23,19 @@ import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.parse.TestCoursePlan
+import ru.rogein.chip.parse.ReceiptMark
+import ru.rogein.chip.parse.ReceiptText
+import ru.rogein.chip.parse.SplitReceipt
+import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.courseKey
+import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.formatElapsed
+import ru.rogein.chip.parse.orientPunchWindow
+import ru.rogein.chip.printer.BondedPrinter
 import ru.rogein.chip.queue.ChipQueueRepository
 import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.EnqueueResult
+import ru.rogein.chip.queue.FinishCsvImportPreview
 import ru.rogein.chip.queue.EventSettings
 import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.ExclusionEntity
@@ -50,9 +59,20 @@ enum class StationProgram(val command: StationCommand, val title: String) {
 
 enum class AppSection { Chip, Protocol, Results, More }
 
-enum class MorePage { Menu, Starts, Removed, Exclusions, Corrections, Publish, Settings }
+enum class MorePage { Menu, Starts, Printer, Removed, Exclusions, Corrections, Publish, Settings }
 
-enum class CsvImportKind { Protocol, Courses }
+data class PrintPrompt(
+    val summary: String,
+    val text: String,
+)
+
+enum class CsvImportKind { Protocol, Courses, Finish }
+
+data class FinishCsvPrompt(
+    val addedCount: Int,
+    val conflictCount: Int,
+    val conflictLabels: List<String>,
+)
 
 data class FinishReplacePrompt(
     val logicalId: Int?,
@@ -155,6 +175,10 @@ class ChipQueueViewModel(
     private val _finishReplacePrompt = MutableStateFlow<FinishReplacePrompt?>(null)
     val finishReplacePrompt = _finishReplacePrompt.asStateFlow()
 
+    private val _finishCsvPrompt = MutableStateFlow<FinishCsvPrompt?>(null)
+    val finishCsvPrompt = _finishCsvPrompt.asStateFlow()
+    private var pendingFinishCsv: FinishCsvImportPreview? = null
+
     private val _issueOverwritePrompt = MutableStateFlow<IssueOverwritePrompt?>(null)
     val issueOverwritePrompt = _issueOverwritePrompt.asStateFlow()
 
@@ -212,6 +236,12 @@ class ChipQueueViewModel(
     private val _csvExport = MutableStateFlow<List<Pair<String, String>>?>(null)
     val csvExport = _csvExport.asStateFlow()
 
+    private val _printPrompt = MutableStateFlow<PrintPrompt?>(null)
+    val printPrompt = _printPrompt.asStateFlow()
+
+    private val _printerName = MutableStateFlow("")
+    val printerName = _printerName.asStateFlow()
+
     @Volatile
     private var chipIo: ChipIo? = null
 
@@ -237,6 +267,7 @@ class ChipQueueViewModel(
     init {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.ensureCurrentStart() }
+            _printerName.value = repository.printer.selectedName()
             while (isActive) {
                 delay(4_000)
                 runCatching { repository.republishSnapshot() }
@@ -306,6 +337,7 @@ class ChipQueueViewModel(
                 _status.value = when (kind) {
                     CsvImportKind.Protocol -> repository.startList.importProtocolCsv(text, pendingCsvReset)
                     CsvImportKind.Courses -> repository.startList.importCoursesCsv(text, pendingCsvReset)
+                    CsvImportKind.Finish -> importFinishCsv(text)
                 }
             } catch (e: Exception) {
                 _status.value = e.message ?: "Ошибка CSV"
@@ -921,6 +953,70 @@ class ChipQueueViewModel(
         _status.value = "№ $id не перезаписан."
     }
 
+    fun confirmFinishCsvOverwrite() {
+        applyPendingFinishCsv(overwrite = true)
+    }
+
+    fun confirmFinishCsvNewOnly() {
+        applyPendingFinishCsv(overwrite = false)
+    }
+
+    fun cancelFinishCsvImport() {
+        pendingFinishCsv = null
+        _finishCsvPrompt.value = null
+        _status.value = "CSV не загружен."
+    }
+
+    private suspend fun importFinishCsv(text: String): String {
+        val preview = repository.previewFinishCsv(text)
+        if (preview.fresh.isEmpty() && preview.conflicts.isEmpty()) {
+            error("В файле нет финишных отметок")
+        }
+        if (preview.conflicts.isEmpty()) {
+            return applyFinishCsv(preview, overwrite = false)
+        }
+        pendingFinishCsv = preview
+        _finishCsvPrompt.value = FinishCsvPrompt(
+            addedCount = preview.fresh.size,
+            conflictCount = preview.conflicts.size,
+            conflictLabels = preview.conflicts.take(8).map { row ->
+                val id = row.dump.logicalId?.toString() ?: "—"
+                val course = row.courseName.ifBlank { "без дистанции" }
+                "№ $id $course"
+            },
+        )
+        return "В CSV ${preview.conflicts.size} уже есть в результатах."
+    }
+
+    private fun applyPendingFinishCsv(overwrite: Boolean) {
+        val preview = pendingFinishCsv ?: return
+        pendingFinishCsv = null
+        _finishCsvPrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                _status.value = applyFinishCsv(preview, overwrite)
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Ошибка CSV"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    private suspend fun applyFinishCsv(preview: FinishCsvImportPreview, overwrite: Boolean): String {
+        val stats = repository.importFinishCsv(preview, overwrite)
+        repository.requestLiveSend()
+        val parts = ArrayList<String>()
+        parts += "добавлено ${stats.added}"
+        if (overwrite) {
+            parts += "перезаписано ${stats.overwritten}"
+        } else if (preview.conflicts.isNotEmpty()) {
+            parts += "${preview.conflicts.size} уже были, не менялись"
+        }
+        return "CSV: ${parts.joinToString(", ")}."
+    }
+
     private suspend fun saveFinishDump(
         dump: ChipDump,
         rawHex: String,
@@ -949,6 +1045,7 @@ class ChipQueueViewModel(
                     "$who · в очереди, chip-queue.json не записан: ${result.snapshotError}"
                 }
                 signalSuccess()
+                maybeAskPrint(dump.logicalId, course)
             }
         }
     }
@@ -1395,6 +1492,116 @@ class ChipQueueViewModel(
             person.name.lowercase().replace('ё', 'е').contains(q) ||
                 person.id.toString().contains(q)
         }
+    }
+
+    fun bondedPrinters(): List<BondedPrinter> = repository.printer.bonded()
+
+    fun hasPrinterPermission(): Boolean = repository.printer.hasConnectPermission()
+
+    fun selectPrinter(device: BondedPrinter) {
+        repository.printer.save(device.address, device.name)
+        _printerName.value = device.name
+        _status.value = "Принтер: ${device.name}"
+    }
+
+    fun clearPrinter() {
+        repository.printer.clear()
+        _printerName.value = ""
+        _status.value = "Принтер отключён"
+    }
+
+    fun testPrinter() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.printer.printSelfTest()
+                _status.value = "Тест отправлен на принтер"
+            } catch (e: Exception) {
+                _status.value = "Тест не удался: ${e.message ?: "ошибка принтера"}"
+            }
+        }
+    }
+
+    fun confirmPrint() {
+        val prompt = _printPrompt.value ?: return
+        _printPrompt.value = null
+        printText(prompt.text, saved = true)
+    }
+
+    fun skipPrint() {
+        _printPrompt.value = null
+    }
+
+    fun printScored(row: ScoredResult) {
+        printText(receiptText(row), saved = false)
+    }
+
+    private fun printText(text: String, saved: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.printer.print(text)
+                _status.value = "Чек напечатан"
+            } catch (e: Exception) {
+                val fail = e.message ?: "ошибка принтера"
+                _status.value = if (saved) {
+                    "Результат сохранён, печать не удалась: $fail"
+                } else {
+                    "Печать не удалась: $fail"
+                }
+            }
+        }
+    }
+
+    private suspend fun maybeAskPrint(logicalId: Int?, course: String) {
+        if (!repository.printer.isReady()) return
+        val scored = EventStore.score(
+            repository.itemsNow(),
+            people.value,
+            courses.value,
+            settings.value,
+            corrections.value,
+            exclusions.value,
+        )
+        val row = scored.find { item ->
+            item.logicalId == logicalId && courseKey(item.course) == courseKey(course)
+        } ?: return
+        val who = row.logicalId?.let { "№ $it" } ?: row.name
+        val summary = listOf(who, row.course.ifBlank { "без дистанции" }, formatElapsed(row.calc.elapsedSeconds))
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        _printPrompt.value = PrintPrompt(summary = summary, text = receiptText(row))
+    }
+
+    private fun receiptText(row: ScoredResult): String {
+        val settings = settings.value
+        return ReceiptText.format(
+            SplitReceipt(
+                date = settings.competitionDate,
+                title = settings.title,
+                course = row.course,
+                bib = row.logicalId?.toString().orEmpty(),
+                name = row.name,
+                marks = receiptMarks(row, settings),
+                startCp = settings.startCp,
+                elapsedSeconds = row.calc.elapsedSeconds,
+                status = row.calc.status,
+            ),
+        )
+    }
+
+    private fun receiptMarks(row: ScoredResult, settings: EventSettings): List<ReceiptMark> {
+        val required = filterCourseCps(
+            courses.value.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+            EventStore.removedCps(corrections.value),
+        )
+        val window = orientPunchWindow(row.punches, settings.startCp, settings.finishCp)
+        val expanded = applyAddedCps(
+            window,
+            required,
+            EventStore.addCpCounts(row.logicalId, row.course, corrections.value),
+            settings.startCp,
+            settings.finishCp,
+        )
+        return expanded.map { ReceiptMark(it.cp, it.seconds) }
     }
 
     companion object {

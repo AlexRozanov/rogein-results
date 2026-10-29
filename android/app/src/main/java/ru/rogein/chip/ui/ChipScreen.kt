@@ -96,6 +96,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val exclusions by viewModel.exclusions.collectAsStateWithLifecycle()
     val savedStarts by viewModel.savedStarts.collectAsStateWithLifecycle()
     val csvExport by viewModel.csvExport.collectAsStateWithLifecycle()
+    val printPrompt by viewModel.printPrompt.collectAsStateWithLifecycle()
+    val printerName by viewModel.printerName.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val mode by viewModel.mode.collectAsStateWithLifecycle()
@@ -103,6 +105,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val morePage by viewModel.morePage.collectAsStateWithLifecycle()
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
+    val finishCsvPrompt by viewModel.finishCsvPrompt.collectAsStateWithLifecycle()
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
     val stationWritePrompt by viewModel.stationWritePrompt.collectAsStateWithLifecycle()
     val stationProgram by viewModel.stationProgram.collectAsStateWithLifecycle()
@@ -296,9 +299,19 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onAddCp = viewModel::addMissingCp,
                     onAssignCourse = viewModel::assignCourse,
                     onDeleteCorrection = viewModel::deleteCorrection,
+                    canPrint = printerName.isNotBlank(),
+                    onPrint = viewModel::printScored,
+                    onPickFinishCsv = { csvPicker.pick(CsvImportKind.Finish) },
                 )
                 AppSection.More -> when (morePage) {
                     MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage)
+                    MorePage.Printer -> PrinterScreen(
+                        selectedName = printerName,
+                        onSelect = viewModel::selectPrinter,
+                        onClear = viewModel::clearPrinter,
+                        onTest = viewModel::testPrinter,
+                        loadBonded = viewModel::bondedPrinters,
+                    )
                     MorePage.Starts -> StartsScreen(
                         starts = visibleStarts,
                         onOpen = viewModel::openStart,
@@ -417,6 +430,49 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             },
             dismissButton = {
                 TextButton(onClick = viewModel::cancelFinishReplace) { Text("Нет") }
+            },
+        )
+    }
+    finishCsvPrompt?.let { prompt ->
+        val names = prompt.conflictLabels.joinToString(", ")
+        val extra = (prompt.conflictCount - prompt.conflictLabels.size).coerceAtLeast(0)
+        val who = if (extra > 0) "$names и ещё $extra" else names
+        val addPart = if (prompt.addedCount > 0) {
+            "Новых будет добавлено ${prompt.addedCount}. "
+        } else {
+            ""
+        }
+        AlertDialog(
+            onDismissRequest = viewModel::cancelFinishCsvImport,
+            title = { Text("Эти результаты уже есть") },
+            text = {
+                Text(
+                    "В CSV уже считаны на этом телефоне: $who.\n" +
+                        addPart +
+                        "Перезаписать их или добавить только новых? Результаты, которых нет в файле, не изменятся.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmFinishCsvOverwrite) { Text("Перезаписать") }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = viewModel::confirmFinishCsvNewOnly) { Text("Только новые") }
+                    TextButton(onClick = viewModel::cancelFinishCsvImport) { Text("Отмена") }
+                }
+            },
+        )
+    }
+    printPrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = viewModel::skipPrint,
+            title = { Text("Распечатать результат?") },
+            text = { Text(prompt.summary) },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmPrint) { Text("Да") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::skipPrint) { Text("Нет") }
             },
         )
     }
@@ -575,6 +631,7 @@ private fun topTitle(section: AppSection, morePage: MorePage): String = when (se
     AppSection.More -> when (morePage) {
         MorePage.Menu -> "Ещё"
         MorePage.Starts -> "Старты"
+        MorePage.Printer -> "Принтер"
         MorePage.Removed -> "Снятые КП"
         MorePage.Exclusions -> "Исключение перегонов"
         MorePage.Corrections -> "Персональные корректировки"

@@ -3,6 +3,9 @@ package ru.rogein.chip.queue
 import android.content.Context
 import androidx.room.Room
 import ru.rogein.chip.parse.ChipDump
+import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.toChipDump
+import ru.rogein.chip.printer.PrinterStore
 import ru.rogein.chip.startlist.StartListStore
 import java.util.UUID
 
@@ -11,14 +14,33 @@ sealed class EnqueueResult {
     data class Duplicate(val logicalId: Int?, val courseName: String) : EnqueueResult()
 }
 
+data class PendingFinishImport(
+    val dump: ChipDump,
+    val personName: String,
+    val courseName: String,
+)
+
+data class FinishCsvImportPreview(
+    val fresh: List<PendingFinishImport>,
+    val conflicts: List<PendingFinishImport>,
+)
+
+data class FinishCsvImportStats(
+    val added: Int,
+    val overwritten: Int,
+)
+
 class ChipQueueRepository(
     private val dao: ChipQueueDao,
     private val snapshot: ChipQueueSnapshotWriter,
     val startList: StartListStore,
     val event: EventStore,
     private val archive: StartArchiveStore,
+    val printer: PrinterStore,
 ) {
     fun observeAll() = dao.observeAll()
+
+    suspend fun itemsNow() = dao.listAll()
 
     fun observeStarts() = archive.observe()
 
@@ -31,6 +53,7 @@ class ChipQueueRepository(
         personName: String = "",
         courseName: String = "",
         replace: Boolean = false,
+        publish: Boolean = true,
     ): EnqueueResult {
         val course = courseName.trim()
         val chipId = dump.logicalId
@@ -59,7 +82,53 @@ class ChipQueueRepository(
                 courseName = course,
             ),
         )
-        return EnqueueResult.Saved(publishSnapshot())
+        return EnqueueResult.Saved(if (publish) publishSnapshot() else null)
+    }
+
+    suspend fun previewFinishCsv(text: String): FinishCsvImportPreview {
+        val rows = CsvImport.finishDump(text)
+        val fresh = ArrayList<PendingFinishImport>()
+        val conflicts = ArrayList<PendingFinishImport>()
+        for (row in rows) {
+            val dump = row.toChipDump()
+            val id = dump.logicalId ?: continue
+            val pending = PendingFinishImport(
+                dump = dump,
+                personName = row.name,
+                courseName = row.course.trim(),
+            )
+            if (dao.existsByChipAndCourse(id, pending.courseName)) {
+                conflicts += pending
+            } else {
+                fresh += pending
+            }
+        }
+        if (fresh.isEmpty() && conflicts.isEmpty()) {
+            error("В файле нет финишных отметок")
+        }
+        return FinishCsvImportPreview(fresh, conflicts)
+    }
+
+    suspend fun importFinishCsv(
+        preview: FinishCsvImportPreview,
+        overwrite: Boolean,
+    ): FinishCsvImportStats {
+        val rows = if (overwrite) preview.fresh + preview.conflicts else preview.fresh
+        for (row in rows) {
+            enqueue(
+                dump = row.dump,
+                personName = row.personName,
+                courseName = row.courseName,
+                replace = overwrite,
+                publish = false,
+            )
+        }
+        publishSnapshot()
+        event.markLivePending()
+        return FinishCsvImportStats(
+            added = preview.fresh.size,
+            overwritten = if (overwrite) preview.conflicts.size else 0,
+        )
     }
 
     suspend fun deleteQueued(id: String): String? {
@@ -158,6 +227,7 @@ class ChipQueueRepository(
                 StartListStore(appContext, db.startListDao()),
                 EventStore(db.eventDao()),
                 StartArchiveStore(db),
+                PrinterStore(appContext),
             )
         }
     }

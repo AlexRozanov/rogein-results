@@ -14,9 +14,11 @@ type PathPoint = {
 
 type Mark = { seq: number; cp_number: number; mark_time: string };
 
+type SourceId = number | string;
+
 type Participant = {
   id: number;
-  source_id: number;
+  source_id: SourceId;
   bib: string;
   name: string;
   marks: Mark[];
@@ -34,7 +36,7 @@ type AwardGroup = {
 
 type ResultRow = {
   award_group_id: number;
-  participant_source_id: number;
+  participant_source_id: SourceId;
   place?: number | null;
   points_final: number;
   elapsed_seconds: number;
@@ -74,7 +76,9 @@ let livePoll: number | null = null;
 
 const personResults = computed(() => {
   if (!person.value || !event.value) return [];
-  return event.value.results.filter((row) => row.participant_source_id === person.value!.source_id);
+  return event.value.results.filter(
+    (row) => String(row.participant_source_id) === String(person.value!.source_id),
+  );
 });
 
 const selectedResult = computed(() => {
