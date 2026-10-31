@@ -3,6 +3,7 @@ package ru.rogein.chip.parse
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -64,7 +65,9 @@ class SfrChipMemoryTest {
         assertArrayEquals(byteArrayOf(0x00, 0x01, 0x00, 0x00), byBlock[4])
         assertArrayEquals(byteArrayOf(CP_START.toByte(), 0x12, 0x00, 0x00), byBlock[5])
         assertArrayEquals(byteArrayOf(0x00, 0x25, 0x00, 0x00), byBlock[6])
-        assertEquals(3, plan.first().first)
+        assertEquals(4, plan.first().first)
+        assertTrue(plan.indexOfFirst { it.first == 4 } < plan.indexOfFirst { it.first == 3 })
+        assertTrue(plan.indexOfFirst { it.first == 6 } < plan.indexOfFirst { it.first == 7 })
     }
 
     @Test
@@ -88,7 +91,8 @@ class SfrChipMemoryTest {
         assertArrayEquals(STATION_BATTERY_BLOCK, byBlock[4])
         assertArrayEquals(ByteArray(4), byBlock[5])
         assertArrayEquals(ByteArray(4), byBlock[6])
-        assertArrayEquals(ByteArray(4), byBlock[8])
+        assertNull(byBlock[8])
+        assertTrue(plan.indexOfFirst { it.first == 4 } < plan.indexOfFirst { it.first == 3 })
         val active = SfrChipMemory.stationProgramPlan(
             StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
         ).associate { it.first to it.second }
@@ -97,6 +101,15 @@ class SfrChipMemoryTest {
             StationCommand.Passive, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
         ).associate { it.first to it.second }
         assertArrayEquals(STATION_PASSIVE_BLOCK, passive[4])
+        val activeAfterControl = SfrChipMemory.stationProgramPlan(
+            StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64, controlNumber = 31,
+        ).associate { it.first to it.second }
+        assertArrayEquals(STATION_ACTIVE_BLOCK, activeAfterControl[4])
+        assertArrayEquals(ByteArray(4), activeAfterControl[5])
+        val passiveAfterControl = SfrChipMemory.stationProgramPlan(
+            StationCommand.Passive, 0, 0, 0, oldPointerEnd = 7, blockCount = 64, controlNumber = 31,
+        ).associate { it.first to it.second }
+        assertArrayEquals(STATION_PASSIVE_BLOCK, passiveAfterControl[4])
     }
 
     @Test

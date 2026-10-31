@@ -22,6 +22,8 @@ import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.parse.SfrChipParser
+import ru.rogein.chip.parse.StationCheckReport
+import ru.rogein.chip.parse.StationCourseCheck
 import ru.rogein.chip.parse.TestCoursePlan
 import ru.rogein.chip.parse.ReceiptMark
 import ru.rogein.chip.parse.ReceiptText
@@ -43,11 +45,13 @@ import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.queue.ScoredResult
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
+import java.time.Instant
 import java.time.LocalTime
+import java.time.ZoneId
 
 enum class ChipMode { Issue, Finish, Station, Tests }
 
-enum class StationProgram(val command: StationCommand, val title: String) {
+enum class StationProgram(val command: StationCommand?, val title: String) {
     Control(StationCommand.Control, "КП"),
     Start(StationCommand.Start, "старт"),
     Finish(StationCommand.Finish, "финиш"),
@@ -55,6 +59,7 @@ enum class StationProgram(val command: StationCommand, val title: String) {
     Active(StationCommand.Active, "активный режим"),
     Passive(StationCommand.Passive, "пассивный режим"),
     Battery(StationCommand.Battery, "проверка батареи"),
+    Inspect(null, "проверка"),
 }
 
 enum class AppSection { Chip, Protocol, Results, More }
@@ -116,8 +121,16 @@ interface ChipIo {
         controlNumber: Int?,
         oldPointerEnd: Int?,
         blockCount: Int,
+        clock: LocalTime,
     )
 }
+
+/** Отсчёт до момента, записанного на чип как часы станции. */
+data class StationClockCountdown(
+    val deadlineEpochMs: Long,
+    val label: String,
+    val writeFinished: Boolean = false,
+)
 
 interface ChipFeedback {
     fun signalSuccess()
@@ -187,6 +200,21 @@ class ChipQueueViewModel(
 
     private val _stationProgram = MutableStateFlow(StationProgram.Control)
     val stationProgram = _stationProgram.asStateFlow()
+
+    private val _stationInspect = MutableStateFlow<String?>(null)
+    val stationInspect = _stationInspect.asStateFlow()
+
+    private val _stationCountdown = MutableStateFlow<StationClockCountdown?>(null)
+    val stationCountdown = _stationCountdown.asStateFlow()
+
+    private val _courseCheckOn = MutableStateFlow(false)
+    val courseCheckOn = _courseCheckOn.asStateFlow()
+
+    private val _courseCheckName = MutableStateFlow("")
+    val courseCheckName = _courseCheckName.asStateFlow()
+
+    private val _courseCheckReport = MutableStateFlow<StationCheckReport?>(null)
+    val courseCheckReport = _courseCheckReport.asStateFlow()
 
     private val _stationControlNumber = MutableStateFlow("")
     val stationControlNumber = _stationControlNumber.asStateFlow()
@@ -286,9 +314,27 @@ class ChipQueueViewModel(
 
     fun setSection(next: AppSection) {
         _section.value = next
+        if (next != AppSection.Protocol) {
+            _courseCheckOn.value = false
+        }
+        if (next != AppSection.Chip) {
+            _stationWritePrompt.value = null
+        }
         if (next != AppSection.More) {
             _morePage.value = MorePage.Menu
         }
+    }
+
+    fun setCourseCheck(on: Boolean) {
+        _courseCheckOn.value = on
+        if (on) _stationWritePrompt.value = null
+        if (!on) _courseCheckReport.value = null
+    }
+
+    fun setCourseCheckCourse(name: String) {
+        if (name == _courseCheckName.value) return
+        _courseCheckName.value = name
+        _courseCheckReport.value = null
     }
 
     fun setMorePage(page: MorePage) {
@@ -600,6 +646,7 @@ class ChipQueueViewModel(
     fun setStationProgram(program: StationProgram) {
         _stationProgram.value = program
         _stationWritePrompt.value = null
+        _stationInspect.value = null
         promptStatus()
     }
 
@@ -794,6 +841,9 @@ class ChipQueueViewModel(
 
     private fun stationPrompt(): String {
         val program = _stationProgram.value
+        if (program == StationProgram.Inspect) {
+            return "Проверка. Приложите чип — будет показан его режим, запись не выполняется."
+        }
         if (program == StationProgram.Control && parsedStationControlNumber() == null) {
             return "Укажите номер КП (1…255, кроме 240, 241 и 243), затем приложите чип."
         }
@@ -845,7 +895,7 @@ class ChipQueueViewModel(
 
     fun onChipBlocks(uid: String, blocks: List<ByteArray>, declaredBlockCount: Int? = null) {
         val now = System.currentTimeMillis()
-        if (uid == lastUid && now - lastAt < 2_000 && _mode.value != ChipMode.Station) {
+        if (uid == lastUid && now - lastAt < 2_000 && _mode.value != ChipMode.Station && !_courseCheckOn.value) {
             _busy.value = false
             return
         }
@@ -854,9 +904,15 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
-                if (_mode.value == ChipMode.Station) {
+                val stationWrite = _mode.value == ChipMode.Station &&
+                    _section.value == AppSection.Chip &&
+                    !_courseCheckOn.value
+                if (stationWrite) {
                     handleStationRead(blocks, declaredBlockCount)
                     return@launch
+                }
+                if (_courseCheckOn.value) {
+                    _stationWritePrompt.value = null
                 }
                 val dump = SfrChipParser.parse(uid, blocks, declaredBlockCount)
                 blockOrder = dump.blockOrder
@@ -867,6 +923,10 @@ class ChipQueueViewModel(
                 _chipLogicalId.value = dump.logicalId
                 val label = dump.logicalId?.let { "№ $it" } ?: "без номера"
                 _sessionSummary.value = "$label · $punchCount отметок"
+                if (_courseCheckOn.value) {
+                    handleCourseStationCheck(blocks, dump)
+                    return@launch
+                }
                 when (_mode.value) {
                     ChipMode.Issue -> handleIssueRead(dump.logicalId)
                     ChipMode.Finish -> handleFinishRead(dump, uid, blocks)
@@ -1177,6 +1237,31 @@ class ChipQueueViewModel(
         }
     }
 
+    private fun handleCourseStationCheck(blocks: List<ByteArray>, dump: ChipDump) {
+        val name = _courseCheckName.value.trim()
+        val course = courses.value.find { it.name.equals(name, true) }
+        if (course == null) {
+            _courseCheckReport.value = null
+            _status.value = "Выберите дистанцию для проверки станций."
+            signalError()
+            return
+        }
+        if (SfrChipParser.stationRole(blocks) != null && dump.punches.isEmpty()) {
+            _courseCheckReport.value = null
+            _status.value = "Это карта станции, а не чип с отметками. Очистите чип и отметьтесь на станциях."
+            signalError()
+            return
+        }
+        val report = StationCourseCheck.check(course.controls, dump.punches)
+        _courseCheckReport.value = report
+        _status.value = if (report.ok) {
+            "«${course.name}»: старт, финиш и все КП есть."
+        } else {
+            "«${course.name}»: проверка станций не сошлась."
+        }
+        if (report.ok) signalSuccess() else signalError()
+    }
+
     fun clearMarks() {
         val order = blockOrder
         val end = pointerEnd
@@ -1190,7 +1275,12 @@ class ChipQueueViewModel(
                 pointerEnd = 5
                 punchCount = 0
                 _sessionSummary.value = "${sessionLabel()} · 0 отметок"
-                _status.value = "Отметки очищены."
+                if (_courseCheckOn.value) {
+                    _courseCheckReport.value = null
+                    _status.value = "Отметки очищены. Отметьтесь на всех станциях и приложите чип."
+                } else {
+                    _status.value = "Отметки очищены."
+                }
                 signalSuccess()
             } catch (e: Exception) {
                 forgetChip()
@@ -1321,6 +1411,13 @@ class ChipQueueViewModel(
         _chipLogicalId.value = null
         val program = _stationProgram.value
         val controlNumber = parsedStationControlNumber()
+        if (program == StationProgram.Inspect) {
+            _stationWritePrompt.value = null
+            val text = SfrChipParser.describeChipMode(blocks)
+            _stationInspect.value = text
+            _status.value = text
+            return
+        }
         if (program == StationProgram.Control && controlNumber == null) {
             _status.value = "Укажите номер КП (1…255, кроме 240, 241 и 243)."
             signalError()
@@ -1337,7 +1434,7 @@ class ChipQueueViewModel(
     }
 
     fun confirmStationWrite() {
-        if (_mode.value != ChipMode.Station) {
+        if (_mode.value != ChipMode.Station || _section.value != AppSection.Chip || _courseCheckOn.value) {
             _stationWritePrompt.value = null
             return
         }
@@ -1350,25 +1447,73 @@ class ChipQueueViewModel(
             signalError()
             return
         }
+        val command = pending.program.command ?: return
+        val label = stationProgramLabel(pending.program, pending.controlNumber)
+        val setsClock = stationSetsClock(command)
+        val deadline = if (setsClock) System.currentTimeMillis() + STATION_CLOCK_LEAD_MS else 0L
+        val clock = if (setsClock) {
+            Instant.ofEpochMilli(deadline).atZone(ZoneId.systemDefault()).toLocalTime()
+        } else {
+            LocalTime.now()
+        }
+        if (setsClock) beginStationCountdown(deadline, label)
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
                 io.writeStationProgram(
                     order,
-                    pending.program.command,
-                    pending.controlNumber,
+                    command,
+                    pending.controlNumber.takeIf { pending.program == StationProgram.Control },
                     pending.oldPointerEnd,
                     pending.blockCount,
+                    clock,
                 )
-                val label = stationProgramLabel(pending.program, pending.controlNumber)
-                _status.value = "На чип записана станция «$label». Приложите этот чип к станции."
-                signalSuccess()
+                if (setsClock) {
+                    val current = _stationCountdown.value
+                    if (current != null && current.deadlineEpochMs == deadline) {
+                        _stationCountdown.value = current.copy(writeFinished = true)
+                    }
+                    _status.value = "На чип записана станция «$label». На нуле приложите этот чип к станции."
+                } else {
+                    _status.value = "На чип записана станция «$label». Приложите этот чип к станции."
+                    signalSuccess()
+                }
             } catch (e: Exception) {
+                if (setsClock) _stationCountdown.value = null
                 forgetChip()
                 _status.value = e.message ?: "Не удалось записать программу станции"
                 signalError()
             } finally {
                 _busy.value = false
+            }
+        }
+    }
+
+    private fun stationSetsClock(command: StationCommand): Boolean = when (command) {
+        StationCommand.Control, StationCommand.Start, StationCommand.Finish, StationCommand.Clear -> true
+        StationCommand.Active, StationCommand.Passive, StationCommand.Battery -> false
+    }
+
+    /** Цифры с начала записи. Ноль — момент, который уже лежит на чипе как время станции. */
+    private fun beginStationCountdown(deadline: Long, label: String) {
+        _stationCountdown.value = StationClockCountdown(deadline, label)
+        viewModelScope.launch {
+            var signaledAt = 0L
+            while (isActive) {
+                val state = _stationCountdown.value
+                if (state == null || state.deadlineEpochMs != deadline) return@launch
+                val now = System.currentTimeMillis()
+                if (signaledAt == 0L && state.writeFinished && now >= deadline) {
+                    signaledAt = now
+                    signalSuccess()
+                }
+                if (signaledAt != 0L && now >= signaledAt + STATION_CLOCK_ZERO_HOLD_MS) {
+                    if (_stationCountdown.value?.deadlineEpochMs == deadline) {
+                        _stationCountdown.value = null
+                    }
+                    return@launch
+                }
+                delay(40)
             }
         }
     }
@@ -1605,6 +1750,9 @@ class ChipQueueViewModel(
     }
 
     companion object {
+        private const val STATION_CLOCK_LEAD_MS = 3_000L
+        private const val STATION_CLOCK_ZERO_HOLD_MS = 700L
+
         fun factory(repository: ChipQueueRepository): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")

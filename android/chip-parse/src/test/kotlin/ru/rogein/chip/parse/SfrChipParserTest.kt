@@ -1,6 +1,7 @@
 package ru.rogein.chip.parse
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -149,6 +150,27 @@ class SfrChipParserTest {
     }
 
     @Test
+    fun serviceModeWinsOverLeftoverControlProgram() {
+        val control = stationChip(StationCommand.Control, 31)
+        val modes = listOf(
+            StationCommand.Active to STATION_ACTIVE_BLOCK,
+            StationCommand.Passive to STATION_PASSIVE_BLOCK,
+            StationCommand.Battery to STATION_BATTERY_BLOCK,
+        )
+        for ((command, mode) in modes) {
+            val hid = control.map { it.copyOf() }.toMutableList()
+            hid[4] = mode.copyOf()
+            assertEquals(command, SfrChipParser.stationCommand(hid))
+            assertFalse(SfrChipParser.describeChipMode(hid).contains("программатор"))
+
+            val nfc = control.map { it.reversed4() }.toMutableList()
+            nfc[4] = mode.reversed4()
+            assertEquals(command, SfrChipParser.stationCommand(nfc))
+            assertFalse(SfrChipParser.describeChipMode(nfc).contains("программатор"))
+        }
+    }
+
+    @Test
     fun detectsStationServiceCardsInHidAndNfcToolsOrder() {
         for (command in listOf(StationCommand.Active, StationCommand.Passive, StationCommand.Battery)) {
             val hid = stationChip(command)
@@ -157,6 +179,31 @@ class SfrChipParserTest {
             val nfc = hid.map { it.reversed4() }
             assertEquals(command, SfrChipParser.stationCommand(nfc))
         }
+    }
+
+    @Test
+    fun describesLoadedStationAndAthleteChips() {
+        val control = stationChip(StationCommand.Control, 31)
+        val controlText = SfrChipParser.describeChipMode(control)
+        assertTrue(controlText.contains("КП 31"))
+        assertTrue(controlText.contains("12:00:00"))
+        val reversed = SfrChipParser.describeChipMode(control.map { it.reversed4() })
+        assertTrue(reversed.contains("КП 31"))
+        assertTrue(reversed.contains("12:00:00"))
+
+        val battery = SfrChipParser.describeChipMode(stationChip(StationCommand.Battery))
+        assertTrue(battery.contains("проверки батареи"))
+        assertFalse(battery.contains("Время на карте"))
+
+        val athlete = MutableList(7) { ByteArray(4) }
+        athlete[3] = byteArrayOf(12, 0, 0, 0)
+        athlete[4] = byteArrayOf(5, 0, 0, 0)
+        val athleteText = SfrChipParser.describeChipMode(athlete)
+        assertTrue(athleteText.contains("№ 12"))
+        assertTrue(athleteText.contains("не карта станции"))
+
+        val empty = MutableList(7) { ByteArray(4) }
+        assertTrue(SfrChipParser.describeChipMode(empty).contains("не распознан"))
     }
 
     @Test

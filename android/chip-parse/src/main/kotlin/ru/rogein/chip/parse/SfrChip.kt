@@ -56,6 +56,9 @@ enum class StationCommand {
             Control, Active, Passive, Battery -> null
         }
 
+    val isService: Boolean
+        get() = this == Active || this == Passive || this == Battery
+
     val modeBlock: ByteArray
         get() = when (this) {
             Control, Start, Finish, Clear -> STATION_MODE_BLOCK

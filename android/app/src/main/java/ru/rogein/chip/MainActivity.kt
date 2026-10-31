@@ -208,14 +208,14 @@ class MainActivity : ComponentActivity() {
                 controlNumber: Int?,
                 oldPointerEnd: Int?,
                 blockCount: Int,
+                clock: LocalTime,
             ) {
                 val tag = sessionTag ?: error("Чип убран")
-                val now = LocalTime.now()
                 val plan = SfrChipMemory.stationProgramPlan(
                     command,
-                    now.hour,
-                    now.minute,
-                    now.second,
+                    clock.hour,
+                    clock.minute,
+                    clock.second,
                     oldPointerEnd,
                     blockCount,
                     controlNumber,
@@ -292,17 +292,18 @@ class MainActivity : ComponentActivity() {
             try {
                 val uid = formatUid(tag.id)
                 val mode = viewModel.mode.value
+                val checkingCourse = viewModel.courseCheckOn.value
                 val (blocks, declared) = synchronized(nfcLock) {
-                    when (mode) {
-                        ChipMode.Finish -> {
+                    when {
+                        checkingCourse || mode == ChipMode.Finish -> {
                             val read = reader.readFinish(tag)
                             read.blocks to read.blockCount
                         }
-                        ChipMode.Station -> {
+                        mode == ChipMode.Station -> {
                             val read = reader.readHeader(tag)
                             read.blocks to read.blockCount
                         }
-                        ChipMode.Issue, ChipMode.Tests -> reader.readAllBlocks(tag) to null
+                        else -> reader.readAllBlocks(tag) to null
                     }
                 }
                 sessionTag = tag
