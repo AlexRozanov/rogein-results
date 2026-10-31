@@ -65,10 +65,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.parse.CP_FINISH
@@ -102,6 +107,11 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
     val stationWritePrompt by viewModel.stationWritePrompt.collectAsStateWithLifecycle()
     val stationProgram by viewModel.stationProgram.collectAsStateWithLifecycle()
+    val stationInspect by viewModel.stationInspect.collectAsStateWithLifecycle()
+    val stationCountdown by viewModel.stationCountdown.collectAsStateWithLifecycle()
+    val courseCheckOn by viewModel.courseCheckOn.collectAsStateWithLifecycle()
+    val courseCheckName by viewModel.courseCheckName.collectAsStateWithLifecycle()
+    val courseCheckReport by viewModel.courseCheckReport.collectAsStateWithLifecycle()
     val stationControlNumber by viewModel.stationControlNumber.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
     val selectedId by viewModel.selectedId.collectAsStateWithLifecycle()
@@ -219,6 +229,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     busy = busy,
                     mode = mode,
                     stationProgram = stationProgram,
+                    stationInspect = stationInspect,
                     stationControlNumber = stationControlNumber,
                     onStationProgram = viewModel::setStationProgram,
                     onStationControlNumber = viewModel::onStationControlNumber,
@@ -255,6 +266,14 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
                     },
                     onSaveCourse = viewModel::saveCourse,
                     onDeleteCourse = viewModel::deleteCourse,
+                    courseCheckOn = courseCheckOn,
+                    courseCheckName = courseCheckName,
+                    courseCheckReport = courseCheckReport,
+                    chipReady = chipReady,
+                    busy = busy,
+                    onCourseCheck = viewModel::setCourseCheck,
+                    onCourseCheckCourse = viewModel::setCourseCheckCourse,
+                    onClearChip = viewModel::clearMarks,
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Results -> ResultsScreen(
@@ -339,7 +358,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
             },
         )
     }
-    stationWritePrompt?.let { prompt ->
+    if (section == AppSection.Chip) stationWritePrompt?.let { prompt ->
         AlertDialog(
             onDismissRequest = viewModel::cancelStationWrite,
             title = { Text("Записать станцию?") },
@@ -403,6 +422,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker) {
             },
         )
     }
+    stationCountdown?.let { StationCountdownOverlay(it) }
     }
 }
 
@@ -426,6 +446,7 @@ private fun ChipSection(
     busy: Boolean,
     mode: ChipMode,
     stationProgram: StationProgram,
+    stationInspect: String?,
     stationControlNumber: String,
     onStationProgram: (StationProgram) -> Unit,
     onStationControlNumber: (String) -> Unit,
@@ -491,6 +512,7 @@ private fun ChipSection(
         } else if (mode == ChipMode.Station) {
             StationPanel(
                 program = stationProgram,
+                inspect = stationInspect,
                 controlNumber = stationControlNumber,
                 onProgram = onStationProgram,
                 onControlNumber = onStationControlNumber,
@@ -677,6 +699,7 @@ private fun IssuePanel(
 @Composable
 private fun StationPanel(
     program: StationProgram,
+    inspect: String?,
     controlNumber: String,
     onProgram: (StationProgram) -> Unit,
     onControlNumber: (String) -> Unit,
@@ -690,8 +713,12 @@ private fun StationPanel(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            "Программа для полевой станции. Чип после записи нельзя использовать как чип участника.",
-            color = Color(0xFF8B3A3A),
+            if (program == StationProgram.Inspect) {
+                "Чтение без записи. Приложите чип — появится режим, который уже записан."
+            } else {
+                "Программа для полевой станции. Чип после записи нельзя использовать как чип участника."
+            },
+            color = if (program == StationProgram.Inspect) Color(0xFF5C5C5C) else Color(0xFF8B3A3A),
             style = MaterialTheme.typography.bodyMedium,
         )
         StationChoiceGroup(
@@ -717,10 +744,22 @@ private fun StationPanel(
         }
         StationChoiceGroup(
             title = "Режим",
-            items = listOf(StationProgram.Active, StationProgram.Passive, StationProgram.Battery),
+            items = listOf(
+                StationProgram.Active,
+                StationProgram.Passive,
+                StationProgram.Battery,
+                StationProgram.Inspect,
+            ),
             program = program,
             onProgram = onProgram,
         )
+        if (program == StationProgram.Inspect && inspect != null) {
+            Text(
+                inspect,
+                color = Color(0xFF1F4B2E),
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
         Text(
             stationProgramHint(program),
             color = Color(0xFF5C5C5C),
@@ -766,29 +805,96 @@ private fun stationProgramTitle(item: StationProgram): String = when (item) {
     StationProgram.Active -> "Активный режим"
     StationProgram.Passive -> "Пассивный режим"
     StationProgram.Battery -> "Проверка батареи"
+    StationProgram.Inspect -> "Проверка"
 }
 
 private fun stationProgramHint(program: StationProgram): String = when (program) {
     StationProgram.Control ->
-        "Введите номер КП, приложите чип и подтвердите запись. Вместе с ролью на станцию уйдёт текущее время телефона."
+        "Введите номер КП, приложите чип и подтвердите запись. На чип уйдёт время на 3 секунды вперёд. Крупные цифры покажут, когда приложить чип к станции."
     StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
-        "Выберите тип, приложите чип и подтвердите запись. Вместе с ролью на станцию уйдёт текущее время телефона."
+        "Выберите тип, приложите чип и подтвердите запись. На чип уйдёт время на 3 секунды вперёд. Крупные цифры покажут, когда приложить чип к станции."
     StationProgram.Active ->
         "Станция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
     StationProgram.Passive ->
         "Станция снова ждёт нажатия кнопки. Карта многоразовая — удобно на снятие дистанции."
     StationProgram.Battery ->
         "После отметки на станции около 30 с горит светодиод, затем 1–15 миганий. Меньше 7 — заменить батарею. Часы станции сбросятся. Карта одноразовая."
+    StationProgram.Inspect ->
+        "Приложите чип. Запись не выполняется: на экране появится режим, который уже записан."
+}
+
+@Composable
+private fun StationCountdownOverlay(countdown: StationClockCountdown) {
+    var nowMs by remember(countdown.deadlineEpochMs) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(countdown.deadlineEpochMs) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(40)
+        }
+    }
+    val remainingMs = countdown.deadlineEpochMs - nowMs
+    val seconds = if (remainingMs <= 0) 0 else ((remainingMs + 999) / 1000).toInt()
+    val atZero = remainingMs <= 0
+    val ready = atZero && countdown.writeFinished
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xF01A1A1A)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(horizontal = 24.dp),
+            ) {
+                Text(
+                    countdown.label,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge,
+                    textAlign = TextAlign.Center,
+                )
+                Text(
+                    seconds.toString(),
+                    color = if (ready) Color(0xFF7CFF6B) else Color(0xFFFFE14A),
+                    fontSize = 168.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                )
+                Text(
+                    when {
+                        ready -> "Сейчас приложите чип к станции"
+                        atZero -> "Запись ещё идёт. Не убирайте чип с телефона."
+                        else -> "На нуле приложите чип к станции. До нуля не убирайте его."
+                    },
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+    }
 }
 
 private fun stationWriteConfirmText(program: StationProgram, controlNumber: Int?): String {
+    if (program == StationProgram.Inspect) return "Чип не изменится."
     val wipe =
         "Отметки и номер участника на этом чипе будут стёрты. Операция только из раздела «Станция»."
     val body = when (program) {
         StationProgram.Control ->
             "На чип будет записана программа станции КП ${controlNumber ?: "—"}."
         StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
-            "На чип будет записана программа станции «${program.title}» (КП ${program.command.controlCp})."
+            "На чип будет записана программа станции «${program.title}» (КП ${program.command?.controlCp})."
+        StationProgram.Inspect ->
+            "Чип не изменится."
         StationProgram.Active ->
             "На чип будет записана карта активного режима.\nСтанция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
         StationProgram.Passive ->

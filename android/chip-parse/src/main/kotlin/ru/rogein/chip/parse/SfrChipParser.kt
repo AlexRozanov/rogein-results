@@ -107,17 +107,59 @@ object SfrChipParser {
         return "%02d:%02d:%02d".format(h, m, s)
     }
 
-    fun stationRole(blocks: List<ByteArray>): StationRole? {
-        val b4 = blocks.getOrNull(4) ?: return null
-        val b5 = blocks.getOrNull(5)
-        val b6 = blocks.getOrNull(6)
-        return matchStation(b4, b5, b6)
-            ?: matchStation(b4.reversed4(), b5?.reversed4(), b6?.reversed4())
-    }
+    fun stationRole(blocks: List<ByteArray>): StationRole? = orientedStation(blocks)?.role
 
     fun stationCommand(blocks: List<ByteArray>): StationCommand? = stationRole(blocks)?.command
 
     fun stationProgramCp(blocks: List<ByteArray>): Int? = stationRole(blocks)?.cp
+
+    /** Режим, уже записанный на чипе: карта станции или чип участника. Ничего не пишет. */
+    fun describeChipMode(blocks: List<ByteArray>): String {
+        val found = orientedStation(blocks) ?: return describeParticipantChip(blocks)
+        return formatStationMode(found.role, found.block5)
+    }
+
+    /**
+     * Активный, пассивный и батарея живут только в блоке 4.
+     * Если он уже перезаписан, старые блоки 5–6 с номером КП не считаются текущим режимом,
+     * даже когда другой порядок байт ещё похож на программатор.
+     */
+    private fun orientedStation(blocks: List<ByteArray>): OrientedStation? {
+        val block4 = blocks.getOrNull(4) ?: return null
+        val block5 = blocks.getOrNull(5)
+        val block6 = blocks.getOrNull(6)
+        val direct = matchStation(block4, block5, block6)
+        val flippedBlock5 = block5?.reversed4()
+        val flipped = matchStation(block4.reversed4(), flippedBlock5, block6?.reversed4())
+        val useFlipped = when {
+            direct == null -> flipped != null
+            flipped == null -> false
+            flipped.command.isService && !direct.command.isService -> true
+            else -> false
+        }
+        val role = (if (useFlipped) flipped else direct) ?: return null
+        return OrientedStation(role, if (useFlipped) flippedBlock5 else block5)
+    }
+
+    private fun formatStationMode(role: StationRole, logicalBlock5: ByteArray?): String {
+        val label = stationCommandLabel(role.command, role.cp)
+        val hasClock = role.command == StationCommand.Control ||
+            role.command == StationCommand.Start ||
+            role.command == StationCommand.Finish ||
+            role.command == StationCommand.Clear
+        val clock = if (hasClock) logicalBlock5?.let(::readClearTime) else null
+        return if (clock != null) "На чипе: $label. Время на карте $clock." else "На чипе: $label."
+    }
+
+    private fun describeParticipantChip(blocks: List<ByteArray>): String {
+        val block3 = blocks.getOrNull(3)
+        val id = block3?.let(::readLogicalId) ?: block3?.reversed4()?.let(::readLogicalId)
+        if (id != null) return "Чип участника № $id. Это не карта станции."
+        return unrecognizedChip()
+    }
+
+    private fun unrecognizedChip(): String =
+        "Режим чипа не распознан. Это не карта станции."
 
     fun stationCommandLabel(command: StationCommand, cp: Int? = command.controlCp): String = when (command) {
         StationCommand.Control -> "программатор станции КП ${cp ?: "—"}"
@@ -135,6 +177,8 @@ object SfrChipParser {
         CP_CLEAR -> "очистка"
         else -> null
     }
+
+    private data class OrientedStation(val role: StationRole, val block5: ByteArray?)
 
     private fun matchStation(block4: ByteArray, block5: ByteArray?, block6: ByteArray?): StationRole? {
         if (block4.contentEquals(STATION_ACTIVE_BLOCK)) {

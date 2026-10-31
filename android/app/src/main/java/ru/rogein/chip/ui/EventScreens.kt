@@ -3,6 +3,7 @@ package ru.rogein.chip.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -46,6 +48,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -84,6 +88,8 @@ import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import ru.rogein.chip.parse.StationCheckMark
+import ru.rogein.chip.parse.StationCheckReport
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.OrientMark
 import ru.rogein.chip.parse.CP_START
@@ -114,7 +120,6 @@ private val Cream = Color(0xFFF4F1EA)
 private val Muted = Color(0xFF5C5C5C)
 private val Danger = Color(0xFF8B3A3A)
 private val OkGreen = Color(0xFF1B4D3E)
-private val CompactBarPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
 private val Warn = Color(0xFF8A5A00)
 
 @Composable
@@ -142,9 +147,17 @@ fun ProtocolScreen(
     onPickCourses: (Boolean) -> Unit,
     onSaveCourse: (String, List<Int>, String?) -> Unit,
     onDeleteCourse: (String) -> Unit,
+    courseCheckOn: Boolean,
+    courseCheckName: String,
+    courseCheckReport: StationCheckReport?,
+    chipReady: Boolean,
+    busy: Boolean,
+    onCourseCheck: (Boolean) -> Unit,
+    onCourseCheckCourse: (String) -> Unit,
+    onClearChip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var pane by remember { mutableStateOf(ProtocolPane.People) }
+    var pane by remember { mutableStateOf(if (courseCheckOn) ProtocolPane.Check else ProtocolPane.People) }
     var confirmDelete by remember { mutableStateOf<StartPerson?>(null) }
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
@@ -175,96 +188,115 @@ fun ProtocolScreen(
         if (withoutCourse > 0) add("$withoutCourse без дистанции")
         if (unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
     }.joinToString(" · ")
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(start = 12.dp, end = 12.dp, top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQuery,
-            singleLine = true,
-            placeholder = {
-                Text(if (pane == ProtocolPane.People) "Номер или фамилия" else "Название дистанции")
-            },
-            textStyle = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.fillMaxWidth(),
-        )
+    Column(modifier = modifier.fillMaxSize()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ProtocolTab(
-                label = "Участники",
-                selected = pane == ProtocolPane.People,
-                onClick = { pane = ProtocolPane.People },
-            )
-            ProtocolTab(
-                label = "Дистанции",
-                selected = pane == ProtocolPane.Courses,
-                onClick = { pane = ProtocolPane.Courses },
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            if (!searching) {
-                if (pane == ProtocolPane.People) {
-                    TextButton(
-                        onClick = onNew,
-                        contentPadding = CompactBarPadding,
-                    ) { Text("Добавить") }
-                    if (selected != null || addingNew) {
-                        TextButton(
-                            onClick = onClearSelection,
-                            contentPadding = CompactBarPadding,
-                        ) { Text("Свернуть") }
-                    }
-                } else {
-                    TextButton(
-                        onClick = { requestAddCourse = true },
-                        contentPadding = CompactBarPadding,
-                    ) { Text("Новая") }
+            ScrollableTabRow(
+                selectedTabIndex = when (pane) {
+                    ProtocolPane.People -> 0
+                    ProtocolPane.Courses -> 1
+                    ProtocolPane.Check -> 2
+                },
+                edgePadding = 8.dp,
+                divider = {},
+                modifier = Modifier.weight(1f),
+            ) {
+                Tab(
+                    selected = pane == ProtocolPane.People,
+                    onClick = {
+                        pane = ProtocolPane.People
+                        onCourseCheck(false)
+                    },
+                    text = { Text("Участники", maxLines = 1, softWrap = false) },
+                )
+                Tab(
+                    selected = pane == ProtocolPane.Courses,
+                    onClick = {
+                        pane = ProtocolPane.Courses
+                        onCourseCheck(false)
+                    },
+                    text = { Text("Дистанции", maxLines = 1, softWrap = false) },
+                )
+                Tab(
+                    selected = pane == ProtocolPane.Check,
+                    onClick = {
+                        pane = ProtocolPane.Check
+                        onCourseCheck(true)
+                        if (courseCheckName.isBlank()) {
+                            courses.firstOrNull()?.name?.let(onCourseCheckCourse)
+                        }
+                    },
+                    text = { Text("Проверка", maxLines = 1, softWrap = false) },
+                )
+            }
+            Box {
+                TextButton(
+                    onClick = { loadMenu = true },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text("Загрузить", maxLines = 1, softWrap = false)
+                    Icon(
+                        Icons.Filled.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
-                if (selected == null && !addingNew) {
-                Box {
-                    TextButton(
-                        onClick = { loadMenu = true },
-                        contentPadding = CompactBarPadding,
-                    ) { Text("Загрузить") }
-                    DropdownMenu(expanded = loadMenu, onDismissRequest = { loadMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Протокол с компьютера") },
-                            onClick = {
-                                loadMenu = false
-                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Дистанции с компьютера") },
-                            onClick = {
-                                loadMenu = false
-                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Протокол CSV") },
-                            onClick = {
-                                loadMenu = false
-                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Дистанции CSV") },
-                            onClick = {
-                                loadMenu = false
-                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
-                            },
-                        )
-                    }
-                }
+                DropdownMenu(expanded = loadMenu, onDismissRequest = { loadMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Протокол с компьютера") },
+                        onClick = {
+                            loadMenu = false
+                            askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Дистанции с компьютера") },
+                        onClick = {
+                            loadMenu = false
+                            askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Протокол CSV") },
+                        onClick = {
+                            loadMenu = false
+                            askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Дистанции CSV") },
+                        onClick = {
+                            loadMenu = false
+                            askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
+                        },
+                    )
                 }
             }
         }
-        if (!searching && summary.isNotEmpty()) {
+        HorizontalDivider()
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+        if (pane != ProtocolPane.Check) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQuery,
+                singleLine = true,
+                placeholder = {
+                    Text(
+                        if (pane == ProtocolPane.People) "Номер или фамилия" else "Название дистанции",
+                    )
+                },
+                textStyle = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (!searching && pane != ProtocolPane.Check && summary.isNotEmpty()) {
             Text(
                 summary,
                 color = if (withoutCourse > 0 || unknownCourses.isNotEmpty()) Danger else Muted,
@@ -272,6 +304,17 @@ fun ProtocolScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        if (pane == ProtocolPane.People) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(onClick = onNew) { Text("Добавить") }
+                if (!searching && (selected != null || addingNew)) {
+                    TextButton(onClick = onClearSelection) { Text("Свернуть") }
+                }
+            }
         }
         if (pane == ProtocolPane.People && !searching && (addingNew || selected != null)) {
             OutlinedTextField(
@@ -346,7 +389,8 @@ fun ProtocolScreen(
                     )
                 }
             }
-        } else {
+        } else if (pane == ProtocolPane.Courses) {
+            Button(onClick = { requestAddCourse = true }) { Text("Новая") }
             CoursesPanel(
                 courses = courses,
                 query = query,
@@ -358,6 +402,20 @@ fun ProtocolScreen(
                     .fillMaxWidth()
                     .weight(1f),
             )
+        } else {
+            CourseStationCheckPanel(
+                courses = courses,
+                courseName = courseCheckName,
+                report = courseCheckReport,
+                chipReady = chipReady,
+                busy = busy,
+                onCourse = onCourseCheckCourse,
+                onClearChip = onClearChip,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            )
+        }
         }
     }
     confirmDelete?.let { person ->
@@ -412,25 +470,6 @@ private data class ProtocolLoad(
     val run: (Boolean) -> Unit,
 )
 
-@Composable
-private fun ProtocolTab(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    Text(
-        label,
-        color = if (selected) OkGreen else Muted,
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (selected) OkGreen.copy(alpha = 0.12f) else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-    )
-}
-
 private fun askProtocolLoad(
     hasPeople: Boolean,
     count: Int,
@@ -469,7 +508,88 @@ private fun askCourseLoad(
     )
 }
 
-private enum class ProtocolPane { People, Courses }
+private enum class ProtocolPane { People, Courses, Check }
+
+@Composable
+private fun CourseStationCheckPanel(
+    courses: List<StartCourse>,
+    courseName: String,
+    report: StationCheckReport?,
+    chipReady: Boolean,
+    busy: Boolean,
+    onCourse: (String) -> Unit,
+    onClearChip: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "Очистите чип, отметьтесь на старте, всех КП дистанции и финише, затем приложите чип.",
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (courses.isEmpty()) {
+            Text("Сначала загрузите дистанции.", color = Danger, style = MaterialTheme.typography.bodyMedium)
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                courses.forEach { course ->
+                    FilterChip(
+                        selected = course.name.equals(courseName, true),
+                        onClick = { onCourse(course.name) },
+                        label = { Text(course.name) },
+                    )
+                }
+            }
+        }
+        Button(
+            onClick = onClearChip,
+            enabled = chipReady && !busy,
+        ) { Text("Очистить чип") }
+        if (!chipReady) {
+            Text(
+                "Чтобы очистить чип, приложите его и не убирайте.",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (report != null) {
+            Text(
+                if (report.ok) "Станции сходятся" else "Есть расхождения",
+                color = if (report.ok) OkGreen else Danger,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                report.rows.forEach { row ->
+                    Text(
+                        row.text,
+                        color = when (row.mark) {
+                            StationCheckMark.Ok -> OkGreen
+                            StationCheckMark.Missing, StationCheckMark.Extra -> Danger
+                            StationCheckMark.Repeat -> Color(0xFF8A5A00)
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                report.duplicateNote?.let { note ->
+                    Text(note, color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun CoursesPanel(

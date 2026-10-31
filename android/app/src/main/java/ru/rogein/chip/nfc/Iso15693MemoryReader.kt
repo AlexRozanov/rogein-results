@@ -95,6 +95,13 @@ class Iso15693MemoryReader {
         val blocks = MutableList(MIN_BLOCK_COUNT) { ByteArray(BLOCK_SIZE) }
         blocks[3] = readBlock(nfc, uid, 3)
         blocks[4] = readBlock(nfc, uid, 4)
+        for (index in 5..6) {
+            try {
+                blocks += readBlock(nfc, uid, index)
+            } catch (_: Exception) {
+                break
+            }
+        }
         ChipMemoryRead(blocks, declared)
     }
 

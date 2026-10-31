@@ -33,15 +33,13 @@ object SfrChipMemory {
             in 5..lastWritable -> oldPointerEnd
             else -> lastWritable
         }
-        val plan = ArrayList<Pair<Int, ByteArray>>(lastPunch + 4)
-        plan += 3 to zeros.copyOf()
-        plan += 0 to zeros.copyOf()
-        plan += 1 to zeros.copyOf()
-        plan += 2 to zeros.copyOf()
-        for (block in 7..lastPunch) {
-            plan += block to zeros.copyOf()
+        val cp = when (command) {
+            StationCommand.Control -> controlNumber?.also(::requireStationControlNumber)
+            else -> command.controlCp
         }
-        val cp = command.controlCp ?: controlNumber?.also(::requireStationControlNumber)
+        val plan = ArrayList<Pair<Int, ByteArray>>(lastPunch + 4)
+        // Блоки режима — первыми. Иначе длинная очистка хвоста не успевает,
+        // чип убирают на нуле отсчёта, и на нём остаётся прежний программатор.
         if (cp != null) {
             plan += 4 to STATION_MODE_BLOCK.copyOf()
             plan += 5 to punchBlock(cp, hour, minute, second)
@@ -53,6 +51,15 @@ object SfrChipMemory {
             plan += 4 to command.modeBlock.copyOf()
             plan += 5 to zeros.copyOf()
             plan += 6 to zeros.copyOf()
+        }
+        plan += 3 to zeros.copyOf()
+        plan += 0 to zeros.copyOf()
+        plan += 1 to zeros.copyOf()
+        plan += 2 to zeros.copyOf()
+        if (cp != null) {
+            for (block in 7..lastPunch) {
+                plan += block to zeros.copyOf()
+            }
         }
         return plan
     }
