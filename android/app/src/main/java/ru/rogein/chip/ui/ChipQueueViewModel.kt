@@ -1252,12 +1252,21 @@ class ChipQueueViewModel(
             signalError()
             return
         }
-        val report = StationCourseCheck.check(course.controls, dump.punches)
+        val now = java.util.Calendar.getInstance()
+        val nowSeconds = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
+            now.get(java.util.Calendar.MINUTE) * 60 +
+            now.get(java.util.Calendar.SECOND)
+        val report = StationCourseCheck.check(
+            course.controls,
+            dump.punches,
+            nowSeconds = nowSeconds,
+            clearedAt = dump.clearedAt,
+        )
         _courseCheckReport.value = report
-        _status.value = if (report.ok) {
-            "«${course.name}»: старт, финиш и все КП есть."
-        } else {
-            "«${course.name}»: проверка станций не сошлась."
+        _status.value = when {
+            !report.ok -> "«${course.name}»: проверка станций не сошлась."
+            report.attention -> "«${course.name}»: есть повтор номера, посмотрите замечание."
+            else -> "«${course.name}»: старт, финиш и все КП есть."
         }
         if (report.ok) signalSuccess() else signalError()
     }

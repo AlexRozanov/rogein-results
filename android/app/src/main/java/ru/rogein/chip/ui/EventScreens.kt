@@ -883,7 +883,8 @@ private fun CourseStationCheckPanel(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            "Очистите чип, отметьтесь на старте, всех КП дистанции и финише, затем приложите чип.",
+            "Очистите чип, отметьтесь на старте, всех КП дистанции и финише, затем приложите чип. " +
+                "Станции лежат рядом: между соседними отметками не больше минуты.",
             color = Muted,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -917,9 +918,19 @@ private fun CourseStationCheckPanel(
             )
         }
         if (report != null) {
+            val headline = when {
+                !report.ok -> "Есть расхождения"
+                report.attention -> "Есть замечания"
+                else -> "Станции сходятся"
+            }
+            val headlineColor = when {
+                !report.ok -> Danger
+                report.attention -> Color(0xFF8A5A00)
+                else -> OkGreen
+            }
             Text(
-                if (report.ok) "Станции сходятся" else "Есть расхождения",
-                color = if (report.ok) OkGreen else Danger,
+                headline,
+                color = headlineColor,
                 style = MaterialTheme.typography.titleMedium,
             )
             Column(
@@ -935,7 +946,7 @@ private fun CourseStationCheckPanel(
                         color = when (row.mark) {
                             StationCheckMark.Ok -> OkGreen
                             StationCheckMark.Missing, StationCheckMark.Extra -> Danger
-                            StationCheckMark.Repeat -> Color(0xFF8A5A00)
+                            StationCheckMark.Repeat, StationCheckMark.Clock -> Color(0xFF8A5A00)
                         },
                         style = MaterialTheme.typography.bodyLarge,
                     )
