@@ -6,12 +6,53 @@ data class ProtocolCsvRow(
     val course: String,
 )
 
+data class RogaineProtocolCsvRow(
+    val id: Int,
+    val name: String,
+    val format: String,
+    val gender: String,
+    val birth: String,
+)
+
 data class CourseCsvRow(
     val name: String,
     val controls: List<Int>,
 )
 
+data class FormatCsvRow(
+    val name: String,
+    val controlMinutes: Int?,
+    val penaltyPerMinute: Int?,
+    val dqMinutes: Int?,
+)
+
+data class AwardGroupCsvRow(
+    val name: String,
+    val gender: String,
+    val minAge: Int?,
+    val formats: List<String>,
+)
+
+data class LegendCsvRow(
+    val cp: Int,
+    val name: String,
+    val type: String,
+)
+
 object CsvImport {
+    fun detectProtocolKind(text: String): String {
+        val lines = logicalLines(text)
+        if (lines.isEmpty()) return SPORT_ORIENT
+        val cols = split(lines.first(), detectDelimiter(lines.first())).map { it.trim().lowercase() }
+        if (cols.any { it.contains("формат") || it == "пол" || it.contains("рождени") || it.contains("birth") }) {
+            return SPORT_ROGAINE
+        }
+        if (cols.any { it.contains("дистанц") || it == "course" }) {
+            return SPORT_ORIENT
+        }
+        return SPORT_ORIENT
+    }
+
     fun protocol(text: String): List<ProtocolCsvRow> {
         val lines = logicalLines(text)
         if (lines.isEmpty()) error("Файл стартового протокола пуст")
@@ -28,6 +69,32 @@ object CsvImport {
             if (name.isEmpty()) error("Строка ${index + 1}: не указано ФИО")
             val course = cols.getOrElse(2) { "" }.trim()
             rows += ProtocolCsvRow(id, name, course)
+        }
+        if (rows.isEmpty()) error("В файле нет участников")
+        return rows
+    }
+
+    fun rogaineProtocol(text: String): List<RogaineProtocolCsvRow> {
+        val lines = logicalLines(text)
+        if (lines.isEmpty()) error("Файл стартового протокола пуст")
+        val delimiter = detectDelimiter(lines.first())
+        val rows = ArrayList<RogaineProtocolCsvRow>()
+        for ((index, line) in lines.withIndex()) {
+            val cols = split(line, delimiter)
+            if (cols.all { it.isBlank() }) continue
+            val first = cols.getOrElse(0) { "" }.trim()
+            if (index == 0 && first.matches(Regex("(?i)номер|id|номер чипа|chip"))) continue
+            val id = first.toIntOrNull() ?: error("Строка ${index + 1}: некорректный номер «$first»")
+            if (id <= 0) error("Строка ${index + 1}: номер должен быть > 0")
+            val name = cols.getOrElse(1) { "" }.trim()
+            if (name.isEmpty()) error("Строка ${index + 1}: не указано ФИО")
+            rows += RogaineProtocolCsvRow(
+                id = id,
+                name = name,
+                format = cols.getOrElse(2) { "" }.trim(),
+                gender = cols.getOrElse(3) { "" }.trim(),
+                birth = cols.getOrElse(4) { "" }.trim(),
+            )
         }
         if (rows.isEmpty()) error("В файле нет участников")
         return rows
@@ -56,6 +123,85 @@ object CsvImport {
             rows += CourseCsvRow(name, controls)
         }
         if (rows.isEmpty()) error("Файл дистанций пуст")
+        return rows
+    }
+
+    fun formats(text: String): List<FormatCsvRow> {
+        val lines = logicalLines(text)
+        if (lines.isEmpty()) error("Файл форматов пуст")
+        val delimiter = detectDelimiter(lines.first())
+        val rows = ArrayList<FormatCsvRow>()
+        val seen = HashSet<String>()
+        for ((index, line) in lines.withIndex()) {
+            val cols = split(line, delimiter)
+            if (cols.all { it.isBlank() }) continue
+            val name = cols.getOrElse(0) { "" }.trim()
+            if (index == 0 && name.matches(Regex("(?i)название|формат|name|format"))) continue
+            if (name.isEmpty()) error("Строка ${index + 1}: не указано название формата")
+            val key = courseKey(name)
+            if (!seen.add(key)) error("Строка ${index + 1}: формат «$name» повторяется")
+            rows += FormatCsvRow(
+                name = name,
+                controlMinutes = optionalPositiveInt(cols.getOrElse(1) { "" }, index + 1, "контрольное время"),
+                penaltyPerMinute = optionalPositiveInt(cols.getOrElse(2) { "" }, index + 1, "штраф"),
+                dqMinutes = optionalPositiveInt(cols.getOrElse(3) { "" }, index + 1, "дисквалификация"),
+            )
+        }
+        if (rows.isEmpty()) error("В файле нет форматов")
+        return rows
+    }
+
+    fun awardGroups(text: String): List<AwardGroupCsvRow> {
+        val lines = logicalLines(text)
+        if (lines.isEmpty()) error("Файл групп пуст")
+        val delimiter = detectDelimiter(lines.first())
+        val rows = ArrayList<AwardGroupCsvRow>()
+        val seen = HashSet<String>()
+        for ((index, line) in lines.withIndex()) {
+            val cols = split(line, delimiter)
+            if (cols.all { it.isBlank() }) continue
+            val name = cols.getOrElse(0) { "" }.trim()
+            if (index == 0 && name.matches(Regex("(?i)название|группа|имя|name|group"))) continue
+            if (name.isEmpty()) error("Строка ${index + 1}: не указано название группы")
+            val key = name.lowercase()
+            if (!seen.add(key)) error("Строка ${index + 1}: группа «$name» повторяется")
+            val formatsRaw = cols.getOrElse(3) { "" }.trim()
+            val formats = formatsRaw
+                .split(',', ';', '|')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            rows += AwardGroupCsvRow(
+                name = name,
+                gender = cols.getOrElse(1) { "" }.trim(),
+                minAge = optionalPositiveInt(cols.getOrElse(2) { "" }, index + 1, "возраст"),
+                formats = formats,
+            )
+        }
+        if (rows.isEmpty()) error("В файле нет групп")
+        return rows
+    }
+
+    fun legends(text: String): List<LegendCsvRow> {
+        val lines = logicalLines(text)
+        if (lines.isEmpty()) error("Файл легенд пуст")
+        val delimiter = detectDelimiter(lines.first())
+        val rows = ArrayList<LegendCsvRow>()
+        val seen = HashSet<Int>()
+        for ((index, line) in lines.withIndex()) {
+            val cols = split(line, delimiter)
+            if (cols.all { it.isBlank() }) continue
+            val first = cols.getOrElse(0) { "" }.trim()
+            if (index == 0 && first.matches(Regex("(?i)номер|кп|cp|n"))) continue
+            val cp = first.toIntOrNull() ?: error("Строка ${index + 1}: некорректный номер КП «$first»")
+            if (cp <= 0) error("Строка ${index + 1}: номер КП должен быть > 0")
+            if (!seen.add(cp)) error("Строка ${index + 1}: КП $cp повторяется")
+            rows += LegendCsvRow(
+                cp = cp,
+                name = cols.getOrElse(1) { "" }.trim(),
+                type = cols.getOrElse(2) { "" }.trim(),
+            )
+        }
+        if (rows.isEmpty()) error("В файле нет легенд")
         return rows
     }
 
@@ -207,6 +353,15 @@ object CsvImport {
             controls += cp
         }
         return controls
+    }
+
+    private fun optionalPositiveInt(raw: String, lineNo: Int, label: String): Int? {
+        val value = raw.trim()
+        if (value.isEmpty()) return null
+        val number = value.toIntOrNull()
+            ?: error("Строка $lineNo: некорректное значение $label «$value»")
+        if (number < 0) error("Строка $lineNo: $label не может быть отрицательным")
+        return number
     }
 
     private fun parseSimpleControls(cols: List<String>, lineNo: Int): List<Int> {

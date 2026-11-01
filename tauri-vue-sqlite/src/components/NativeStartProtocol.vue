@@ -808,13 +808,18 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       <FilePickerButton @file-selected="onFileSelected" />
       <button :disabled="props.busy" @click="importProtocol">Импорт стартового протокола</button>
       <button :disabled="props.busy" @click="openAddModal">Добавить участника</button>
-      <button v-if="props.isOrient" :disabled="props.busy" @click="sendToPhone">Отправить на телефон</button>
+      <button :disabled="props.busy" @click="sendToPhone">Отправить на телефон</button>
       <button :disabled="props.busy" @click="refresh">Обновить список</button>
       <button v-if="!props.isOrient" :disabled="props.busy" @click="openFormatsModal">Справочник форматов</button>
     </div>
     <p v-if="props.isOrient" class="subtitle">
       CSV участников: номер;ФИО или номер;ФИО;дистанция. Колонку дистанции можно не заполнять — будет предупреждение. Повторная загрузка того же номера добавляет дистанцию, не создавая второго человека.
       «Отправить на телефон» можно не нажимать: при USB-отладке протокол уходит сам. Кнопка — на крайний случай.
+    </p>
+    <p v-else class="subtitle">
+      CSV участников: номер;ФИО;формат;пол;дата_рождения.
+      «Отправить на телефон» пишет пакет старта по USB (нужна отладка).
+      Без отладки отправьте пакет на сайт в настройках — телефон скачает его сам.
     </p>
     <div v-if="props.isOrient" class="native-row">
       <FilePickerButton

@@ -25,6 +25,7 @@ type SitePublishResult = {
 const props = defineProps<{
   busy: boolean;
   accessOnly?: boolean;
+  isOrient?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -159,6 +160,23 @@ async function uploadToSite() {
   );
 }
 
+async function uploadEventPack() {
+  localBusy.value = true;
+  try {
+    const result = await invoke<SitePublishResult>("upload_event_pack_to_site", payload());
+    emit(
+      "status",
+      `Пакет старта «${result.slug}» на сайте: участников ${result.participant_count}, форматов ${result.result_count}${
+        result.has_map ? ", карта отправлена" : ""
+      }. Телефон может скачать его без USB-отладки.`,
+    );
+  } catch (error) {
+    emit("status", `Ошибка отправки пакета: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
 defineExpose({ refresh });
 </script>
 
@@ -234,7 +252,19 @@ defineExpose({ refresh });
       </div>
       <div class="native-row">
         <button type="button" :disabled="isBusy" @click="publish">Опубликовать</button>
+        <button
+          v-if="!props.isOrient"
+          type="button"
+          :disabled="isBusy"
+          @click="uploadEventPack"
+        >
+          Отправить пакет на телефон (сайт)
+        </button>
       </div>
+      <p v-if="!props.isOrient" class="subtitle">
+        Пакет — протокол, форматы, группы, легенды и карта для телефона.
+        На сайте он не публикуется в календарь. Телефон скачивает его по slug и токену.
+      </p>
     </template>
   </CollapsiblePanel>
 

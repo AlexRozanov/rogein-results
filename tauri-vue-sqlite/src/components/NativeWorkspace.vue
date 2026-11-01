@@ -464,7 +464,6 @@ async function readPhoneQueue() {
 
 async function pollPhoneUsb() {
   if (phonePollInFlight || nativeBusy.value || isArchiveMode.value) return;
-  if (nativeSettings.value && nativeSettings.value.sport_kind !== "orient") return;
   phonePollInFlight = true;
   try {
     const result = await invoke<PhonePollResult>("poll_phone_usb");
@@ -473,7 +472,9 @@ async function pollPhoneUsb() {
       pageOffset.value = 0;
       await refreshNativeData();
     } else if (result.pack_pushed) {
-      nativeStatus.value = "Стартовый протокол отправлен на телефон.";
+      nativeStatus.value = isOrient.value
+        ? "Стартовый протокол отправлен на телефон."
+        : "Пакет старта отправлен на телефон.";
     }
   } catch (error) {
     const text = `Ошибка связи с телефоном: ${String(error)}`;

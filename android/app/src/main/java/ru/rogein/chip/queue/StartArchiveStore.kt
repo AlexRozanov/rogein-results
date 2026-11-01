@@ -7,6 +7,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
+import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.SPORT_ROGAINE
+import ru.rogein.chip.parse.normalizeSportKind
 import ru.rogein.chip.parse.CourseCsvRow
 import ru.rogein.chip.parse.CsvExport
 import ru.rogein.chip.parse.FinishCsvPunch
@@ -41,18 +44,22 @@ class StartArchiveStore(
         db.withTransaction { insertCurrentFromWorkingLocked() }
     }
 
-    suspend fun createNewStart(): String {
+    suspend fun createNewStart(sport: String = SPORT_ORIENT): String {
+        val kind = normalizeSportKind(sport)
+        val label = if (kind == SPORT_ROGAINE) "рогейн" else "ориентирование"
         ensureCurrent()
         if (workingIsEmpty()) {
-            return "Текущий старт уже пуст."
+            event.upsertSetting(SettingEntity("sport_kind", kind))
+            return "Новый старт: $label."
         }
         db.withTransaction {
             persistCurrentLocked()
             starts.clearCurrent()
             clearWorkingLocked()
             insertEmptyCurrentLocked()
+            event.upsertSetting(SettingEntity("sport_kind", kind))
         }
-        return "Текущий старт сохранён. Его можно открыть в «Ещё → Старты»."
+        return "Текущий старт сохранён. Новый — $label."
     }
 
     suspend fun openStart(id: Long): String {
@@ -193,6 +200,7 @@ class StartArchiveStore(
             title = map["title"].orEmpty(),
             liveNote = map["live_note"].orEmpty(),
             livePending = map["live_pending"] == "1",
+            sportKind = normalizeSportKind(map["sport_kind"]),
             people = startList.listPeople(),
             courses = startList.listCourses(),
             meta = startList.meta(),
@@ -214,6 +222,7 @@ class StartArchiveStore(
         event.upsertSetting(SettingEntity("title", snap.title))
         event.upsertSetting(SettingEntity("live_note", snap.liveNote))
         event.upsertSetting(SettingEntity("live_pending", if (snap.livePending) "1" else "0"))
+        event.upsertSetting(SettingEntity("sport_kind", snap.sportKind))
         for (person in snap.people) startList.upsertPerson(person)
         for (course in snap.courses) startList.upsertCourse(course)
         snap.meta?.let { startList.upsertMeta(it) }
@@ -247,6 +256,7 @@ private data class EventSnapshot(
     val title: String,
     val liveNote: String,
     val livePending: Boolean,
+    val sportKind: String,
     val people: List<StartPersonEntity>,
     val courses: List<StartCourseEntity>,
     val meta: StartMetaEntity?,
@@ -267,7 +277,8 @@ private fun EventSnapshot.toJson(): String {
             .put("slug", slug)
             .put("title", title)
             .put("liveNote", liveNote)
-            .put("livePending", livePending),
+            .put("livePending", livePending)
+            .put("sportKind", sportKind),
     )
     val peopleJson = JSONArray()
     for (person in people) {
@@ -280,7 +291,9 @@ private fun EventSnapshot.toJson(): String {
                 .put("origin", person.origin)
                 .put("localCourseTouchedAt", person.localCourseTouchedAt)
                 .put("issuedAt", person.issuedAt)
-                .put("issuedCourse", person.issuedCourse),
+                .put("issuedCourse", person.issuedCourse)
+                .put("gender", person.gender)
+                .put("birthDate", person.birthDate),
         )
     }
     root.put("people", peopleJson)
@@ -348,6 +361,7 @@ private fun decodePayload(json: String): EventSnapshot {
             title = "",
             liveNote = "",
             livePending = false,
+            sportKind = SPORT_ORIENT,
             people = emptyList(),
             courses = emptyList(),
             meta = null,
@@ -368,6 +382,8 @@ private fun decodePayload(json: String): EventSnapshot {
             localCourseTouchedAt = obj.optLong("localCourseTouchedAt"),
             issuedAt = obj.optLong("issuedAt"),
             issuedCourse = obj.optString("issuedCourse"),
+            gender = obj.optString("gender"),
+            birthDate = obj.optString("birthDate"),
         )
     }
     val courses = jsonObjects(root.optJSONArray("courses")).map { obj ->
@@ -422,6 +438,7 @@ private fun decodePayload(json: String): EventSnapshot {
         title = settings.optString("title"),
         liveNote = settings.optString("liveNote"),
         livePending = settings.optBoolean("livePending"),
+        sportKind = normalizeSportKind(settings.optString("sportKind")),
         people = people,
         courses = courses,
         meta = meta,

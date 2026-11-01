@@ -4,8 +4,20 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import ru.rogein.chip.parse.AwardGroupCsvRow
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
+import ru.rogein.chip.parse.EventPackAwardGroupFile
+import ru.rogein.chip.parse.EventPackFile
+import ru.rogein.chip.parse.EventPackFormatFile
+import ru.rogein.chip.parse.EventPackLegendFile
+import ru.rogein.chip.parse.FormatCsvRow
+import ru.rogein.chip.parse.LegendCsvRow
+import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.isRogaine
+import ru.rogein.chip.parse.normalizeSportKind
+import ru.rogein.chip.parse.parseEventPackJson
+import java.io.File
 import ru.rogein.chip.parse.OrientCalc
 import ru.rogein.chip.parse.OrientExclusion
 import ru.rogein.chip.parse.OrientMark
@@ -32,6 +44,10 @@ data class EventSettings(
     val startCp: Int = CP_START,
     val finishCp: Int = CP_FINISH,
     val controlMinutes: Int = 120,
+    val penaltyPerMinute: Int = 1,
+    val dqMinutes: Int = 15,
+    val startMode: String = "station",
+    val competitionStartTime: String = "",
     val competitionDate: String = LocalDate.now().toString(),
     val apiBaseUrl: String = "",
     val publishToken: String = "",
@@ -39,6 +55,14 @@ data class EventSettings(
     val title: String = "",
     val liveNote: String = "",
     val livePending: Boolean = false,
+    val sportKind: String = SPORT_ORIENT,
+    val metersPerPixel: Double? = null,
+)
+
+data class EventPackDownload(
+    val pack: EventPackFile,
+    val mapBytes: ByteArray?,
+    val mapFileName: String,
 )
 
 data class ScoredResult(
@@ -53,6 +77,7 @@ data class ScoredResult(
 )
 
 class EventStore(
+    private val filesDir: File,
     private val eventDao: EventDao,
 ) {
     private val liveSending = AtomicBoolean(false)
@@ -70,11 +95,17 @@ class EventStore(
         eventDao.upsertSetting(SettingEntity("start_cp", next.startCp.toString()))
         eventDao.upsertSetting(SettingEntity("finish_cp", next.finishCp.toString()))
         eventDao.upsertSetting(SettingEntity("control_minutes", next.controlMinutes.toString()))
+        eventDao.upsertSetting(SettingEntity("penalty_per_minute", next.penaltyPerMinute.toString()))
+        eventDao.upsertSetting(SettingEntity("dq_minutes", next.dqMinutes.toString()))
+        eventDao.upsertSetting(SettingEntity("start_mode", next.startMode.trim().ifBlank { "station" }))
+        eventDao.upsertSetting(SettingEntity("competition_start_time", next.competitionStartTime.trim()))
         eventDao.upsertSetting(SettingEntity("competition_date", next.competitionDate.trim()))
         eventDao.upsertSetting(SettingEntity("api_base_url", next.apiBaseUrl.trim()))
         eventDao.upsertSetting(SettingEntity("publish_token", next.publishToken.trim()))
         eventDao.upsertSetting(SettingEntity("slug", next.slug.trim()))
         eventDao.upsertSetting(SettingEntity("title", next.title.trim()))
+        eventDao.upsertSetting(SettingEntity("sport_kind", normalizeSportKind(next.sportKind)))
+        eventDao.upsertSetting(SettingEntity("meters_per_pixel", next.metersPerPixel?.toString().orEmpty()))
     }
 
     suspend fun addRemovedCp(cp: Int) {
@@ -142,6 +173,128 @@ class EventStore(
 
     suspend fun setLiveNote(note: String) {
         eventDao.upsertSetting(SettingEntity("live_note", note))
+    }
+
+    suspend fun fetchEventPack(settings: EventSettings): EventPackDownload {
+        val base = normalizeBase(settings.apiBaseUrl)
+        val slug = settings.slug.trim()
+        val token = settings.publishToken.trim()
+        if (base.isEmpty() || slug.isEmpty() || token.isEmpty()) {
+            error("Укажите адрес сайта, токен и slug в настройках")
+        }
+        val (code, body) = request("GET", "$base/api/packs/$slug", null, token)
+        when (code) {
+            401, 403 -> error("Нет доступа к пакету. Проверьте токен.")
+            404 -> error("Пакет не найден. Отправьте его с компьютера на сайт.")
+            else -> if (code !in 200..299) error("Сайт ответил $code: ${body.take(180)}")
+        }
+        val pack = parseEventPackJson(body)
+        if (!isRogaine(pack.sport)) {
+            error("Это пакет ориентирования. Начните старт «Ориентирование».")
+        }
+        val map = requestBytes("GET", "$base/api/packs/$slug/map", token)
+        return EventPackDownload(
+            pack = pack,
+            mapBytes = map?.bytes,
+            mapFileName = pack.mapFileName.ifBlank { map?.fileName.orEmpty() },
+        )
+    }
+
+    suspend fun applyPackMeta(pack: EventPackFile) {
+        val current = settingsNow()
+        saveSettings(
+            current.copy(
+                startCp = pack.settings.startCp.takeIf { it > 0 } ?: current.startCp,
+                finishCp = pack.settings.finishCp.takeIf { it > 0 } ?: current.finishCp,
+                controlMinutes = pack.settings.controlMinutes.takeIf { it > 0 } ?: current.controlMinutes,
+                penaltyPerMinute = pack.settings.penaltyPerMinute,
+                dqMinutes = pack.settings.dqMinutes,
+                startMode = pack.settings.startMode.ifBlank { current.startMode },
+                competitionStartTime = pack.settings.competitionStartTime,
+                competitionDate = pack.settings.competitionDate.ifBlank { current.competitionDate },
+                title = pack.title.ifBlank { current.title },
+                metersPerPixel = pack.metersPerPixel ?: current.metersPerPixel,
+            ),
+        )
+        eventDao.upsertSetting(SettingEntity("award_groups", awardGroupsJson(pack.awardGroups)))
+        eventDao.upsertSetting(SettingEntity("cp_legends", legendsJson(pack.legends)))
+        eventDao.upsertSetting(SettingEntity("format_settings", formatsJson(pack.formats)))
+        eventDao.upsertSetting(
+            SettingEntity(
+                "map_points",
+                JSONArray().apply {
+                    pack.mapPoints.forEach { point ->
+                        put(
+                            JSONObject()
+                                .put("kind", point.kind)
+                                .put("cp", point.cp ?: JSONObject.NULL)
+                                .put("name", point.name)
+                                .put("mapX", point.mapX)
+                                .put("mapY", point.mapY),
+                        )
+                    }
+                }.toString(),
+            ),
+        )
+        eventDao.clearExclusions()
+        for (rule in pack.exclusions) {
+            eventDao.insertExclusion(
+                ExclusionEntity(
+                    courseName = rule.course,
+                    fromCp = rule.fromCp,
+                    toCp = rule.toCp,
+                    maxLegSeconds = rule.maxLegSeconds,
+                ),
+            )
+        }
+    }
+
+    suspend fun saveCourseMap(bytes: ByteArray, fileName: String) {
+        if (bytes.isEmpty()) return
+        val dest = File(filesDir, COURSE_MAP_FILE)
+        dest.writeBytes(bytes)
+        eventDao.upsertSetting(SettingEntity("course_map_file_name", fileName.trim().ifBlank { "map.bin" }))
+    }
+
+    suspend fun mergeFormatSettings(rows: List<FormatCsvRow>) {
+        val root = JSONArray()
+        for (row in rows) {
+            root.put(
+                JSONObject()
+                    .put("name", row.name)
+                    .put("controlMinutes", row.controlMinutes ?: JSONObject.NULL)
+                    .put("penaltyPerMinute", row.penaltyPerMinute ?: JSONObject.NULL)
+                    .put("dqMinutes", row.dqMinutes ?: JSONObject.NULL),
+            )
+        }
+        eventDao.upsertSetting(SettingEntity("format_settings", root.toString()))
+    }
+
+    suspend fun mergeAwardGroups(rows: List<AwardGroupCsvRow>) {
+        val root = JSONArray()
+        for (row in rows) {
+            root.put(
+                JSONObject()
+                    .put("name", row.name)
+                    .put("genderMode", row.gender)
+                    .put("minAge", row.minAge ?: JSONObject.NULL)
+                    .put("formatNames", JSONArray(row.formats)),
+            )
+        }
+        eventDao.upsertSetting(SettingEntity("award_groups", root.toString()))
+    }
+
+    suspend fun mergeLegends(rows: List<LegendCsvRow>) {
+        val root = JSONArray()
+        for (row in rows) {
+            root.put(
+                JSONObject()
+                    .put("cp", row.cp)
+                    .put("name", row.name)
+                    .put("type", row.type),
+            )
+        }
+        eventDao.upsertSetting(SettingEntity("cp_legends", root.toString()))
     }
 
     suspend fun clearLiveState() {
@@ -359,6 +512,10 @@ class EventStore(
                 startCp = map["start_cp"]?.toIntOrNull() ?: CP_START,
                 finishCp = map["finish_cp"]?.toIntOrNull() ?: CP_FINISH,
                 controlMinutes = map["control_minutes"]?.toIntOrNull() ?: 120,
+                penaltyPerMinute = map["penalty_per_minute"]?.toIntOrNull() ?: 1,
+                dqMinutes = map["dq_minutes"]?.toIntOrNull() ?: 15,
+                startMode = map["start_mode"].orEmpty().ifBlank { "station" },
+                competitionStartTime = map["competition_start_time"].orEmpty(),
                 competitionDate = map["competition_date"].orEmpty().ifBlank { LocalDate.now().toString() },
                 apiBaseUrl = map["api_base_url"].orEmpty(),
                 publishToken = map["publish_token"].orEmpty(),
@@ -366,6 +523,8 @@ class EventStore(
                 title = map["title"].orEmpty(),
                 liveNote = map["live_note"].orEmpty(),
                 livePending = map["live_pending"] == "1",
+                sportKind = normalizeSportKind(map["sport_kind"]),
+                metersPerPixel = map["meters_per_pixel"]?.toDoubleOrNull(),
             )
         }
 
@@ -391,7 +550,79 @@ class EventStore(
             return if (title.isEmpty()) url else "$title\n$url"
         }
 
+        private const val COURSE_MAP_FILE = "course_map.bin"
+
+        private fun awardGroupsJson(rows: List<EventPackAwardGroupFile>): String {
+            val root = JSONArray()
+            for (row in rows) {
+                root.put(
+                    JSONObject()
+                        .put("name", row.name)
+                        .put("genderMode", row.genderMode)
+                        .put("minAge", row.minAge ?: JSONObject.NULL)
+                        .put("sortOrder", row.sortOrder)
+                        .put("formatNames", JSONArray(row.formatNames)),
+                )
+            }
+            return root.toString()
+        }
+
+        private fun legendsJson(rows: List<EventPackLegendFile>): String {
+            val root = JSONArray()
+            for (row in rows) {
+                root.put(
+                    JSONObject()
+                        .put("cp", row.cp)
+                        .put("name", row.name)
+                        .put("type", row.type)
+                        .put("mapX", row.mapX ?: JSONObject.NULL)
+                        .put("mapY", row.mapY ?: JSONObject.NULL),
+                )
+            }
+            return root.toString()
+        }
+
+        private fun formatsJson(rows: List<EventPackFormatFile>): String {
+            val root = JSONArray()
+            for (row in rows) {
+                root.put(
+                    JSONObject()
+                        .put("name", row.name)
+                        .put("controlMinutes", row.controlMinutes ?: JSONObject.NULL)
+                        .put("penaltyPerMinute", row.penaltyPerMinute ?: JSONObject.NULL)
+                        .put("dqMinutes", row.dqMinutes ?: JSONObject.NULL)
+                        .put("finishCp", row.finishCp ?: JSONObject.NULL)
+                        .put("competitionStartTime", row.competitionStartTime),
+                )
+            }
+            return root.toString()
+        }
+
         private fun normalizeBase(url: String): String = url.trim().trimEnd('/')
+
+        private data class ByteDownload(val bytes: ByteArray, val fileName: String)
+
+        private fun requestBytes(method: String, url: String, token: String): ByteDownload? {
+            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 12_000
+                readTimeout = 30_000
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+            return try {
+                val code = connection.responseCode
+                if (code == 404) return null
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val bytes = stream?.readBytes() ?: ByteArray(0)
+                if (code !in 200..299) {
+                    error("Сайт ответил $code: ${bytes.toString(Charsets.UTF_8).take(180)}")
+                }
+                val name = connection.getHeaderField("X-Map-File-Name").orEmpty()
+                ByteDownload(bytes, name)
+            } finally {
+                connection.disconnect()
+            }
+        }
 
         private fun request(method: String, url: String, body: String?, token: String?): Pair<Int, String> {
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -506,7 +737,7 @@ class EventStore(
             return JSONObject()
                 .put("title", title)
                 .put("competition_date", settings.competitionDate)
-                .put("sport_kind", "orient")
+                .put("sport_kind", normalizeSportKind(settings.sportKind))
                 .put("start_cp", settings.startCp)
                 .put("finish_cp", settings.finishCp)
                 .put("award_groups", groups)

@@ -262,6 +262,30 @@ fn publish_archive_orient_csv(
 }
 
 #[tauri::command]
+fn upload_event_pack_to_site(
+    state: State<'_, AppState>,
+    api_base_url: String,
+    publish_token: String,
+    slug: String,
+    title: String,
+) -> Result<SitePublishResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let map_path = course_map_path(&state);
+    site_publish::upload_event_pack_to_site(
+        &state.app_data_dir,
+        &state.db_path,
+        &map_path,
+        &api_base_url,
+        &publish_token,
+        &slug,
+        &title,
+    )
+}
+
+#[tauri::command]
 fn publish_current_start(
     state: State<'_, AppState>,
     api_base_url: String,
@@ -446,10 +470,30 @@ fn empty_phone_poll() -> PhonePollResult {
 
 fn push_start_pack_if_needed(state: &AppState, force: bool) -> Result<Option<String>, String> {
     let conn = domain::open_and_init_db(&state.db_path)?;
-    if domain::get_settings(&conn)?.sport_kind != "orient" {
-        return Ok(None);
+    let settings = domain::get_settings(&conn)?;
+    if settings.sport_kind == "orient" {
+        let pack = domain::build_start_pack(&conn)?;
+        if pack.people.is_empty() {
+            if force {
+                return Err("Стартовый протокол пуст — нечего отправлять.".to_string());
+            }
+            return Ok(None);
+        }
+        let body = serde_json::to_string(&pack)
+            .map_err(|e| format!("не удалось сериализовать протокол: {e}"))?;
+        if pack_body_unchanged(state, &body, force)? {
+            return Ok(None);
+        }
+        phone_sync::push_start_pack(&body)?;
+        remember_pack_body(state, body)?;
+        return Ok(Some(format!(
+            "Стартовый протокол отправлен на телефон: {} участников, {} дистанций.",
+            pack.people.len(),
+            pack.courses.len()
+        )));
     }
-    let pack = domain::build_start_pack(&conn)?;
+    let (_, title) = site_publish::load_event_meta(&conn).unwrap_or_default();
+    let pack = domain::build_event_pack(&conn, &title)?;
     if pack.people.is_empty() {
         if force {
             return Err("Стартовый протокол пуст — нечего отправлять.".to_string());
@@ -457,28 +501,34 @@ fn push_start_pack_if_needed(state: &AppState, force: bool) -> Result<Option<Str
         return Ok(None);
     }
     let body = serde_json::to_string(&pack)
-        .map_err(|e| format!("не удалось сериализовать протокол: {e}"))?;
-    let unchanged = {
-        let last = state
-            .last_start_pack_json
-            .lock()
-            .map_err(|_| "pack hash lock poisoned".to_string())?;
-        !force && last.as_str() == body
-    };
-    if unchanged {
+        .map_err(|e| format!("не удалось сериализовать пакет старта: {e}"))?;
+    if pack_body_unchanged(state, &body, force)? {
         return Ok(None);
     }
-    phone_sync::push_start_pack(&body)?;
+    phone_sync::push_event_pack(&body)?;
+    remember_pack_body(state, body)?;
+    Ok(Some(format!(
+        "Пакет старта отправлен на телефон: {} участников, {} форматов.",
+        pack.people.len(),
+        pack.formats.len()
+    )))
+}
+
+fn pack_body_unchanged(state: &AppState, body: &str, force: bool) -> Result<bool, String> {
+    let last = state
+        .last_start_pack_json
+        .lock()
+        .map_err(|_| "pack hash lock poisoned".to_string())?;
+    Ok(!force && last.as_str() == body)
+}
+
+fn remember_pack_body(state: &AppState, body: String) -> Result<(), String> {
     let mut last = state
         .last_start_pack_json
         .lock()
         .map_err(|_| "pack hash lock poisoned".to_string())?;
     *last = body;
-    Ok(Some(format!(
-        "Стартовый протокол отправлен на телефон: {} участников, {} дистанций.",
-        pack.people.len(),
-        pack.courses.len()
-    )))
+    Ok(())
 }
 
 #[tauri::command]
@@ -1953,6 +2003,7 @@ pub fn run() {
             preview_archive_orient_csv,
             publish_archive_orient_csv,
             publish_current_start,
+            upload_event_pack_to_site,
             recalculate_results,
             get_settings,
             set_settings,

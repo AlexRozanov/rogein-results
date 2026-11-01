@@ -39,6 +39,65 @@ class CsvImportTest {
     }
 
     @Test
+    fun detectProtocolKindSeparatesOrientAndRogaineHeaders() {
+        assertEquals(SPORT_ORIENT, CsvImport.detectProtocolKind("номер;ФИО;дистанция\n8;Иванов;D1\n"))
+        assertEquals(SPORT_ROGAINE, CsvImport.detectProtocolKind("номер;ФИО;формат;пол;дата_рождения\n8;Иванов;4ч;мужской;1990-01-01\n"))
+    }
+
+    @Test
+    fun rogaineProtocolReadsFiveColumns() {
+        val rows = CsvImport.rogaineProtocol(
+            "номер;ФИО;формат;пол;дата_рождения\n8;Иванов Иван;4ч;мужской;01.01.1990\n9;Петрова;2ч;женский;\n",
+        )
+        assertEquals(2, rows.size)
+        assertEquals(8, rows[0].id)
+        assertEquals("Иванов Иван", rows[0].name)
+        assertEquals("4ч", rows[0].format)
+        assertEquals("мужской", rows[0].gender)
+        assertEquals("01.01.1990", rows[0].birth)
+        assertEquals("2ч", rows[1].format)
+        assertEquals("женский", rows[1].gender)
+        assertEquals("", rows[1].birth)
+    }
+
+    @Test
+    fun formatsReadNameAndTimingColumns() {
+        val rows = CsvImport.formats("название;минуты;штраф;dq\n4ч;240;1;15\n2ч;120;;\n")
+        assertEquals(2, rows.size)
+        assertEquals("4ч", rows[0].name)
+        assertEquals(240, rows[0].controlMinutes)
+        assertEquals(1, rows[0].penaltyPerMinute)
+        assertEquals(15, rows[0].dqMinutes)
+        assertEquals("2ч", rows[1].name)
+        assertEquals(120, rows[1].controlMinutes)
+        assertEquals(null, rows[1].penaltyPerMinute)
+    }
+
+    @Test
+    fun awardGroupsReadGenderAgeAndFormats() {
+        val rows = CsvImport.awardGroups("имя;пол;мин_возраст;форматы\nМО;мужской;18;4ч,8ч\nЖО;женский;;2ч\n")
+        assertEquals(2, rows.size)
+        assertEquals("МО", rows[0].name)
+        assertEquals("мужской", rows[0].gender)
+        assertEquals(18, rows[0].minAge)
+        assertEquals(listOf("4ч", "8ч"), rows[0].formats)
+        assertEquals("ЖО", rows[1].name)
+        assertEquals(null, rows[1].minAge)
+        assertEquals(listOf("2ч"), rows[1].formats)
+    }
+
+    @Test
+    fun legendsReadCpNameAndType() {
+        val rows = CsvImport.legends("номер;название;тип\n31;Камень;обычный\n32;Яма;\n")
+        assertEquals(2, rows.size)
+        assertEquals(31, rows[0].cp)
+        assertEquals("Камень", rows[0].name)
+        assertEquals("обычный", rows[0].type)
+        assertEquals(32, rows[1].cp)
+        assertEquals("", rows[1].type)
+    }
+
+    @Test
     fun coursesAcceptSemicolonAndSpaces() {
         val rows = CsvImport.courses("D1;31;32;33\nD2;41 42,43\n")
         assertEquals(listOf(31, 32, 33), rows[0].controls)

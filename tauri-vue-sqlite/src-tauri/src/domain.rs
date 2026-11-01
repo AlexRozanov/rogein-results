@@ -8395,6 +8395,328 @@ fn start_pack_revision(sport: &str, courses: &[StartPackCourse], people: &[Start
     hasher.finish() as i64
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPack {
+    pub revision: i64,
+    pub sport: String,
+    pub title: String,
+    pub settings: EventPackSettings,
+    pub formats: Vec<EventPackFormat>,
+    pub award_groups: Vec<EventPackAwardGroup>,
+    pub people: Vec<EventPackPerson>,
+    pub legends: Vec<EventPackLegend>,
+    pub exclusions: Vec<EventPackExclusion>,
+    pub map_points: Vec<EventPackMapPoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meters_per_pixel: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_file_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackSettings {
+    pub control_minutes: i64,
+    pub penalty_per_minute: i64,
+    pub dq_minutes: i64,
+    pub start_cp: Option<i64>,
+    pub finish_cp: i64,
+    pub start_mode: String,
+    pub competition_date: String,
+    pub competition_start_time: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackFormat {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub penalty_per_minute: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dq_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_cp: Option<i64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub competition_start_time: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackAwardGroup {
+    pub name: String,
+    pub gender_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_age: Option<i64>,
+    pub sort_order: i64,
+    pub format_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackPerson {
+    pub id: i64,
+    pub name: String,
+    pub format: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gender: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub birth_date: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackLegend {
+    pub cp: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_y: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackExclusion {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub course: String,
+    pub from_cp: i64,
+    pub to_cp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_leg_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackMapPoint {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cp: Option<i64>,
+    pub name: String,
+    pub map_x: f64,
+    pub map_y: f64,
+}
+
+pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, String> {
+    let settings = get_settings(conn)?;
+    if settings.sport_kind != "rogaine" {
+        return Err(
+            "Пакет старта собирается только для рогейна. Для ориентирования отправьте стартовый протокол."
+                .into(),
+        );
+    }
+    let formats = query_format_settings(conn)?
+        .into_iter()
+        .map(|row| EventPackFormat {
+            name: row.format_name,
+            control_minutes: row.control_minutes,
+            penalty_per_minute: row.penalty_per_minute,
+            dq_minutes: row.dq_minutes,
+            finish_cp: row.finish_cp,
+            competition_start_time: row.competition_start_time.unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    let award_groups = query_award_groups(conn)?
+        .into_iter()
+        .map(|row| EventPackAwardGroup {
+            name: row.name,
+            gender_mode: row.gender_mode,
+            min_age: row.min_age,
+            sort_order: row.sort_order,
+            format_names: row.format_names,
+        })
+        .collect::<Vec<_>>();
+    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false)?;
+    let mut people = Vec::new();
+    for row in rows {
+        let Ok(id) = row.participant_id.trim().parse::<i64>() else {
+            continue;
+        };
+        if id <= 0 {
+            continue;
+        }
+        people.push(EventPackPerson {
+            id,
+            name: row.name,
+            format: row.format_name.trim().to_string(),
+            gender: row.gender.unwrap_or_default(),
+            birth_date: row
+                .birth_date_iso
+                .or(row.birth_date_raw)
+                .unwrap_or_default(),
+            team: row.teammates,
+        });
+    }
+    let legends = query_cp_legends(conn)?
+        .into_iter()
+        .map(|row| EventPackLegend {
+            cp: row.cp_number,
+            name: row.name,
+            r#type: row.cp_type_name,
+            map_x: row.map_x,
+            map_y: row.map_y,
+        })
+        .collect::<Vec<_>>();
+    let exclusions = query_event_pack_exclusions(conn)?;
+    let map_points = collect_event_pack_map_points(conn)?;
+    let meters_per_pixel = get_map_georef_info(conn)
+        .ok()
+        .and_then(|info| info.transform)
+        .map(|t| t.meters_per_pixel)
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let map_file_name = get_setting_value(conn, "course_map_file_name")?
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let pack = EventPack {
+        revision: 0,
+        sport: settings.sport_kind.clone(),
+        title: title.trim().to_string(),
+        settings: EventPackSettings {
+            control_minutes: settings.control_minutes,
+            penalty_per_minute: settings.penalty_per_minute,
+            dq_minutes: settings.dq_minutes,
+            start_cp: settings.start_cp,
+            finish_cp: settings.finish_cp,
+            start_mode: settings.start_mode,
+            competition_date: settings.competition_date,
+            competition_start_time: settings.competition_start_time,
+        },
+        formats,
+        award_groups,
+        people,
+        legends,
+        exclusions,
+        map_points,
+        meters_per_pixel,
+        map_file_name,
+    };
+    Ok(EventPack {
+        revision: event_pack_revision(&pack),
+        ..pack
+    })
+}
+
+fn event_pack_revision(pack: &EventPack) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    pack.sport.hash(&mut hasher);
+    pack.title.hash(&mut hasher);
+    pack.settings.control_minutes.hash(&mut hasher);
+    pack.settings.penalty_per_minute.hash(&mut hasher);
+    pack.settings.dq_minutes.hash(&mut hasher);
+    pack.settings.start_cp.hash(&mut hasher);
+    pack.settings.finish_cp.hash(&mut hasher);
+    pack.settings.start_mode.hash(&mut hasher);
+    pack.settings.competition_date.hash(&mut hasher);
+    pack.settings.competition_start_time.hash(&mut hasher);
+    for format in &pack.formats {
+        format.name.hash(&mut hasher);
+        format.control_minutes.hash(&mut hasher);
+        format.penalty_per_minute.hash(&mut hasher);
+        format.dq_minutes.hash(&mut hasher);
+        format.finish_cp.hash(&mut hasher);
+        format.competition_start_time.hash(&mut hasher);
+    }
+    for group in &pack.award_groups {
+        group.name.hash(&mut hasher);
+        group.gender_mode.hash(&mut hasher);
+        group.min_age.hash(&mut hasher);
+        group.sort_order.hash(&mut hasher);
+        group.format_names.hash(&mut hasher);
+    }
+    for person in &pack.people {
+        person.id.hash(&mut hasher);
+        person.name.hash(&mut hasher);
+        person.format.hash(&mut hasher);
+        person.gender.hash(&mut hasher);
+        person.birth_date.hash(&mut hasher);
+        person.team.hash(&mut hasher);
+    }
+    for legend in &pack.legends {
+        legend.cp.hash(&mut hasher);
+        legend.name.hash(&mut hasher);
+        legend.r#type.hash(&mut hasher);
+    }
+    for rule in &pack.exclusions {
+        rule.course.hash(&mut hasher);
+        rule.from_cp.hash(&mut hasher);
+        rule.to_cp.hash(&mut hasher);
+        rule.max_leg_seconds.hash(&mut hasher);
+    }
+    hasher.finish() as i64
+}
+
+fn query_event_pack_exclusions(conn: &Connection) -> Result<Vec<EventPackExclusion>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT IFNULL(c.name, IFNULL(f.format_name, '')), r.from_cp, r.to_cp, r.max_leg_seconds
+            FROM leg_exclusion_rules r
+            LEFT JOIN courses c ON c.id = r.course_id
+            LEFT JOIN start_protocol_formats f ON f.id = r.format_id
+            WHERE r.finish_participant_id IS NULL
+            ORDER BY r.id
+            "#,
+        )
+        .map_err(|e| format!("prepare event pack exclusions: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(EventPackExclusion {
+                course: r.get(0)?,
+                from_cp: r.get(1)?,
+                to_cp: r.get(2)?,
+                max_leg_seconds: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("query event pack exclusions: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read event pack exclusion: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn collect_event_pack_map_points(conn: &Connection) -> Result<Vec<EventPackMapPoint>, String> {
+    let special = get_course_map_special_points(conn)?;
+    let mut points = Vec::new();
+    if let (Some(x), Some(y)) = (special.start_map_x, special.start_map_y) {
+        points.push(EventPackMapPoint {
+            kind: "start".into(),
+            cp: special.start_cp,
+            name: "Старт".into(),
+            map_x: x,
+            map_y: y,
+        });
+    }
+    if let (Some(x), Some(y)) = (special.finish_map_x, special.finish_map_y) {
+        points.push(EventPackMapPoint {
+            kind: "finish".into(),
+            cp: Some(special.finish_cp),
+            name: "Финиш".into(),
+            map_x: x,
+            map_y: y,
+        });
+    }
+    for row in query_cp_legends(conn)? {
+        if let (Some(x), Some(y)) = (row.map_x, row.map_y) {
+            points.push(EventPackMapPoint {
+                kind: "cp".into(),
+                cp: Some(row.cp_number),
+                name: row.name,
+                map_x: x,
+                map_y: y,
+            });
+        }
+    }
+    Ok(points)
+}
+
 fn sync_start_protocol_format_ids_tx(tx: &Transaction<'_>) -> Result<(), String> {
     tx.execute(
         r#"
@@ -10559,7 +10881,7 @@ mod tests {
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot,
-        import_start_protocol_content, init_db, build_start_pack,
+        import_start_protocol_content, init_db, build_event_pack, build_start_pack, EventPack,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, resolve_orient_leg_to,
         set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
@@ -11339,5 +11661,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(added, 2);
+    }
+
+    #[test]
+    fn orient_start_pack_fixture_deserializes() {
+        let body = include_str!("../../../testdata/orient/start-pack.json");
+        let pack: super::StartPack = serde_json::from_str(body).unwrap();
+        assert_eq!(pack.sport, "orient");
+        assert_eq!(pack.courses.len(), 2);
+        assert_eq!(pack.people.len(), 2);
+        assert_eq!(pack.people[0].id, 8);
+        assert_eq!(pack.people[0].current_course, "D1");
+        assert_eq!(pack.courses[0].controls, vec![31, 32, 33]);
+        assert_eq!(pack.people[1].courses, vec!["D1".to_string(), "D2".to_string()]);
+    }
+
+    #[test]
+    fn orient_phone_queue_fixture_imports_and_scores() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        set_setting_value(&conn, "start_cp", "241").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Иванов Иван;D1\n",
+            true,
+        )
+        .unwrap();
+        import_courses_content(&conn, "D1;31;32;33\n", false).unwrap();
+        let body = include_str!("../../../testdata/orient/chip-queue.json");
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.unmatched, 0);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM results WHERE name = 'Иванов Иван'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "OK");
+        let pack = build_start_pack(&conn).unwrap();
+        assert_eq!(pack.sport, "orient");
+        assert!(
+            pack.people
+                .iter()
+                .any(|person| person.id == 8 && person.current_course == "D1")
+        );
+    }
+
+    #[test]
+    fn rogaine_event_pack_fixture_deserializes() {
+        let body = include_str!("../../../testdata/rogaine/event-pack.json");
+        let pack: super::EventPack = serde_json::from_str(body).unwrap();
+        assert_eq!(pack.sport, "rogaine");
+        assert_eq!(pack.title, "Тестовый рогейн");
+        assert_eq!(pack.settings.control_minutes, 240);
+        assert_eq!(pack.formats.len(), 1);
+        assert_eq!(pack.formats[0].name, "4ч");
+        assert_eq!(pack.people[0].id, 8);
+        assert_eq!(pack.people[0].format, "4ч");
+        assert_eq!(pack.people[0].gender, "мужской");
+        assert_eq!(pack.legends[0].cp, 31);
+        assert_eq!(pack.map_points[0].kind, "start");
+    }
+
+    #[test]
+    fn rogaine_event_pack_builds_from_protocol() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n8;Иванов Иван;4ч;мужской;1990-01-01\n",
+            true,
+        )
+        .unwrap();
+        let pack = build_event_pack(&conn, "Тестовый рогейн").unwrap();
+        assert_eq!(pack.sport, "rogaine");
+        assert_eq!(pack.title, "Тестовый рогейн");
+        assert!(
+            pack.people
+                .iter()
+                .any(|person| person.id == 8 && person.format == "4ч")
+        );
+        assert!(pack.formats.iter().any(|format| format.name == "4ч"));
+        let orient = build_event_pack_after_switch_orient(&conn);
+        assert!(orient.is_err());
+    }
+
+    fn build_event_pack_after_switch_orient(conn: &Connection) -> Result<EventPack, String> {
+        set_setting_value(conn, "sport_kind", "orient")?;
+        build_event_pack(conn, "orient")
     }
 }

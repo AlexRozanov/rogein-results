@@ -25,6 +25,13 @@ const START_PACK_PATHS: &[&str] = &[
     "/storage/emulated/0/Download/rogein/start-pack.json",
 ];
 
+const EVENT_PACK_PATHS: &[&str] = &[
+    "/sdcard/Android/data/ru.rogein.chip/files/event-pack.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/event-pack.json",
+    "/sdcard/Download/rogein/event-pack.json",
+    "/storage/emulated/0/Download/rogein/event-pack.json",
+];
+
 pub struct PhoneSnapshotRead {
     pub serial: String,
     pub path: String,
@@ -227,14 +234,27 @@ fn connected_serial(adb: &Path) -> Result<String, String> {
 }
 
 pub fn push_start_pack(body: &str) -> Result<(), String> {
+    push_json_file(body, START_PACK_PATHS, "start-pack", "стартовый протокол")
+}
+
+pub fn push_event_pack(body: &str) -> Result<(), String> {
+    push_json_file(body, EVENT_PACK_PATHS, "event-pack", "пакет старта")
+}
+
+fn push_json_file(
+    body: &str,
+    remotes: &[&str],
+    temp_prefix: &str,
+    label: &str,
+) -> Result<(), String> {
     let adb = locate_adb()?;
     let serial = connected_serial(&adb)?;
-    let local = env::temp_dir().join(format!("rogein-start-pack-{serial}.json"));
+    let local = env::temp_dir().join(format!("rogein-{temp_prefix}-{serial}.json"));
     fs::write(&local, body).map_err(|e| format!("не удалось записать временный файл: {e}"))?;
     let local_str = local.to_string_lossy().to_string();
     let mut pushed = Vec::new();
     let mut last_error = String::new();
-    for remote in START_PACK_PATHS {
+    for remote in remotes {
         let parent = remote.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("/sdcard");
         let _ = run_adb(&adb, &["-s", &serial, "shell", "mkdir", "-p", parent]);
         match run_adb(&adb, &["-s", &serial, "push", &local_str, remote]) {
@@ -251,7 +271,7 @@ pub fn push_start_pack(body: &str) -> Result<(), String> {
     let _ = fs::remove_file(&local);
     if pushed.is_empty() {
         return Err(format!(
-            "Не удалось записать стартовый протокол на телефон. {last_error}"
+            "Не удалось записать {label} на телефон. {last_error}"
         ));
     }
     Ok(())

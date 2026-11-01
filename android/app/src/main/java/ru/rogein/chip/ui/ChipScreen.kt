@@ -295,6 +295,24 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         viewModel.prepareCsvImport(replace)
                         csvPicker.pick(CsvImportKind.Courses)
                     },
+                    sportKind = settings.sportKind,
+                    onLoadSitePack = viewModel::downloadEventPack,
+                    onPickEventPack = { replace ->
+                        viewModel.prepareCsvImport(replace)
+                        csvPicker.pick(CsvImportKind.EventPack)
+                    },
+                    onPickFormats = { replace ->
+                        viewModel.prepareCsvImport(replace)
+                        csvPicker.pick(CsvImportKind.Formats)
+                    },
+                    onPickGroups = { replace ->
+                        viewModel.prepareCsvImport(replace)
+                        csvPicker.pick(CsvImportKind.AwardGroups)
+                    },
+                    onPickLegends = { replace ->
+                        viewModel.prepareCsvImport(replace)
+                        csvPicker.pick(CsvImportKind.Legends)
+                    },
                     onSaveCourse = viewModel::saveCourse,
                     onDeleteCourse = viewModel::deleteCourse,
                     items = items,
@@ -386,22 +404,29 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     if (confirmNewStart) {
         AlertDialog(
             onDismissRequest = { confirmNewStart = false },
-            title = { Text("Новый старт?") },
-            text = { Text("Текущий сохранится в списке стартов.") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmNewStart = false
-                        viewModel.resetForNewStart()
-                    },
-                ) {
-                    Text("Начать")
+            title = { Text("Новый старт") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Текущий сохранится в списке стартов. Выберите тип.")
+                    Button(
+                        onClick = {
+                            confirmNewStart = false
+                            viewModel.resetForNewStart("orient")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Ориентирование") }
+                    Button(
+                        onClick = {
+                            confirmNewStart = false
+                            viewModel.resetForNewStart("rogaine")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Рогейн") }
                 }
             },
+            confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { confirmNewStart = false }) {
-                    Text("Отмена")
-                }
+                TextButton(onClick = { confirmNewStart = false }) { Text("Отмена") }
             },
         )
     }

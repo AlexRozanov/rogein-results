@@ -2,8 +2,9 @@ mod models;
 mod publish;
 
 use std::convert::Infallible;
+use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -102,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
             get(get_live_participant),
         )
         .route("/api/live/{slug}/stream", get(live_stream))
+        .route("/api/packs/{slug}", get(get_event_pack).put(put_event_pack))
+        .route(
+            "/api/packs/{slug}/map",
+            get(get_event_pack_map).put(put_event_pack_map),
+        )
         .nest_service("/media", media_service)
         .layer(DefaultBodyLimit::max(80 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -615,6 +621,190 @@ async fn load_event_detail(
         award_groups: groups,
         results,
     }))
+}
+
+async fn put_event_pack(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let slug = normalize_slug(&slug)?;
+    let sport = payload
+        .get("sport")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if sport == "orient" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Пакет старта только для рогейна".into(),
+        ));
+    }
+    if !payload.is_object() {
+        return Err((StatusCode::BAD_REQUEST, "Ожидается JSON-объект пакета".into()));
+    }
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    sqlx::query(
+        r#"
+        INSERT INTO event_packs (slug, sport_kind, title, pack_json, updated_at)
+        VALUES ($1, 'rogaine', $2, $3, now())
+        ON CONFLICT (slug) DO UPDATE
+        SET sport_kind = EXCLUDED.sport_kind,
+            title = EXCLUDED.title,
+            pack_json = EXCLUDED.pack_json,
+            updated_at = now()
+        "#,
+    )
+    .bind(&slug)
+    .bind(title)
+    .bind(&payload)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
+}
+
+async fn get_event_pack(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let slug = normalize_slug(&slug)?;
+    let pack: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT pack_json FROM event_packs WHERE slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let pack = pack.ok_or((StatusCode::NOT_FOUND, "Pack not found".into()))?;
+    Ok(Json(pack))
+}
+
+async fn put_event_pack_map(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let slug = normalize_slug(&slug)?;
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Map body is empty".into()));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM event_packs WHERE slug = $1)")
+        .bind(&slug)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(internal)?;
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "Pack not found".into()));
+    }
+    let file_name = safe_pack_map_name(header_text(&headers, "x-map-file-name").unwrap_or("map.bin"));
+    let mime = header_text(&headers, "content-type")
+        .map(|v| v.split(';').next().unwrap_or(v).trim())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let dir = pack_map_dir(&state.media_dir, &slug);
+    fs::create_dir_all(&dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create pack map dir: {e}"),
+        )
+    })?;
+    let path = dir.join(&file_name);
+    fs::write(&path, &body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write pack map: {e}"),
+        )
+    })?;
+    sqlx::query(
+        r#"
+        UPDATE event_packs
+        SET map_file_name = $2, map_mime = $3, updated_at = now()
+        WHERE slug = $1
+        "#,
+    )
+    .bind(&slug)
+    .bind(&file_name)
+    .bind(&mime)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
+}
+
+async fn get_event_pack_map(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let slug = normalize_slug(&slug)?;
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT map_file_name, map_mime FROM event_packs WHERE slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let Some((file_name, mime)) = row else {
+        return Err((StatusCode::NOT_FOUND, "Pack not found".into()));
+    };
+    let file_name = file_name.filter(|v| !v.trim().is_empty()).ok_or((
+        StatusCode::NOT_FOUND,
+        "Pack map not found".into(),
+    ))?;
+    let path = pack_map_dir(&state.media_dir, &slug).join(safe_pack_map_name(&file_name));
+    let bytes = fs::read(&path).map_err(|_| (StatusCode::NOT_FOUND, "Pack map not found".into()))?;
+    let mime = mime
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "application/octet-stream".into());
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime)
+                    .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+            ),
+            (
+                HeaderName::from_static("x-map-file-name"),
+                HeaderValue::from_str(&file_name)
+                    .unwrap_or(HeaderValue::from_static("map.bin")),
+            ),
+        ],
+        bytes,
+    ))
+}
+
+fn pack_map_dir(media_dir: &FsPath, slug: &str) -> PathBuf {
+    media_dir.join("packs").join(slug)
+}
+
+fn safe_pack_map_name(raw: &str) -> String {
+    let name = FsPath::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("map.bin");
+    let cleaned: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    if cleaned.is_empty() {
+        "map.bin".into()
+    } else {
+        cleaned
+    }
 }
 
 fn internal(err: sqlx::Error) -> (StatusCode, String) {

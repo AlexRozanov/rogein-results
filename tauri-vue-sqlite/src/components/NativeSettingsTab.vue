@@ -219,6 +219,7 @@ async function onWorkspaceReset() {
     <NativeSitePublish
       ref="sitePublishRef"
       :busy="props.busy || localBusy"
+      :is-orient="isOrient"
       @status="emit('status', $event)"
     />
 

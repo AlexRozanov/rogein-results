@@ -19,6 +19,7 @@ import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.parse.SfrChipParser
@@ -71,7 +72,7 @@ data class PrintPrompt(
     val text: String,
 )
 
-enum class CsvImportKind { Protocol, Courses, Finish }
+enum class CsvImportKind { Protocol, Courses, Finish, EventPack, Formats, AwardGroups, Legends }
 
 data class FinishCsvPrompt(
     val addedCount: Int,
@@ -359,9 +360,44 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
-                _status.value = repository.startList.loadProtocolFromUsb(replace)
+                _status.value = if (isRogaine(settings.value.sportKind)) {
+                    importUsbEventPack(replace) ?: "Файл пакета не найден"
+                } else {
+                    repository.startList.loadProtocolFromUsb(replace, settings.value.sportKind)
+                }
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось загрузить протокол"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun downloadEventPack() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                val sport = settings.value.sportKind
+                if (!isRogaine(sport)) {
+                    _status.value = "Пакет с сайта — для старта «Рогейн»."
+                    return@launch
+                }
+                val downloaded = repository.event.fetchEventPack(settings.value)
+                repository.startList.sportMismatch(downloaded.pack.sport, sport)?.let {
+                    _status.value = it
+                    return@launch
+                }
+                repository.startList.applyEventPack(downloaded.pack, replace = true)
+                repository.event.applyPackMeta(downloaded.pack)
+                val mapBytes = downloaded.mapBytes
+                if (mapBytes != null && mapBytes.isNotEmpty()) {
+                    repository.event.saveCourseMap(mapBytes, downloaded.mapFileName)
+                }
+                val mapNote = if (mapBytes != null && mapBytes.isNotEmpty()) ", карта загружена" else ""
+                _status.value =
+                    "Пакет с сайта: ${downloaded.pack.people.size} участников, ${downloaded.pack.formats.size} форматов$mapNote."
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось скачать пакет"
             } finally {
                 _busy.value = false
             }
@@ -390,9 +426,29 @@ class ChipQueueViewModel(
             _busy.value = true
             try {
                 _status.value = when (kind) {
-                    CsvImportKind.Protocol -> repository.startList.importProtocolCsv(text, pendingCsvReset)
+                    CsvImportKind.Protocol -> repository.startList.importProtocolCsv(
+                        text,
+                        pendingCsvReset,
+                        settings.value.sportKind,
+                    )
                     CsvImportKind.Courses -> repository.startList.importCoursesCsv(text, pendingCsvReset)
                     CsvImportKind.Finish -> importFinishCsv(text)
+                    CsvImportKind.EventPack -> importEventPackJson(text)
+                    CsvImportKind.Formats -> {
+                        val (note, rows) = repository.startList.importFormatsCsv(text, pendingCsvReset)
+                        repository.event.mergeFormatSettings(rows)
+                        note
+                    }
+                    CsvImportKind.AwardGroups -> {
+                        val rows = repository.startList.parseAwardGroupsCsv(text)
+                        repository.event.mergeAwardGroups(rows)
+                        "Группы: ${rows.size}."
+                    }
+                    CsvImportKind.Legends -> {
+                        val rows = repository.startList.parseLegendsCsv(text)
+                        repository.event.mergeLegends(rows)
+                        "Легенды: ${rows.size} КП."
+                    }
                 }
             } catch (e: Exception) {
                 _status.value = e.message ?: "Ошибка CSV"
@@ -1280,7 +1336,7 @@ class ChipQueueViewModel(
     fun reloadStartList(force: Boolean = true) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.republishSnapshot() }
-            val note = repository.startList.reloadFromUsb(quiet = !force)
+            val note = importUsbPack(quiet = !force) 
             if (force) {
                 _status.value = note ?: "Файл протокола не найден"
             } else if (note != null && !_busy.value) {
@@ -1292,11 +1348,44 @@ class ChipQueueViewModel(
     fun pollStartList() {
         if (_busy.value) return
         viewModelScope.launch(Dispatchers.IO) {
-            val note = repository.startList.reloadFromUsb(quiet = true) ?: return@launch
+            val note = importUsbPack(quiet = true) ?: return@launch
             if (!_busy.value) {
                 _status.value = note
             }
         }
+    }
+
+    private suspend fun importUsbPack(quiet: Boolean): String? {
+        val sport = settings.value.sportKind
+        if (isRogaine(sport)) {
+            val hasPeople = repository.startList.peopleNow().isNotEmpty()
+            val hasCourses = repository.startList.coursesNow().isNotEmpty()
+            if (quiet && (hasPeople || hasCourses)) return null
+            return importUsbEventPack(replace = true, required = !quiet)
+        }
+        return repository.startList.reloadFromUsb(quiet = quiet, sport = sport)
+    }
+
+    private suspend fun importUsbEventPack(replace: Boolean, required: Boolean = true): String? {
+        val (pack, error) = repository.startList.readUsbEventPack()
+        val loaded = pack ?: return if (required) error ?: "Файл пакета не найден" else null
+        repository.startList.sportMismatch(loaded.sport, settings.value.sportKind)?.let {
+            return if (required) it else null
+        }
+        repository.startList.applyEventPack(loaded, replace)
+        repository.event.applyPackMeta(loaded)
+        return "Пакет старта: ${loaded.people.size} участников, ${loaded.formats.size} форматов."
+    }
+
+    private suspend fun importEventPackJson(text: String): String {
+        if (!isRogaine(settings.value.sportKind)) {
+            error("Пакет JSON — для старта «Рогейн».")
+        }
+        val pack = repository.startList.readEventPackJson(text)
+        repository.startList.sportMismatch(pack.sport, settings.value.sportKind)?.let { error(it) }
+        repository.startList.applyEventPack(pack, pendingCsvReset)
+        repository.event.applyPackMeta(pack)
+        return "Пакет JSON: ${pack.people.size} участников, ${pack.formats.size} форматов."
     }
 
     private fun handleCourseStationCheck(blocks: List<ByteArray>, dump: ChipDump) {
@@ -1613,10 +1702,10 @@ class ChipQueueViewModel(
         }
     }
 
-    fun resetForNewStart() {
+    fun resetForNewStart(sport: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val message = repository.resetForNewStart()
+                val message = repository.resetForNewStart(sport)
                 resetSessionUi()
                 _status.value = message
             } catch (e: Exception) {

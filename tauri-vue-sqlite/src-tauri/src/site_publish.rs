@@ -330,6 +330,72 @@ pub fn publish_current_start(
     })
 }
 
+pub fn upload_event_pack_to_site(
+    app_data_dir: &Path,
+    db_path: &Path,
+    course_map_path: &Path,
+    api_base_url: &str,
+    publish_token: &str,
+    slug: &str,
+    title: &str,
+) -> Result<SitePublishResult, String> {
+    let connection = SiteConnection {
+        api_base_url: api_base_url.to_string(),
+        publish_token: publish_token.to_string(),
+    };
+    save_connection(app_data_dir, &connection)?;
+    let conn = domain::open_and_init_db(db_path)?;
+    save_event_meta(&conn, slug, title)?;
+    let slug = normalize_slug(slug)?;
+    let title = title.trim().to_string();
+    let pack = domain::build_event_pack(&conn, &title)?;
+    if pack.people.is_empty() {
+        return Err("Стартовый протокол пуст — нечего отправлять.".into());
+    }
+    let token = connection.publish_token.trim();
+    if token.is_empty() {
+        return Err("Укажите токен публикации.".into());
+    }
+    let base = normalize_base_url(&connection.api_base_url)?;
+    let url = format!("{base}/api/packs/{slug}");
+    let body = serde_json::to_vec(&pack)
+        .map_err(|e| format!("Не удалось собрать JSON пакета: {e}"))?;
+    let response = agent()
+        .put(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json")
+        .send_bytes(&body)
+        .map_err(|e| map_http_error("отправки пакета старта", e, body.len()))?;
+    expect_ok(response, "отправки пакета старта")?;
+    let mut has_map = false;
+    if let Some(map) = load_map_upload(&conn, course_map_path)? {
+        let map_url = format!("{base}/api/packs/{slug}/map");
+        let map_len = map.bytes.len();
+        let response = agent()
+            .put(&map_url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", &map.mime_type)
+            .set("X-Map-File-Name", &map.file_name)
+            .send_bytes(&map.bytes)
+            .map_err(|e| {
+                format!(
+                    "Пакет отправлен, но карту загрузить не удалось: {}. Повторите отправку.",
+                    map_http_error("отправки карты пакета", e, map_len)
+                )
+            })?;
+        expect_ok(response, "отправки карты пакета").map_err(|e| {
+            format!("Пакет отправлен, но карту загрузить не удалось: {e} Повторите отправку.")
+        })?;
+        has_map = true;
+    }
+    Ok(SitePublishResult {
+        slug,
+        participant_count: pack.people.len(),
+        result_count: pack.formats.len() as usize,
+        has_map,
+    })
+}
+
 pub fn send_event_payload(
     connection: &SiteConnection,
     slug: &str,

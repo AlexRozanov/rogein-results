@@ -133,6 +133,8 @@ import ru.rogein.chip.parse.formatElapsed
 import ru.rogein.chip.parse.orientPunchWindow
 import ru.rogein.chip.parse.protocolRunStatus
 import ru.rogein.chip.parse.ProtocolRunStatus
+import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.punchLegSeconds
 import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.QueuedChipEntity
@@ -543,6 +545,12 @@ fun ProtocolScreen(
     onUsbCourses: (Boolean) -> Unit,
     onPickProtocol: (Boolean) -> Unit,
     onPickCourses: (Boolean) -> Unit,
+    sportKind: String = SPORT_ORIENT,
+    onLoadSitePack: () -> Unit = {},
+    onPickEventPack: (Boolean) -> Unit = {},
+    onPickFormats: (Boolean) -> Unit = {},
+    onPickGroups: (Boolean) -> Unit = {},
+    onPickLegends: (Boolean) -> Unit = {},
     onSaveCourse: (String, List<Int>, String?) -> Unit,
     onDeleteCourse: (String) -> Unit,
     courseCheckOn: Boolean,
@@ -568,6 +576,12 @@ fun ProtocolScreen(
             keyboard?.show()
         }
     }
+    LaunchedEffect(sportKind) {
+        if (isRogaine(sportKind) && pane == ProtocolPane.Check) {
+            pane = ProtocolPane.People
+            onCourseCheck(false)
+        }
+    }
     var loadMenu by remember { mutableStateOf(false) }
     var requestAddCourse by remember { mutableStateOf(false) }
     var statusFilter by remember { mutableStateOf(emptySet<ProtocolRunStatus>()) }
@@ -584,16 +598,23 @@ fun ProtocolScreen(
         val status = personProtocolStatus(person, finishedById[person.id].orEmpty())
         statusFilter.isEmpty() || status in statusFilter
     }
+    val rogaine = isRogaine(sportKind)
     val unknownCourses = people.map { it.currentCourse }.filter { name ->
         name.isNotBlank() && courses.none { it.name.equals(name, true) }
     }.distinct()
     val withoutCourse = people.count { it.currentCourse.isBlank() }
     val summary = buildList {
         if (courses.isNotEmpty()) {
-            add(courses.joinToString { "${it.name} (${it.controls.size} КП)" })
+            add(
+                if (rogaine) {
+                    courses.joinToString { it.name }
+                } else {
+                    courses.joinToString { "${it.name} (${it.controls.size} КП)" }
+                },
+            )
         }
-        if (withoutCourse > 0) add("$withoutCourse без дистанции")
-        if (unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
+        if (withoutCourse > 0) add(if (rogaine) "$withoutCourse без формата" else "$withoutCourse без дистанции")
+        if (!rogaine && unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
     }.joinToString(" · ")
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -606,7 +627,7 @@ fun ProtocolScreen(
                 selectedTabIndex = when (pane) {
                     ProtocolPane.People -> 0
                     ProtocolPane.Courses -> 1
-                    ProtocolPane.Check -> 2
+                    ProtocolPane.Check -> if (rogaine) 0 else 2
                 },
                 containerColor = CardWhite,
                 edgePadding = 8.dp,
@@ -627,19 +648,27 @@ fun ProtocolScreen(
                         pane = ProtocolPane.Courses
                         onCourseCheck(false)
                     },
-                    text = { Text("Дистанции", maxLines = 1, softWrap = false) },
-                )
-                Tab(
-                    selected = pane == ProtocolPane.Check,
-                    onClick = {
-                        pane = ProtocolPane.Check
-                        onCourseCheck(true)
-                        if (courseCheckName.isBlank()) {
-                            courses.firstOrNull()?.name?.let(onCourseCheckCourse)
-                        }
+                    text = {
+                        Text(
+                            if (rogaine) "Форматы" else "Дистанции",
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     },
-                    text = { Text("Проверка", maxLines = 1, softWrap = false) },
                 )
+                if (!rogaine) {
+                    Tab(
+                        selected = pane == ProtocolPane.Check,
+                        onClick = {
+                            pane = ProtocolPane.Check
+                            onCourseCheck(true)
+                            if (courseCheckName.isBlank()) {
+                                courses.firstOrNull()?.name?.let(onCourseCheckCourse)
+                            }
+                        },
+                        text = { Text("Проверка", maxLines = 1, softWrap = false) },
+                    )
+                }
             }
             Box {
                 TextButton(
@@ -659,34 +688,86 @@ fun ProtocolScreen(
                     containerColor = CardWhite,
                     tonalElevation = 0.dp,
                 ) {
-                    DropdownMenuItem(
-                        text = { Text("Протокол с компьютера") },
-                        onClick = {
-                            loadMenu = false
-                            askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Дистанции с компьютера") },
-                        onClick = {
-                            loadMenu = false
-                            askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Протокол CSV") },
-                        onClick = {
-                            loadMenu = false
-                            askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Дистанции CSV") },
-                        onClick = {
-                            loadMenu = false
-                            askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
-                        },
-                    )
+                    if (rogaine) {
+                        DropdownMenuItem(
+                            text = { Text("Пакет с сайта") },
+                            onClick = {
+                                loadMenu = false
+                                onLoadSitePack()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Пакет с компьютера") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Пакет JSON") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickEventPack)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Протокол CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Форматы CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickFormats)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Группы CSV") },
+                            onClick = {
+                                loadMenu = false
+                                onPickGroups(true)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Легенды CSV") },
+                            onClick = {
+                                loadMenu = false
+                                onPickLegends(true)
+                            },
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text("Протокол с компьютера") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onUsbProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Дистанции с компьютера") },
+                            onClick = {
+                                loadMenu = false
+                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onUsbCourses)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Протокол CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askProtocolLoad(people.isNotEmpty(), people.size, pending = { pendingLoad = it }, load = onPickProtocol)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Дистанции CSV") },
+                            onClick = {
+                                loadMenu = false
+                                askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -704,7 +785,13 @@ fun ProtocolScreen(
                 singleLine = true,
                 placeholder = {
                     Text(
-                        if (pane == ProtocolPane.People) "Номер или фамилия" else "Название дистанции",
+                        if (pane == ProtocolPane.People) {
+                            "Номер или фамилия"
+                        } else if (rogaine) {
+                            "Название формата"
+                        } else {
+                            "Название дистанции"
+                        },
                     )
                 },
                 textStyle = MaterialTheme.typography.bodyMedium,
@@ -781,7 +868,7 @@ fun ProtocolScreen(
                         modifier = Modifier.weight(0.65f),
                     )
                 }
-                CourseChoice("Дистанция", courses.map { it.name }, newCourse, onNewCourse)
+                CourseChoice(if (rogaine) "Формат" else "Дистанция", courses.map { it.name }, newCourse, onNewCourse)
             }
         }
         if (pane == ProtocolPane.People) {
@@ -2574,7 +2661,14 @@ fun EventSettingsScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Параметры расчёта ориентирования. Совпадают с десктопом.", color = Muted)
+        Text(
+            if (settings.sportKind == "rogaine") {
+                "Старт: рогейн. Тип задаётся в «Новый старт»."
+            } else {
+                "Старт: ориентирование. Параметры расчёта совпадают с десктопом."
+            },
+            color = Muted,
+        )
         OutlinedTextField(
             value = startCp,
             onValueChange = { startCp = it.filter { ch -> ch.isDigit() }.take(3) },

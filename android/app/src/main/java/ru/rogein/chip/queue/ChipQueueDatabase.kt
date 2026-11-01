@@ -40,6 +40,8 @@ data class StartPersonEntity(
     val localCourseTouchedAt: Long,
     val issuedAt: Long = 0L,
     val issuedCourse: String = "",
+    val gender: String = "",
+    val birthDate: String = "",
 )
 
 @Entity(tableName = "start_courses")
@@ -196,7 +198,7 @@ interface StartArchiveDao {
         CorrectionEntity::class,
         ExclusionEntity::class,
     ],
-    version = 6,
+    version = 7,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
@@ -281,6 +283,13 @@ abstract class ChipQueueDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE start_people ADD COLUMN issuedCourse TEXT NOT NULL DEFAULT ''")
                 db.execSQL("UPDATE start_people SET issuedCourse = currentCourse WHERE issuedAt > 0")
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE start_people ADD COLUMN gender TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE start_people ADD COLUMN birthDate TEXT NOT NULL DEFAULT ''")
             }
         }
 

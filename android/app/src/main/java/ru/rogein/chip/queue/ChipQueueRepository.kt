@@ -142,8 +142,8 @@ class ChipQueueRepository(
         return publishSnapshot()
     }
 
-    suspend fun resetForNewStart(): String {
-        val message = archive.createNewStart()
+    suspend fun resetForNewStart(sport: String): String {
+        val message = archive.createNewStart(sport)
         startList.forgetUsbPack()
         publishSnapshot()
         return message
@@ -219,13 +219,14 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_3_4,
                     ChipQueueDatabase.MIGRATION_4_5,
                     ChipQueueDatabase.MIGRATION_5_6,
+                    ChipQueueDatabase.MIGRATION_6_7,
                 )
                 .build()
             return ChipQueueRepository(
                 db.dao(),
                 ChipQueueSnapshotWriter(appContext),
                 StartListStore(appContext, db.startListDao()),
-                EventStore(db.eventDao()),
+                EventStore(appContext.filesDir, db.eventDao()),
                 StartArchiveStore(db),
                 PrinterStore(appContext),
             )
