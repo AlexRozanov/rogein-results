@@ -94,6 +94,12 @@ data class IssueOverwritePrompt(
     val newCourse: String,
 )
 
+data class IssueFillPrompt(
+    val id: Int,
+    val name: String,
+    val course: String,
+)
+
 data class StationWritePrompt(
     val program: StationProgram,
     val controlNumber: Int?,
@@ -194,6 +200,9 @@ class ChipQueueViewModel(
 
     private val _issueOverwritePrompt = MutableStateFlow<IssueOverwritePrompt?>(null)
     val issueOverwritePrompt = _issueOverwritePrompt.asStateFlow()
+
+    private val _issueFillPrompt = MutableStateFlow<IssueFillPrompt?>(null)
+    val issueFillPrompt = _issueFillPrompt.asStateFlow()
 
     private val _stationWritePrompt = MutableStateFlow<StationWritePrompt?>(null)
     val stationWritePrompt = _stationWritePrompt.asStateFlow()
@@ -658,7 +667,9 @@ class ChipQueueViewModel(
 
     fun onQuery(value: String) {
         _query.value = value
-        _addingNew.value = false
+        if (_section.value != AppSection.Chip) {
+            _addingNew.value = false
+        }
     }
 
     fun selectPerson(id: Int) {
@@ -698,10 +709,40 @@ class ChipQueueViewModel(
     }
 
     fun onNewNumber(value: String) {
-        _newNumber.value = value.filter { it.isDigit() }.take(5)
-        if (_addingNew.value && _mode.value == ChipMode.Issue) {
+        val digits = value.filter { it.isDigit() }.take(5)
+        _newNumber.value = digits
+        if (_section.value == AppSection.Chip && _mode.value == ChipMode.Issue) {
+            syncIssueNumber(digits)
+        } else if (_addingNew.value && _mode.value == ChipMode.Issue) {
             promptStatus()
         }
+    }
+
+    private fun syncIssueNumber(digits: String) {
+        val id = digits.toIntOrNull()
+        if (id == null || id !in 1..MAX_LOGICAL_ID) {
+            _selectedId.value = null
+            _addingNew.value = digits.isNotEmpty()
+            if (digits.isEmpty()) {
+                _newName.value = ""
+                _newCourse.value = ""
+            }
+            promptStatus()
+            return
+        }
+        val person = people.value.find { it.id == id }
+        if (person != null) {
+            _selectedId.value = id
+            _addingNew.value = false
+            _newName.value = person.name
+            _newCourse.value = person.currentCourse
+        } else {
+            _selectedId.value = null
+            _addingNew.value = true
+            _newName.value = ""
+            _newCourse.value = ""
+        }
+        promptStatus()
     }
 
     fun onNewName(value: String) {
@@ -805,33 +846,26 @@ class ChipQueueViewModel(
         }
     }
 
-    private fun issueCourseMissing(): Boolean {
-        if (_addingNew.value) return _newCourse.value.isBlank()
-        val selected = _selectedId.value?.let { id -> people.value.find { it.id == id } }
-        return selected != null && selected.currentCourse.isBlank()
-    }
-
     private fun promptStatus() {
-        val taken = newIssueTaken()
+        val id = _newNumber.value.toIntOrNull()
+        val person = protocolPerson(id)
         _status.value = when (_mode.value) {
             ChipMode.Issue -> when {
-                taken != null -> {
-                    val who = taken.name.ifBlank { "участник" }
-                    "№ ${taken.id} уже в стартовом протоколе ($who). Выберите его из списка."
-                }
-                _addingNew.value && !validNewIssueNumber() ->
-                    "Укажите свободный номер чипа (1…$MAX_LOGICAL_ID). ФИО необязательно."
-                issueCourseMissing() ->
+                id == null || id !in 1..MAX_LOGICAL_ID ->
+                    "Введите номер и приложите чип. Фамилия — если нужно найти в списке."
+                person != null -> {
+                    val who = person.name.ifBlank { "без ФИО" }
+                    val dist = person.currentCourse.ifBlank { "без дистанции" }
                     if (_chipReady.value) {
-                        "Укажите дистанцию — без неё номер не запишется."
+                        "Чип на месте. Запишу № $id · $who · $dist."
                     } else {
-                        "Укажите дистанцию, затем приложите чип"
+                        "№ $id · $who · $dist. Приложите чип."
                     }
-                _chipReady.value && (_selectedId.value != null || _addingNew.value) ->
-                    "Чип на месте. Не убирайте — номер запишется."
-                _selectedId.value != null || _addingNew.value ->
-                    "Приложите чип — номер запишется, отметки очистятся"
-                else -> "Выберите участника или приложите чип"
+                }
+                _chipReady.value ->
+                    "Чип на месте. Запишу № $id и добавлю в протокол."
+                else ->
+                    "№ $id нет в протоколе — выдадим и добавим. Приложите чип."
             }
             ChipMode.Finish -> "Приложите чип — отметки сохранятся"
             ChipMode.Station -> stationPrompt()
@@ -944,23 +978,24 @@ class ChipQueueViewModel(
 
     private suspend fun handleIssueRead(logicalId: Int?) {
         val draft = issueTarget(logicalId)
-        if (draft == null) {
-            _status.value = issueTargetError(logicalId)
-            if (_addingNew.value) signalError()
+        if (draft != null) {
+            issueToChip(draft.first, draft.second, draft.third)
             return
         }
-        if (draft.third.isBlank()) {
-            if (!_addingNew.value) {
-                _selectedId.value = draft.first
-                _newNumber.value = draft.first.toString()
-                _newName.value = draft.second
-                _newCourse.value = ""
+        if (logicalId != null) {
+            val known = people.value.find { it.id == logicalId }
+            if (known != null && personNeedsFill(known.name, known.currentCourse)) {
+                _selectedId.value = known.id
+                _newNumber.value = known.id.toString()
+                _newName.value = known.name
+                _newCourse.value = known.currentCourse
+                openIssueFill(known.id, known.name, known.currentCourse)
+                _status.value = "№ ${known.id}: заполните ФИО и дистанцию."
+                return
             }
-            _status.value = "Укажите дистанцию для № ${draft.first}, затем приложите чип."
-            signalError()
-            return
         }
-        issueToChip(draft.first, draft.second, draft.third)
+        _status.value = issueTargetError(logicalId)
+        if (_addingNew.value) signalError()
     }
 
     fun confirmIssueOverwrite() {
@@ -979,6 +1014,37 @@ class ChipQueueViewModel(
             "Чип не перезаписан. Готов для дистанции $course."
         } else {
             "Чип не перезаписан."
+        }
+    }
+
+    fun confirmIssueFill(name: String, course: String) {
+        val prompt = _issueFillPrompt.value ?: return
+        _issueFillPrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = repository.startList.person(prompt.id)
+            val savedName = name.trim().ifBlank { existing?.name.orEmpty() }
+            val savedCourse = course.trim().ifBlank { existing?.currentCourse.orEmpty() }
+            repository.startList.upsertLocal(prompt.id, savedName, savedCourse)
+            _status.value = when {
+                savedName.isBlank() && savedCourse.isBlank() ->
+                    "№ ${prompt.id} в протоколе. ФИО и дистанцию можно указать позже."
+                savedCourse.isBlank() ->
+                    "№ ${prompt.id}: ФИО сохранено. Дистанцию можно указать позже."
+                savedName.isBlank() ->
+                    "№ ${prompt.id}: дистанция $savedCourse. ФИО можно указать позже."
+                else ->
+                    "№ ${prompt.id}: $savedName · $savedCourse."
+            }
+        }
+    }
+
+    fun skipIssueFill() {
+        val id = _issueFillPrompt.value?.id
+        _issueFillPrompt.value = null
+        _status.value = if (id != null) {
+            "№ $id в протоколе. ФИО и дистанцию можно указать позже."
+        } else {
+            "ФИО и дистанцию можно указать позже в протоколе."
         }
     }
 
@@ -1110,27 +1176,15 @@ class ChipQueueViewModel(
         }
     }
 
-    private fun issueTarget(logicalId: Int?): Triple<Int, String, String>? {
-        if (_addingNew.value) {
-            val id = _newNumber.value.toIntOrNull()
-            val name = _newName.value.trim()
-            val course = _newCourse.value.trim()
-            if (id == null || id !in 1..MAX_LOGICAL_ID) return null
-            if (protocolPerson(id) != null) return null
-            return Triple(id, name, course)
-        }
+    private fun issueTarget(@Suppress("UNUSED_PARAMETER") logicalId: Int?): Triple<Int, String, String>? {
+        val typed = _newNumber.value.toIntOrNull()
         val selected = _selectedId.value?.let { id -> people.value.find { it.id == id } }
-        if (selected != null) {
-            return Triple(selected.id, selected.name, selected.currentCourse)
-        }
-        if (logicalId != null) {
-            val known = people.value.find { it.id == logicalId }
-            if (known != null) {
-                _selectedId.value = known.id
-                return Triple(known.id, known.name, known.currentCourse)
-            }
-        }
-        return null
+        val id = typed ?: selected?.id
+        if (id == null || id !in 1..MAX_LOGICAL_ID) return null
+        val person = protocolPerson(id)
+        val name = person?.name?.ifBlank { _newName.value.trim() } ?: _newName.value.trim()
+        val course = person?.currentCourse?.ifBlank { _newCourse.value.trim() } ?: _newCourse.value.trim()
+        return Triple(id, name, course)
     }
 
     private fun unfinishedIssuedCourse(id: Int): String? {
@@ -1172,12 +1226,20 @@ class ChipQueueViewModel(
             _selectedId.value = null
             _addingNew.value = false
             _query.value = ""
+            _newNumber.value = ""
+            _newName.value = ""
+            _newCourse.value = ""
             _extraCourse.value = ""
             pointerEnd = 5
             punchCount = 0
             _sessionSummary.value = "№ $id · 0 отметок"
-            _status.value = "${name.ifBlank { "№ $id" }} · $course. Чип выдан."
+            val who = name.ifBlank { "№ $id" }
+            val dist = course.ifBlank { "без дистанции" }
+            _status.value = "$who · $dist. Чип выдан."
             signalSuccess()
+            if (personNeedsFill(name, course)) {
+                openIssueFill(id, name, course)
+            }
         } catch (e: Exception) {
             forgetChip()
             _status.value = e.message ?: "Не удалось выдать чип"
@@ -1331,34 +1393,23 @@ class ChipQueueViewModel(
     private fun protocolPerson(id: Int?): StartPerson? =
         id?.let { n -> people.value.find { it.id == n } }
 
-    private fun newIssueTaken(): StartPerson? {
-        if (!_addingNew.value) return null
-        return protocolPerson(_newNumber.value.toIntOrNull())
-    }
-
-    private fun validNewIssueNumber(): Boolean {
-        val id = _newNumber.value.toIntOrNull() ?: return false
-        return id in 1..MAX_LOGICAL_ID && protocolPerson(id) == null
-    }
-
     private fun issueTargetError(logicalId: Int?): String {
-        if (_addingNew.value) {
-            val id = _newNumber.value.toIntOrNull()
-            val taken = protocolPerson(id)
-            return when {
-                id == null || id !in 1..MAX_LOGICAL_ID ->
-                    "Укажите номер чипа (1…$MAX_LOGICAL_ID). ФИО необязательно."
-                taken != null ->
-                    "№ $id уже в стартовом протоколе (${taken.name.ifBlank { "участник" }}). Выберите его из списка."
-                else ->
-                    "Укажите дистанцию, затем приложите чип."
-            }
+        val id = _newNumber.value.toIntOrNull()
+        return when {
+            id == null || id !in 1..MAX_LOGICAL_ID ->
+                "Введите номер и приложите чип."
+            logicalId != null ->
+                "№ $logicalId на чипе. Введите номер, чтобы выдать, или заполните карточку участника."
+            else ->
+                "Введите номер и приложите чип."
         }
-        return if (logicalId != null) {
-            "№ $logicalId нет в протоколе. Выберите участника или добавьте нового."
-        } else {
-            "Выберите участника из списка, затем приложите чип."
-        }
+    }
+
+    private fun personNeedsFill(name: String, course: String): Boolean =
+        name.isBlank() || course.isBlank()
+
+    private fun openIssueFill(id: Int, name: String, course: String) {
+        _issueFillPrompt.value = IssueFillPrompt(id = id, name = name, course = course)
     }
 
     private fun sessionLabel(): String {
@@ -1624,6 +1675,7 @@ class ChipQueueViewModel(
         _sessionSummary.value = null
         _finishReplacePrompt.value = null
         _issueOverwritePrompt.value = null
+        _issueFillPrompt.value = null
         _overwritePrompt.value = false
     }
 
@@ -1641,10 +1693,13 @@ class ChipQueueViewModel(
 
     fun suggestions(): List<StartPerson> {
         val q = _query.value.trim().lowercase().replace('ё', 'е')
+        val num = _newNumber.value
         return people.value.filter { person ->
-            if (q.isEmpty()) return@filter true
-            person.name.lowercase().replace('ё', 'е').contains(q) ||
+            val nameHit = q.isEmpty() ||
+                person.name.lowercase().replace('ё', 'е').contains(q) ||
                 person.id.toString().contains(q)
+            val numberHit = num.isEmpty() || person.id.toString().startsWith(num)
+            if (q.isNotEmpty()) nameHit else numberHit
         }
     }
 

@@ -6,6 +6,7 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -249,6 +250,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNfcIntent(intent)
+    }
+
     private val packTick = object : Runnable {
         override fun run() {
             viewModel.pollStartList()
@@ -280,6 +287,29 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         io.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun handleNfcIntent(intent: Intent?) {
+        val tag = nfcTagFrom(intent) ?: return
+        onTag(tag)
+    }
+
+    private fun nfcTagFrom(intent: Intent?): Tag? {
+        if (intent == null) return null
+        val action = intent.action
+        if (
+            action != NfcAdapter.ACTION_TECH_DISCOVERED &&
+            action != NfcAdapter.ACTION_TAG_DISCOVERED &&
+            action != NfcAdapter.ACTION_NDEF_DISCOVERED
+        ) {
+            return null
+        }
+        return if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        }
     }
 
     private fun onTag(tag: Tag) {

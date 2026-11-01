@@ -47,6 +47,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -130,8 +131,11 @@ import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.formatDayClock
 import ru.rogein.chip.parse.formatElapsed
 import ru.rogein.chip.parse.orientPunchWindow
+import ru.rogein.chip.parse.protocolRunStatus
+import ru.rogein.chip.parse.ProtocolRunStatus
 import ru.rogein.chip.parse.punchLegSeconds
 import ru.rogein.chip.queue.CorrectionEntity
+import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.queue.EventSettings
 import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.ExclusionEntity
@@ -158,6 +162,55 @@ private val Muted = Color(0xFF5C5C5C)
 private val Danger = Color(0xFF8B3A3A)
 private val OkGreen = Color(0xFF1B4D3E)
 private val Warn = Color(0xFF8A5A00)
+
+internal fun personProtocolStatus(
+    person: StartPerson,
+    finishedCourses: List<String>,
+): ProtocolRunStatus = protocolRunStatus(
+    issued = person.issued,
+    issuedCourse = person.issuedCourse,
+    currentCourse = person.currentCourse,
+    finishedCourses = finishedCourses,
+)
+
+internal fun protocolStatusColor(status: ProtocolRunStatus): Color = when (status) {
+    ProtocolRunStatus.OnCourse -> Danger
+    ProtocolRunStatus.Finished -> OkGreen
+    ProtocolRunStatus.NotStarted -> Muted
+}
+
+@Composable
+internal fun PersonProtocolLine(
+    person: StartPerson,
+    status: ProtocolRunStatus,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val courseMark = person.currentCourse.ifBlank { "без дистанции" }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "${person.id}  ${person.displayName}  $courseMark",
+            style = if (selected) {
+                MaterialTheme.typography.titleMedium
+            } else {
+                MaterialTheme.typography.bodyLarge
+            },
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = status.label,
+            color = protocolStatusColor(status),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
 
 @Composable
 internal fun EditorCard(
@@ -470,6 +523,7 @@ internal fun CompactTextButton(
 fun ProtocolScreen(
     people: List<StartPerson>,
     courses: List<StartCourse>,
+    items: List<QueuedChipEntity>,
     query: String,
     selected: StartPerson?,
     addingNew: Boolean,
@@ -514,17 +568,26 @@ fun ProtocolScreen(
             keyboard?.show()
         }
     }
+    var loadMenu by remember { mutableStateOf(false) }
+    var requestAddCourse by remember { mutableStateOf(false) }
+    var statusFilter by remember { mutableStateOf(emptySet<ProtocolRunStatus>()) }
+    val finishedById = remember(items) {
+        items.mapNotNull { item -> item.logicalId?.let { id -> id to item.courseName } }
+            .groupBy({ it.first }, { it.second })
+    }
     val filtered = people.filter { person ->
         val q = query.trim().lowercase().replace('ё', 'е')
-        if (q.isEmpty()) true
-        else person.name.lowercase().replace('ё', 'е').contains(q) || person.id.toString().contains(q)
+        val nameHit = q.isEmpty() ||
+            person.name.lowercase().replace('ё', 'е').contains(q) ||
+            person.id.toString().contains(q)
+        if (!nameHit) return@filter false
+        val status = personProtocolStatus(person, finishedById[person.id].orEmpty())
+        statusFilter.isEmpty() || status in statusFilter
     }
     val unknownCourses = people.map { it.currentCourse }.filter { name ->
         name.isNotBlank() && courses.none { it.name.equals(name, true) }
     }.distinct()
     val withoutCourse = people.count { it.currentCourse.isBlank() }
-    var loadMenu by remember { mutableStateOf(false) }
-    var requestAddCourse by remember { mutableStateOf(false) }
     val summary = buildList {
         if (courses.isNotEmpty()) {
             add(courses.joinToString { "${it.name} (${it.controls.size} КП)" })
@@ -534,7 +597,9 @@ fun ProtocolScreen(
     }.joinToString(" · ")
     Column(modifier = modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(CardWhite),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ScrollableTabRow(
@@ -543,6 +608,7 @@ fun ProtocolScreen(
                     ProtocolPane.Courses -> 1
                     ProtocolPane.Check -> 2
                 },
+                containerColor = CardWhite,
                 edgePadding = 8.dp,
                 divider = {},
                 modifier = Modifier.weight(1f),
@@ -587,7 +653,12 @@ fun ProtocolScreen(
                         modifier = Modifier.size(20.dp),
                     )
                 }
-                DropdownMenu(expanded = loadMenu, onDismissRequest = { loadMenu = false }) {
+                DropdownMenu(
+                    expanded = loadMenu,
+                    onDismissRequest = { loadMenu = false },
+                    containerColor = CardWhite,
+                    tonalElevation = 0.dp,
+                ) {
                     DropdownMenuItem(
                         text = { Text("Протокол с компьютера") },
                         onClick = {
@@ -651,9 +722,15 @@ fun ProtocolScreen(
         }
         if (pane == ProtocolPane.People) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                StatusFilterMenu(
+                    selected = statusFilter,
+                    onSelected = { statusFilter = it },
+                    modifier = Modifier.weight(1f),
+                )
                 Button(onClick = onNew) { Text("Добавить") }
                 if (!searching && (selected != null || addingNew)) {
                     TextButton(onClick = onClearSelection) { Text("Свернуть") }
@@ -718,31 +795,22 @@ fun ProtocolScreen(
                 if (filtered.isEmpty()) {
                     item {
                         Text(
-                            if (searching) "Никого не найдено" else "Протокол пуст. Загрузите CSV или добавьте участника.",
+                            if (searching || statusFilter.isNotEmpty()) {
+                                "Никого не найдено"
+                            } else {
+                                "Протокол пуст. Загрузите CSV или добавьте участника."
+                            },
                             color = Muted,
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
                 items(filtered, key = { it.id }) { person ->
-                    val issuedMark = if (person.issued) " · выдан" else ""
-                    val courseMark = person.currentCourse.ifBlank { "без дистанции" }
-                    Text(
-                        text = "${person.id}  ${person.displayName}  $courseMark$issuedMark",
-                        color = when {
-                            person.issued -> OkGreen
-                            person.currentCourse.isBlank() -> Danger
-                            else -> Color.Unspecified
-                        },
-                        style = if (person.id == selected?.id) {
-                            MaterialTheme.typography.titleMedium
-                        } else {
-                            MaterialTheme.typography.bodyLarge
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(person.id) }
-                            .padding(vertical = 8.dp),
+                    PersonProtocolLine(
+                        person = person,
+                        status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
+                        selected = person.id == selected?.id,
+                        onClick = { onSelect(person.id) },
                     )
                 }
             }
@@ -2552,6 +2620,75 @@ fun EventSettingsScreen(
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Сохранить") }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StatusFilterMenu(
+    selected: Set<ProtocolRunStatus>,
+    onSelected: (Set<ProtocolRunStatus>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = when {
+        selected.isEmpty() -> "Все"
+        selected.size == 1 -> selected.first().label
+        else -> ProtocolRunStatus.entries.filter { it in selected }.joinToString(", ") { it.label }
+    }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = label,
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text("Статус") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = CardWhite,
+            tonalElevation = 0.dp,
+        ) {
+            DropdownMenuItem(
+                text = { Text("Все") },
+                leadingIcon = {
+                    Checkbox(
+                        checked = selected.isEmpty(),
+                        onCheckedChange = null,
+                    )
+                },
+                onClick = { onSelected(emptySet()) },
+            )
+            ProtocolRunStatus.entries.forEach { status ->
+                val checked = status in selected
+                DropdownMenuItem(
+                    text = {
+                        Text(status.label, color = protocolStatusColor(status))
+                    },
+                    leadingIcon = {
+                        Checkbox(
+                            checked = checked,
+                            onCheckedChange = null,
+                        )
+                    },
+                    onClick = {
+                        val next = if (checked) selected - status else selected + status
+                        onSelected(
+                            if (next.size == ProtocolRunStatus.entries.size) emptySet() else next,
+                        )
+                    },
+                )
+            }
+        }
     }
 }
 

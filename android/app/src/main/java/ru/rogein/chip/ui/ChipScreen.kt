@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -112,6 +113,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
     val finishCsvPrompt by viewModel.finishCsvPrompt.collectAsStateWithLifecycle()
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
+    val issueFillPrompt by viewModel.issueFillPrompt.collectAsStateWithLifecycle()
     val stationWritePrompt by viewModel.stationWritePrompt.collectAsStateWithLifecycle()
     val stationProgram by viewModel.stationProgram.collectAsStateWithLifecycle()
     val stationInspect by viewModel.stationInspect.collectAsStateWithLifecycle()
@@ -250,6 +252,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     newName = newName,
                     newCourse = newCourse,
                     extraCourse = extraCourse,
+                    fillOpen = issueFillPrompt != null,
                     testCourse = testCourse,
                     chipReady = chipReady,
                     chipLogicalId = chipLogicalId,
@@ -294,6 +297,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     },
                     onSaveCourse = viewModel::saveCourse,
                     onDeleteCourse = viewModel::deleteCourse,
+                    items = items,
                     courseCheckOn = courseCheckOn,
                     courseCheckName = courseCheckName,
                     courseCheckReport = courseCheckReport,
@@ -433,6 +437,45 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             },
         )
     }
+    issueFillPrompt?.let { prompt ->
+        var fillName by remember(prompt.id, prompt.name) { mutableStateOf(prompt.name) }
+        var fillCourse by remember(prompt.id, prompt.course) { mutableStateOf(prompt.course) }
+        AlertDialog(
+            onDismissRequest = viewModel::skipIssueFill,
+            title = { Text("№ ${prompt.id}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Чип выдан. ФИО и дистанцию можно указать сейчас или позже.")
+                    OutlinedTextField(
+                        value = fillName,
+                        onValueChange = { fillName = it },
+                        singleLine = true,
+                        label = { Text("ФИО") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (courses.isNotEmpty()) {
+                        CourseChips("Дистанция", courses.map { it.name }, fillCourse) { fillCourse = it }
+                    } else {
+                        OutlinedTextField(
+                            value = fillCourse,
+                            onValueChange = { fillCourse = it },
+                            singleLine = true,
+                            label = { Text("Дистанция") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmIssueFill(fillName, fillCourse) }) {
+                    Text("Сохранить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::skipIssueFill) { Text("Позже") }
+            },
+        )
+    }
     finishReplacePrompt?.let { prompt ->
         val chipLabel = prompt.logicalId?.toString() ?: "—"
         val courseLabel = prompt.courseName.ifBlank { "без дистанции" }
@@ -525,6 +568,7 @@ private fun ChipSection(
     newName: String,
     newCourse: String,
     extraCourse: String,
+    fillOpen: Boolean,
     testCourse: String,
     chipReady: Boolean,
     chipLogicalId: Int?,
@@ -575,6 +619,7 @@ private fun ChipSection(
             IssuePanel(
                 query = query,
                 people = viewModel.suggestions(),
+                items = items,
                 selected = selected,
                 selectedId = selectedId,
                 courses = courses.map { it.name },
@@ -583,14 +628,9 @@ private fun ChipSection(
                 newName = newName,
                 newCourse = newCourse,
                 extraCourse = extraCourse,
-                numberTaken = if (addingNew) {
-                    newNumber.toIntOrNull()?.let { id -> people.find { it.id == id } }
-                } else {
-                    null
-                },
+                fillOpen = fillOpen,
                 onQuery = viewModel::onQuery,
                 onSelect = hideKeyboardOnSelect,
-                onNew = viewModel::startNewPerson,
                 onClearSelection = viewModel::clearSelection,
                 onNewNumber = viewModel::onNewNumber,
                 onNewName = viewModel::onNewName,
@@ -666,6 +706,7 @@ private fun topTitle(section: AppSection, morePage: MorePage): String = when (se
 private fun IssuePanel(
     query: String,
     people: List<StartPerson>,
+    items: List<QueuedChipEntity>,
     selected: StartPerson?,
     selectedId: Int?,
     courses: List<String>,
@@ -674,10 +715,9 @@ private fun IssuePanel(
     newName: String,
     newCourse: String,
     extraCourse: String,
-    numberTaken: StartPerson?,
+    fillOpen: Boolean,
     onQuery: (String) -> Unit,
     onSelect: (Int) -> Unit,
-    onNew: () -> Unit,
     onClearSelection: () -> Unit,
     onNewNumber: (String) -> Unit,
     onNewName: (String) -> Unit,
@@ -690,8 +730,8 @@ private fun IssuePanel(
     val searching = query.isNotBlank()
     val numberFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(addingNew) {
-        if (addingNew) {
+    LaunchedEffect(fillOpen) {
+        if (!fillOpen) {
             delay(40)
             runCatching { numberFocus.requestFocus() }
             keyboard?.show()
@@ -703,64 +743,54 @@ private fun IssuePanel(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQuery,
-            singleLine = true,
-            label = { Text("Номер или фамилия") },
+        Row(
             modifier = Modifier.fillMaxWidth(),
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = newNumber,
+                onValueChange = onNewNumber,
+                singleLine = true,
+                label = { Text("Номер") },
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done,
+                ),
+                keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
+                modifier = Modifier
+                    .weight(0.35f)
+                    .focusRequester(numberFocus),
+            )
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQuery,
+                singleLine = true,
+                label = { Text("Фамилия") },
+                modifier = Modifier.weight(0.65f),
+            )
+        }
         if (!searching) {
-            if (!addingNew && selected == null) {
-                TextButton(onClick = onNew) { Text("Новый") }
-            }
-            if (addingNew) {
+            if (addingNew && newNumber.isNotBlank()) {
                 EditorCard(
-                    title = "Новый участник",
+                    title = "№ $newNumber · нового нет в протоколе",
                     onClose = onClearSelection,
                 ) {
-                    Row(
+                    Text(
+                        "Приложите чип — номер запишется, участник появится в протоколе. ФИО и дистанцию можно указать сейчас или позже.",
+                        color = Color(0xFF5C5C5C),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = onNewName,
+                        singleLine = true,
+                        label = { Text("ФИО") },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedTextField(
-                            value = newNumber,
-                            onValueChange = onNewNumber,
-                            singleLine = true,
-                            isError = numberTaken != null,
-                            label = { Text("Номер") },
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Number,
-                                imeAction = ImeAction.Next,
-                            ),
-                            modifier = Modifier
-                                .weight(0.35f)
-                                .focusRequester(numberFocus),
-                        )
-                        OutlinedTextField(
-                            value = newName,
-                            onValueChange = onNewName,
-                            singleLine = true,
-                            label = { Text("ФИО") },
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            modifier = Modifier.weight(0.65f),
-                        )
+                    )
+                    if (courses.isNotEmpty()) {
+                        CourseChips("Дистанция", courses, newCourse, onNewCourse)
                     }
-                    if (numberTaken != null) {
-                        Text(
-                            "№ ${numberTaken.id} уже в протоколе (${numberTaken.name.ifBlank { "участник" }}). Выберите его из списка.",
-                            color = Color(0xFF8B3A3A),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    if (newCourse.isBlank()) {
-                        Text(
-                            "Укажите дистанцию, чтобы выдать чип.",
-                            color = Color(0xFF8B3A3A),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    CourseChips("Дистанция", courses, newCourse, onNewCourse)
                 }
             } else if (selected != null) {
                 EditorCard(
@@ -776,16 +806,16 @@ private fun IssuePanel(
                     } else if (courses.isNotEmpty()) {
                         if (selected.currentCourse.isBlank()) {
                             Text(
-                                "Укажите дистанцию, чтобы выдать чип.",
-                                color = Color(0xFF8B3A3A),
+                                "Дистанцию можно указать сейчас или после выдачи.",
+                                color = Color(0xFF5C5C5C),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
                         CourseChips("Дистанция", courses, selected.currentCourse, onCurrentCourse)
                     } else {
                         Text(
-                            "Укажите дистанцию, чтобы выдать чип.",
-                            color = Color(0xFF8B3A3A),
+                            "Дистанцию можно указать сейчас или после выдачи.",
+                            color = Color(0xFF5C5C5C),
                             style = MaterialTheme.typography.bodySmall,
                         )
                         OutlinedTextField(
@@ -818,6 +848,7 @@ private fun IssuePanel(
         }
         PersonHits(
             people = people,
+            items = items,
             selectedId = selectedId,
             emptyText = if (searching) "Никого не найдено" else "Протокол пуст",
             onSelect = onSelect,
@@ -1176,11 +1207,16 @@ private fun StatusStrip(text: String, onDismiss: () -> Unit) {
 @Composable
 private fun PersonHits(
     people: List<StartPerson>,
+    items: List<QueuedChipEntity>,
     selectedId: Int?,
     emptyText: String,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val finishedById = remember(items) {
+        items.mapNotNull { item -> item.logicalId?.let { id -> id to item.courseName } }
+            .groupBy({ it.first }, { it.second })
+    }
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = modifier.fillMaxWidth(),
@@ -1192,24 +1228,11 @@ private fun PersonHits(
             }
         }
         items(people, key = { it.id }) { person ->
-            val issuedMark = if (person.issued) " · выдан" else ""
-            val courseMark = person.currentCourse.ifBlank { "без дистанции" }
-            Text(
-                text = "${person.id}  ${person.displayName}  $courseMark$issuedMark",
-                color = when {
-                    person.issued -> Green
-                    person.currentCourse.isBlank() -> Color(0xFF8B3A3A)
-                    else -> Color.Unspecified
-                },
-                style = if (person.id == selectedId) {
-                    MaterialTheme.typography.titleMedium
-                } else {
-                    MaterialTheme.typography.bodyLarge
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelect(person.id) }
-                    .padding(vertical = 8.dp),
+            PersonProtocolLine(
+                person = person,
+                status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
+                selected = person.id == selectedId,
+                onClick = { onSelect(person.id) },
             )
         }
     }
