@@ -18,7 +18,7 @@ data class SplitReceipt(
     val finishCp: Int = CP_FINISH,
     val startClockSeconds: Int? = null,
     val pointsRaw: Int = 0,
-    val penaltyMinutes: Int = 0,
+    val penaltyPoints: Int = 0,
     val pointsFinal: Int = 0,
     val rogaine: Boolean = false,
 )
@@ -61,11 +61,11 @@ object ReceiptText {
         }
         lines += ""
         if (data.rogaine) {
-            lines += "Очки       ${data.pointsRaw}"
-            if (data.penaltyMinutes > 0) {
-                lines += "Штраф      ${data.penaltyMinutes} мин"
-                lines += "Итого      ${data.pointsFinal}"
+            lines += "Все очки   ${data.pointsRaw}"
+            if (data.penaltyPoints > 0) {
+                lines += "Штрафные очки ${data.penaltyPoints}"
             }
+            lines += "Очки с учётом штрафных ${data.pointsFinal}"
         }
         lines += "Результат  ${formatElapsed(data.elapsedSeconds)}"
         lines += "Отметка    ${receiptStatus(data.status)}"

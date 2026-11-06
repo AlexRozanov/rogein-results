@@ -81,6 +81,7 @@ pub struct PublishAwardGroup {
     pub name: String,
     pub gender_mode: String,
     pub min_age: Option<i32>,
+    pub max_age: Option<i32>,
     pub sort_order: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub course_cps: Vec<i32>,
@@ -667,6 +668,7 @@ fn collect_rogaine_publish(
             name: group.name.clone(),
             gender_mode: group.gender_mode.clone(),
             min_age: group.min_age.map(|v| v as i32),
+            max_age: group.max_age.map(|v| v as i32),
             sort_order: group.sort_order as i32,
             course_cps: Vec::new(),
         });
@@ -735,6 +737,7 @@ fn collect_orient_publish(
             name: course.name.clone(),
             gender_mode: "any".to_string(),
             min_age: None,
+            max_age: None,
             sort_order: idx as i32,
             course_cps: course
                 .controls
@@ -776,6 +779,7 @@ fn collect_orient_publish(
             name,
             gender_mode: "any".to_string(),
             min_age: None,
+            max_age: None,
             sort_order: 10_000 + extra_idx as i32,
             course_cps: Vec::new(),
         });

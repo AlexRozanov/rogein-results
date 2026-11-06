@@ -1,6 +1,7 @@
 package ru.rogein.chip.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,9 +14,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +34,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -154,6 +158,9 @@ import ru.rogein.chip.parse.RogaineCpTypeRule
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.personAwardCategories
+import ru.rogein.chip.parse.sortByChipKeepingTeams
+import ru.rogein.chip.parse.teamGroupPosAt
+import ru.rogein.chip.parse.TeamGroupPos
 import ru.rogein.chip.parse.punchLegSeconds
 import ru.rogein.chip.queue.AwardGroupView
 import ru.rogein.chip.queue.CorrectionEntity
@@ -185,6 +192,7 @@ private val Muted = Color(0xFF5C5C5C)
 private val Danger = Color(0xFF8B3A3A)
 private val OkGreen = Color(0xFF1B4D3E)
 private val Warn = Color(0xFF8A5A00)
+private val TeamBraceColor = Color(0xFF94A3B8)
 
 internal fun personProtocolStatus(
     person: StartPerson,
@@ -209,17 +217,23 @@ internal fun PersonProtocolLine(
     selected: Boolean,
     onClick: () -> Unit,
     emptyCourseLabel: String = "без дистанции",
+    showTeamBrace: Boolean = false,
+    teamPos: TeamGroupPos = TeamGroupPos.None,
 ) {
     val courseMark = person.currentCourse.ifBlank { emptyCourseLabel }
     val teamMark = person.teamLabel
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(IntrinsicSize.Min)
             .clickable(onClick = onClick)
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (showTeamBrace) {
+            TeamBrace(teamPos, Modifier.fillMaxHeight())
+        }
         Text(
             text = buildString {
                 append("${person.id}  ${person.displayName}  $courseMark")
@@ -237,6 +251,45 @@ internal fun PersonProtocolLine(
             color = protocolStatusColor(status),
             style = MaterialTheme.typography.bodyMedium,
         )
+    }
+}
+
+@Composable
+private fun TeamBrace(
+    pos: TeamGroupPos,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(
+        modifier = modifier.width(12.dp),
+    ) {
+        if (pos == TeamGroupPos.None) return@Canvas
+        val stroke = 2.dp.toPx()
+        val x = 4.dp.toPx()
+        val tickEnd = size.width - 1.dp.toPx()
+        val midY = size.height / 2f
+        fun vLine(y0: Float, y1: Float) {
+            drawLine(TeamBraceColor, Offset(x, y0), Offset(x, y1), strokeWidth = stroke)
+        }
+        fun tick() {
+            drawLine(TeamBraceColor, Offset(x, midY), Offset(tickEnd, midY), strokeWidth = stroke)
+        }
+        when (pos) {
+            TeamGroupPos.Start -> {
+                vLine(midY, size.height)
+                tick()
+            }
+            TeamGroupPos.Mid -> vLine(0f, size.height)
+            TeamGroupPos.End -> {
+                vLine(0f, midY)
+                tick()
+            }
+            TeamGroupPos.Only -> {
+                val cap = 6.dp.toPx()
+                vLine((midY - cap).coerceAtLeast(0f), (midY + cap).coerceAtMost(size.height))
+                tick()
+            }
+            TeamGroupPos.None -> Unit
+        }
     }
 }
 
@@ -639,12 +692,7 @@ fun ProtocolScreen(
         statusFilter.isEmpty() || status in statusFilter
     }.let { rows ->
         if (!isRogaine(sportKind)) rows
-        else rows.sortedWith(
-            compareBy<StartPerson> { courseKey(it.currentCourse) }
-                .thenBy { if (it.teamId > 0) 0 else 1 }
-                .thenBy { it.teamId }
-                .thenBy { it.id },
-        )
+        else sortByChipKeepingTeams(rows, { it.id }, { it.teamId })
     }
     val rogaine = isRogaine(sportKind)
     val unknownCourses = people.map { it.currentCourse }.filter { name ->
@@ -925,7 +973,7 @@ fun ProtocolScreen(
         }
         if (pane == ProtocolPane.People) {
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = if (rogaine) Arrangement.Top else Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -944,13 +992,16 @@ fun ProtocolScreen(
                         )
                     }
                 }
-                items(filtered, key = { it.id }) { person ->
+                val teamIds = if (rogaine) filtered.map { it.teamId } else emptyList()
+                itemsIndexed(filtered, key = { _, person -> person.id }) { index, person ->
                     PersonProtocolLine(
                         person = person,
                         status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
                         selected = person.id == selected?.id,
                         onClick = { onSelect(person.id) },
                         emptyCourseLabel = if (rogaine) "без формата" else "без дистанции",
+                        showTeamBrace = rogaine,
+                        teamPos = if (rogaine) teamGroupPosAt(teamIds, index) else TeamGroupPos.None,
                     )
                 }
             }
@@ -1512,7 +1563,7 @@ private fun AwardGroupsPanel(
                 Text(
                     listOfNotNull(
                         awardGenderLabel(group.genderMode),
-                        group.minAge?.let { "от $it лет" } ?: "без возраста",
+                        awardAgeLabel(group.minAge, group.maxAge),
                         group.formatNames.takeIf { it.isNotEmpty() }?.joinToString(),
                     ).joinToString(" · "),
                     color = Muted,
@@ -1740,7 +1791,15 @@ private fun AwardGroupView.toAwardCategory(): AwardCategory =
         genderMode = genderMode,
         minAge = minAge,
         formatNames = formatNames,
+        maxAge = maxAge,
     )
+
+private fun awardAgeLabel(minAge: Int?, maxAge: Int?): String = when {
+    maxAge == 18 && (minAge == null || minAge <= 0) -> "юниоры, младше 18"
+    maxAge != null && maxAge > 0 && (minAge == null || minAge <= 0) -> "младше $maxAge"
+    minAge != null && minAge > 0 -> "от $minAge лет"
+    else -> "без возраста"
+}
 
 private fun awardGenderLabel(mode: String): String =
     when (mode.trim().lowercase()) {
@@ -2333,7 +2392,8 @@ fun ResultsScreen(
                     )
                 }
                 if (open) {
-                    items(rows, key = { "${groupKey}:${it.queueId}" }) { row ->
+                    val teamIds = if (rogaine) rows.map { it.teamId } else emptyList()
+                    itemsIndexed(rows, key = { _, row -> "${groupKey}:${row.queueId}" }) { index, row ->
                         val live = results.find { it.queueId == row.queueId } ?: row
                         ResultProtocolRow(
                             row = live,
@@ -2355,6 +2415,7 @@ fun ResultsScreen(
                             rogaine = rogaine,
                             startClockSeconds = startClockSeconds,
                             legendCps = legendCps,
+                            teamPos = if (rogaine) teamGroupPosAt(teamIds, index) else TeamGroupPos.None,
                         )
                     }
                 }
@@ -2424,6 +2485,7 @@ private fun ResultProtocolRow(
     rogaine: Boolean = false,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
+    teamPos: TeamGroupPos = TeamGroupPos.None,
 ) {
     val dq = row.calc.status == STATUS_DQ
     val rowColor = if (dq) Danger else Color.Unspecified
@@ -2431,11 +2493,20 @@ private fun ResultProtocolRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .height(IntrinsicSize.Min)
                 .background(if (dq) Danger.copy(alpha = 0.12f) else Color.Transparent)
                 .clickable(onClick = onToggle)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(
+                    start = if (rogaine) 4.dp else 12.dp,
+                    end = 12.dp,
+                    top = 8.dp,
+                    bottom = 8.dp,
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (rogaine) {
+                TeamBrace(teamPos, Modifier.fillMaxHeight())
+            }
             Text(
                 row.place?.toString() ?: "—",
                 modifier = Modifier.width(32.dp),
@@ -2645,7 +2716,7 @@ private fun ResultRowDetails(
             onPrint = { onPrint(row) },
             rogaine = rogaine,
             pointsRaw = row.calc.pointsRaw,
-            penaltyMinutes = row.calc.penaltyMinutes,
+            penaltyPoints = row.calc.penaltyPoints,
             pointsFinal = row.calc.pointsFinal,
             startClockSeconds = startClockSeconds,
         )
@@ -2674,7 +2745,7 @@ private fun UsedMarksDialog(
     onPrint: () -> Unit,
     rogaine: Boolean = false,
     pointsRaw: Int = 0,
-    penaltyMinutes: Int = 0,
+    penaltyPoints: Int = 0,
     pointsFinal: Int = 0,
     startClockSeconds: Int? = null,
 ) {
@@ -2693,7 +2764,7 @@ private fun UsedMarksDialog(
                         finishCp = finishCp,
                         startClockSeconds = startClockSeconds,
                         pointsRaw = pointsRaw,
-                        penaltyMinutes = penaltyMinutes,
+                        penaltyPoints = penaltyPoints,
                         pointsFinal = pointsFinal,
                     )
                 } else {
@@ -2761,7 +2832,7 @@ private fun RogaineMarksList(
     finishCp: Int,
     startClockSeconds: Int?,
     pointsRaw: Int,
-    penaltyMinutes: Int,
+    penaltyPoints: Int,
     pointsFinal: Int,
 ) {
     val rows = rogaineSplitRows(punches, startCp, finishCp, startClockSeconds)
@@ -2833,19 +2904,19 @@ private fun RogaineMarksList(
         }
     }
     Text(
-        "Очки $pointsRaw",
+        "Все очки $pointsRaw",
         modifier = Modifier.padding(top = 8.dp),
         style = MaterialTheme.typography.bodySmall,
         fontWeight = FontWeight.SemiBold,
     )
-    if (penaltyMinutes > 0) {
-        Text("Штраф $penaltyMinutes мин", style = MaterialTheme.typography.bodySmall)
-        Text(
-            "С учётом штрафа $pointsFinal",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-        )
+    if (penaltyPoints > 0) {
+        Text("Штрафные очки $penaltyPoints", style = MaterialTheme.typography.bodySmall)
     }
+    Text(
+        "Очки с учётом штрафных $pointsFinal",
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.SemiBold,
+    )
 }
 
 @Composable

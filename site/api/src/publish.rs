@@ -212,8 +212,8 @@ async fn insert_event_rows(
         let course_cps = serde_json::to_value(&group.course_cps)?;
         let id: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO award_groups (event_id, source_id, name, gender_mode, min_age, sort_order, course_cps)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO award_groups (event_id, source_id, name, gender_mode, min_age, max_age, sort_order, course_cps)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             "#,
         )
@@ -222,6 +222,7 @@ async fn insert_event_rows(
         .bind(group.name.trim())
         .bind(gender)
         .bind(group.min_age)
+        .bind(group.max_age)
         .bind(group.sort_order.unwrap_or(idx as i32))
         .bind(course_cps)
         .fetch_one(&mut **tx)

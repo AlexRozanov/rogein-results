@@ -340,6 +340,7 @@ fn build_payload(title: &str, date: NaiveDate, rows: &[ArchiveRow]) -> PublishPa
             name: name.clone(),
             gender_mode: "any".into(),
             min_age: None,
+            max_age: None,
             sort_order: (*source_id as i32) - 1,
             course_cps: Vec::new(),
         })

@@ -36,6 +36,7 @@ pub struct ImportSummary {
 #[derive(Debug, Serialize)]
 pub struct PhoneImportSummary {
     pub imported: i64,
+    pub updated: i64,
     pub already_imported: i64,
     pub unmatched: i64,
     pub skipped_empty: i64,
@@ -193,8 +194,10 @@ pub struct AwardGroupRow {
     pub id: i64,
     pub name: String,
     pub gender_mode: String,
-    /// Minimum age as of 31 Dec of the competition year. `None` = no age restriction.
+    /// Minimum age as of 31 Dec of the competition year. `None` = no lower bound.
     pub min_age: Option<i64>,
+    /// Exclusive upper age bound (e.g. 18 = younger than 18). `None` = no upper bound.
+    pub max_age: Option<i64>,
     pub sort_order: i64,
     pub format_ids: Vec<i64>,
     pub format_names: Vec<String>,
@@ -284,11 +287,19 @@ fn normalize_award_gender_mode(raw: &str) -> Result<String, String> {
 }
 
 fn normalize_award_min_age(raw: Option<i64>) -> Result<Option<i64>, String> {
+    normalize_award_age_bound(raw, "Минимальный")
+}
+
+fn normalize_award_max_age(raw: Option<i64>) -> Result<Option<i64>, String> {
+    normalize_award_age_bound(raw, "Максимальный")
+}
+
+fn normalize_award_age_bound(raw: Option<i64>, label: &str) -> Result<Option<i64>, String> {
     match raw {
         None | Some(0) => Ok(None),
         Some(age) if (1..=120).contains(&age) => Ok(Some(age)),
         Some(age) => Err(format!(
-            "Минимальный возраст {age} недопустим. Укажите значение от 1 до 120 или оставьте пустым."
+            "{label} возраст {age} недопустим. Укажите значение от 1 до 120 или оставьте пустым."
         )),
     }
 }
@@ -312,8 +323,9 @@ fn sql_person_age(alias: &str, competition_year: i64) -> String {
     format!("({competition_year} - {birth_year})")
 }
 
-/// Award age: personal, or youngest teammate. NULL if any teammate has no birth date.
-fn sql_award_age(competition_year: i64) -> String {
+/// Award age: personal, or team aggregate. NULL if any teammate has no birth date.
+/// `agg` is `MIN` (youngest, for veteran floors) or `MAX` (oldest, for junior ceilings).
+fn sql_award_age(competition_year: i64, agg: &str) -> String {
     let person = sql_person_age("sp", competition_year);
     let teammate = sql_person_age("tm", competition_year);
     format!(
@@ -324,7 +336,7 @@ fn sql_award_age(competition_year: i64) -> String {
                 WHERE tm.team_id = sp.team_id AND ({teammate}) IS NULL
             ) THEN NULL
             ELSE (
-                SELECT MIN({teammate})
+                SELECT {agg}({teammate})
                 FROM start_protocol tm
                 WHERE tm.team_id = sp.team_id
             )
@@ -661,6 +673,13 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("add award_groups.min_age: {e}"))?;
+    }
+    if !table_has_column(conn, "award_groups", "max_age")? {
+        conn.execute(
+            "ALTER TABLE award_groups ADD COLUMN max_age INTEGER NULL",
+            [],
+        )
+        .map_err(|e| format!("add award_groups.max_age: {e}"))?;
     }
     migrate_cp_legends_type_dictionary(conn)?;
     migrate_cp_legends_map_positions(conn)?;
@@ -1032,6 +1051,7 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
             name TEXT NOT NULL UNIQUE,
             gender_mode TEXT NOT NULL DEFAULT 'any',
             min_age INTEGER NULL,
+            max_age INTEGER NULL,
             sort_order INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS award_group_formats (
@@ -1415,15 +1435,19 @@ struct PhoneSnapshotPunch {
 }
 
 /// Чипы из снимка телефона. Очередь на телефоне не меняется.
-/// Повтор того же `id` пропускается. Полная замена финиша (CSV reset) сбрасывает эту память.
+/// Повтор того же `id` пропускается. Тот же логический **и** физический чип
+/// обновляет уже загруженный финиш (повторное считывание). Один логический
+/// номер на двух физических чипах не сливается — это ошибка выдачи.
+/// Полная замена финиша (CSV reset) сбрасывает эту память.
 pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneImportSummary, String> {
     let snapshot: PhoneSnapshotFile = serde_json::from_str(body)
         .map_err(|e| format!("снимок очереди повреждён: {e}"))?;
     let known = load_phone_import_ids(conn)?;
+    let collapsed = collapse_phone_snapshot_items(snapshot.items);
     let mut seen = HashSet::new();
     let mut already_imported = 0_i64;
     let mut fresh = Vec::new();
-    for item in snapshot.items {
+    for item in collapsed.items {
         let id = item.id.trim().to_string();
         if id.is_empty() {
             return Err("в снимке чип без id".to_string());
@@ -1434,9 +1458,25 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
         }
         fresh.push(PhoneSnapshotItem { id, ..item });
     }
+    let mut superseded_ids = Vec::new();
+    for id in collapsed.superseded_ids {
+        let id = id.trim().to_string();
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        if known.contains(&id) {
+            already_imported += 1;
+        } else {
+            superseded_ids.push(id);
+        }
+    }
 
     if fresh.is_empty() {
-        return phone_import_summary(conn, 0, already_imported, 0, 0);
+        if superseded_ids.is_empty() {
+            return phone_import_summary(conn, 0, 0, already_imported, 0, 0);
+        }
+        remember_phone_import_ids(conn, &superseded_ids)?;
+        return phone_import_summary(conn, 0, 0, already_imported, 0, 0);
     }
 
     let settings = get_settings(conn)?;
@@ -1470,13 +1510,23 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
                     .join(", ")
             ));
         }
-        return phone_import_summary(conn, 0, already_imported, 0, 0);
+        return phone_import_summary(conn, 0, 0, already_imported, 0, skipped_empty);
     }
 
     let tx = conn
         .transaction()
         .map_err(|e| format!("start transaction: {e}"))?;
+    let mut planned = Vec::new();
+    for row in prepared {
+        let existing = match row.logical_id {
+            Some(logical_id) if logical_id > 0 => find_phone_finish_ids(&tx, &row.uid, logical_id)?,
+            _ => Vec::new(),
+        };
+        planned.push((row, existing));
+    }
     let mut unmatched = 0_i64;
+    let mut imported = 0_i64;
+    let mut updated = 0_i64;
     {
         let mut participant_stmt = tx
             .prepare(
@@ -1487,29 +1537,68 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
                 "#,
             )
             .map_err(|e| format!("prepare participants insert: {e}"))?;
+        let mut update_stmt = tx
+            .prepare(
+                r#"
+                UPDATE participants
+                SET chip_raw_id = ?, name = ?, start_station_id = ?, start_time = ?, course_name = ?
+                WHERE id = ?
+                "#,
+            )
+            .map_err(|e| format!("prepare participants update: {e}"))?;
         let mut mark_stmt = tx
             .prepare(
                 "INSERT INTO marks_raw(finish_participant_id, seq, cp_number, mark_time) VALUES(?, ?, ?, ?)",
             )
             .map_err(|e| format!("prepare marks insert: {e}"))?;
+        let mut delete_marks_stmt = tx
+            .prepare("DELETE FROM marks_raw WHERE finish_participant_id = ?")
+            .map_err(|e| format!("prepare marks delete: {e}"))?;
+        let mut delete_finish_stmt = tx
+            .prepare("DELETE FROM participants WHERE id = ?")
+            .map_err(|e| format!("prepare finish delete: {e}"))?;
         let mut seen_stmt = tx
-            .prepare("INSERT INTO phone_chip_imports(queue_id) VALUES(?)")
+            .prepare("INSERT OR IGNORE INTO phone_chip_imports(queue_id) VALUES(?)")
             .map_err(|e| format!("prepare phone import insert: {e}"))?;
-        for row in &prepared {
-            if !row.matched {
-                unmatched += 1;
-            }
-            participant_stmt
-                .execute(params![
-                    row.bib,
-                    row.uid,
-                    row.name,
-                    row.start_station_id,
-                    row.start_time,
-                    row.course_name
-                ])
-                .map_err(|e| format!("insert phone participant {}: {e}", row.bib))?;
-            let finish_id = tx.last_insert_rowid();
+        for (row, existing) in &planned {
+            let finish_id = if let Some((keep_id, extras)) = existing.split_first() {
+                update_stmt
+                    .execute(params![
+                        row.uid,
+                        row.name,
+                        row.start_station_id,
+                        row.start_time,
+                        row.course_name,
+                        keep_id
+                    ])
+                    .map_err(|e| format!("update phone participant {}: {e}", row.bib))?;
+                delete_marks_stmt
+                    .execute(params![keep_id])
+                    .map_err(|e| format!("clear phone marks for {}: {e}", row.bib))?;
+                for extra_id in extras {
+                    delete_finish_stmt
+                        .execute(params![extra_id])
+                        .map_err(|e| format!("remove duplicate phone finish {extra_id}: {e}"))?;
+                }
+                updated += 1;
+                *keep_id
+            } else {
+                if !row.matched {
+                    unmatched += 1;
+                }
+                participant_stmt
+                    .execute(params![
+                        row.bib,
+                        row.uid,
+                        row.name,
+                        row.start_station_id,
+                        row.start_time,
+                        row.course_name
+                    ])
+                    .map_err(|e| format!("insert phone participant {}: {e}", row.bib))?;
+                imported += 1;
+                tx.last_insert_rowid()
+            };
             for (seq, cp, mark_time) in &row.marks {
                 mark_stmt
                     .execute(params![finish_id, seq, cp, mark_time])
@@ -1519,13 +1608,19 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
                 .execute(params![row.queue_id])
                 .map_err(|e| format!("remember phone chip {}: {e}", row.queue_id))?;
         }
+        for queue_id in &superseded_ids {
+            seen_stmt
+                .execute(params![queue_id])
+                .map_err(|e| format!("remember replaced phone chip {queue_id}: {e}"))?;
+        }
     }
     recalculate_tx(&tx)?;
     tx.commit()
         .map_err(|e| format!("commit phone import: {e}"))?;
     phone_import_summary(
         conn,
-        prepared.len() as i64,
+        imported,
+        updated,
         already_imported,
         unmatched,
         skipped_empty,
@@ -1534,6 +1629,7 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
 
 struct PreparedPhoneRow {
     queue_id: String,
+    logical_id: Option<i64>,
     bib: String,
     uid: String,
     name: String,
@@ -1631,6 +1727,7 @@ fn prepare_phone_item(
     };
     Ok(Some(PreparedPhoneRow {
         queue_id: item.id.clone(),
+        logical_id: item.logical_id.filter(|id| *id > 0),
         bib,
         uid: item.uid.clone(),
         name,
@@ -1640,6 +1737,96 @@ fn prepare_phone_item(
         marks,
         matched,
     }))
+}
+
+struct CollapsedPhoneSnapshot {
+    items: Vec<PhoneSnapshotItem>,
+    superseded_ids: Vec<String>,
+}
+
+fn phone_chip_identity(logical_id: Option<i64>, uid: &str) -> Option<(i64, String)> {
+    let logical_id = logical_id.filter(|id| *id > 0)?;
+    let uid = normalize_phone_uid(uid);
+    if uid.is_empty() {
+        None
+    } else {
+        Some((logical_id, uid))
+    }
+}
+
+fn normalize_phone_uid(raw: &str) -> String {
+    raw.trim().to_ascii_uppercase()
+}
+
+fn collapse_phone_snapshot_items(items: Vec<PhoneSnapshotItem>) -> CollapsedPhoneSnapshot {
+    let mut last_idx = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid) {
+            last_idx.insert(key, idx);
+        }
+    }
+    let mut out = Vec::new();
+    let mut superseded_ids = Vec::new();
+    for (idx, item) in items.into_iter().enumerate() {
+        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid) {
+            if last_idx.get(&key) != Some(&idx) {
+                let id = item.id.trim().to_string();
+                if !id.is_empty() {
+                    superseded_ids.push(id);
+                }
+                continue;
+            }
+        }
+        out.push(item);
+    }
+    CollapsedPhoneSnapshot {
+        items: out,
+        superseded_ids,
+    }
+}
+
+fn find_phone_finish_ids(
+    conn: &Connection,
+    uid: &str,
+    logical_id: i64,
+) -> Result<Vec<i64>, String> {
+    let uid = normalize_phone_uid(uid);
+    if uid.is_empty() || logical_id <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id
+            FROM participants
+            WHERE UPPER(TRIM(IFNULL(chip_raw_id, ''))) = ?
+              AND CAST(TRIM(participant_id) AS INTEGER) = ?
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| format!("prepare phone duplicate lookup: {e}"))?;
+    let rows = stmt
+        .query_map(params![uid, logical_id], |r| r.get(0))
+        .map_err(|e| format!("query phone duplicates: {e}"))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|e| format!("read phone duplicate id: {e}"))?);
+    }
+    Ok(ids)
+}
+
+fn remember_phone_import_ids(conn: &Connection, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare("INSERT OR IGNORE INTO phone_chip_imports(queue_id) VALUES(?)")
+        .map_err(|e| format!("prepare phone import insert: {e}"))?;
+    for id in ids {
+        stmt.execute(params![id])
+            .map_err(|e| format!("remember phone chip {id}: {e}"))?;
+    }
+    Ok(())
 }
 
 fn stamp_clock_times(start_date: NaiveDate, clocks: &[NaiveTime]) -> Vec<NaiveDateTime> {
@@ -1834,6 +2021,7 @@ fn load_phone_import_ids(conn: &Connection) -> Result<HashSet<String>, String> {
 fn phone_import_summary(
     conn: &Connection,
     imported: i64,
+    updated: i64,
     already_imported: i64,
     unmatched: i64,
     skipped_empty: i64,
@@ -1846,6 +2034,7 @@ fn phone_import_summary(
         .map_err(|e| format!("count results: {e}"))?;
     Ok(PhoneImportSummary {
         imported,
+        updated,
         already_imported,
         unmatched,
         skipped_empty,
@@ -5445,17 +5634,18 @@ fn append_award_group_sql_filter(
     int_params: &mut Vec<i64>,
     award_group_id: i64,
 ) -> Result<(), String> {
-    let (gender_mode_raw, min_age_raw): (String, Option<i64>) = conn
+    let (gender_mode_raw, min_age_raw, max_age_raw): (String, Option<i64>, Option<i64>) = conn
         .query_row(
-            "SELECT gender_mode, min_age FROM award_groups WHERE id = ? LIMIT 1",
+            "SELECT gender_mode, min_age, max_age FROM award_groups WHERE id = ? LIMIT 1",
             params![award_group_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(|e| format!("load award group: {e}"))?
         .ok_or_else(|| format!("Группа награждения id={award_group_id} не найдена"))?;
     let mode = normalize_award_gender_mode(&gender_mode_raw)?;
     let min_age = normalize_award_min_age(min_age_raw)?;
+    let max_age = normalize_award_max_age(max_age_raw)?;
 
     query.push_str(
         " AND sp.format_id IN (SELECT format_id FROM award_group_formats WHERE award_group_id = ?) ",
@@ -5520,13 +5710,22 @@ fn append_award_group_sql_filter(
         _ => {}
     }
 
-    if let Some(age) = min_age {
+    if min_age.is_some() || max_age.is_some() {
         if let Some(year) = competition_year(conn) {
-            let age_expr = sql_award_age(year);
-            query.push_str(&format!(
-                " AND {age_expr} IS NOT NULL AND {age_expr} >= ? "
-            ));
-            int_params.push(age);
+            if let Some(age) = min_age {
+                let age_expr = sql_award_age(year, "MIN");
+                query.push_str(&format!(
+                    " AND {age_expr} IS NOT NULL AND {age_expr} >= ? "
+                ));
+                int_params.push(age);
+            }
+            if let Some(age) = max_age {
+                let age_expr = sql_award_age(year, "MAX");
+                query.push_str(&format!(
+                    " AND {age_expr} IS NOT NULL AND {age_expr} < ? "
+                ));
+                int_params.push(age);
+            }
         } else {
             query.push_str(" AND 1=0 ");
         }
@@ -5535,11 +5734,18 @@ fn append_award_group_sql_filter(
 }
 
 fn load_award_group_row(conn: &Connection, group_id: i64) -> Result<AwardGroupRow, String> {
-    let (id, name, gender_mode, min_age, sort_order): (i64, String, String, Option<i64>, i64) = conn
+    let (id, name, gender_mode, min_age, max_age, sort_order): (
+        i64,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        i64,
+    ) = conn
         .query_row(
-            "SELECT id, name, gender_mode, min_age, sort_order FROM award_groups WHERE id = ? LIMIT 1",
+            "SELECT id, name, gender_mode, min_age, max_age, sort_order FROM award_groups WHERE id = ? LIMIT 1",
             params![group_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .map_err(|e| format!("load award group row: {e}"))?;
     let mut stmt = conn
@@ -5570,6 +5776,7 @@ fn load_award_group_row(conn: &Connection, group_id: i64) -> Result<AwardGroupRo
         name,
         gender_mode,
         min_age: normalize_award_min_age(min_age)?,
+        max_age: normalize_award_max_age(max_age)?,
         sort_order,
         format_ids,
         format_names,
@@ -5600,6 +5807,7 @@ pub fn upsert_award_group(
     gender_mode: String,
     format_ids: Vec<i64>,
     min_age: Option<i64>,
+    max_age: Option<i64>,
     sort_order: Option<i64>,
 ) -> Result<AwardGroupRow, String> {
     let name = name.trim().to_string();
@@ -5608,6 +5816,15 @@ pub fn upsert_award_group(
     }
     let mode = normalize_award_gender_mode(&gender_mode)?;
     let min_age = normalize_award_min_age(min_age)?;
+    let max_age = normalize_award_max_age(max_age)?;
+    if let (Some(min), Some(max)) = (min_age, max_age) {
+        if min >= max {
+            return Err(
+                "Минимальный возраст должен быть меньше верхней границы (возраст «до» не включая)."
+                    .to_string(),
+            );
+        }
+    }
     let mut unique_formats: Vec<i64> = format_ids
         .into_iter()
         .filter(|id| *id > 0)
@@ -5642,8 +5859,8 @@ pub fn upsert_award_group(
             .unwrap_or(0)
         });
         conn.execute(
-            "UPDATE award_groups SET name = ?, gender_mode = ?, min_age = ?, sort_order = ? WHERE id = ?",
-            params![name, mode, min_age, order, existing_id],
+            "UPDATE award_groups SET name = ?, gender_mode = ?, min_age = ?, max_age = ?, sort_order = ? WHERE id = ?",
+            params![name, mode, min_age, max_age, order, existing_id],
         )
         .map_err(|e| {
             let msg = e.to_string();
@@ -5674,8 +5891,8 @@ pub fn upsert_award_group(
             .map_err(|e| format!("allocate award sort_order: {e}"))?
         };
         conn.execute(
-            "INSERT INTO award_groups(name, gender_mode, min_age, sort_order) VALUES(?, ?, ?, ?)",
-            params![name, mode, min_age, order],
+            "INSERT INTO award_groups(name, gender_mode, min_age, max_age, sort_order) VALUES(?, ?, ?, ?, ?)",
+            params![name, mode, min_age, max_age, order],
         )
         .map_err(|e| {
             let msg = e.to_string();
@@ -8289,6 +8506,33 @@ pub fn delete_start_protocol_entry(conn: &Connection, entry_id: i64) -> Result<(
     Ok(())
 }
 
+pub fn delete_finish_participant(
+    conn: &mut Connection,
+    finish_participant_id: i64,
+) -> Result<(), String> {
+    if finish_participant_id <= 0 {
+        return Err("Не указана запись финишного протокола".to_string());
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("start delete finish transaction: {e}"))?;
+    let changed = tx
+        .execute(
+            "DELETE FROM participants WHERE id = ?",
+            params![finish_participant_id],
+        )
+        .map_err(|e| format!("delete finish participant: {e}"))?;
+    if changed == 0 {
+        return Err(format!(
+            "Запись финишного протокола id={finish_participant_id} не найдена"
+        ));
+    }
+    recalculate_tx(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("commit delete finish: {e}"))?;
+    Ok(())
+}
+
 pub fn add_start_protocol_course(
     conn: &Connection,
     entry_id: i64,
@@ -8466,6 +8710,8 @@ pub struct EventPackAwardGroup {
     pub gender_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_age: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<i64>,
     pub sort_order: i64,
     pub format_names: Vec<String>,
 }
@@ -8570,6 +8816,7 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             name: row.name,
             gender_mode: row.gender_mode,
             min_age: row.min_age,
+            max_age: row.max_age,
             sort_order: row.sort_order,
             format_names: row.format_names,
         })
@@ -8725,6 +8972,7 @@ fn event_pack_revision(pack: &EventPack) -> i64 {
         group.name.hash(&mut hasher);
         group.gender_mode.hash(&mut hasher);
         group.min_age.hash(&mut hasher);
+        group.max_age.hash(&mut hasher);
         group.sort_order.hash(&mut hasher);
         group.format_names.hash(&mut hasher);
     }
@@ -10991,10 +11239,11 @@ mod tests {
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot,
         import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
+        delete_finish_participant,
         build_start_pack, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
         FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
-        query_participant_details, query_results, query_start_protocol, recalculate, resolve_orient_leg_to,
+        query_participant_details, query_results, query_start_protocol, recalculate, register_search_functions, resolve_orient_leg_to,
         set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
     };
     use rusqlite::Connection;
@@ -11390,6 +11639,171 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn phone_snapshot_updates_same_logical_and_physical() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name) VALUES('8', 'Иванов')",
+            [],
+        )
+        .unwrap();
+        let first = r#"{
+            "items":[{
+                "id":"q1",
+                "uid":"AA11",
+                "logicalId":8,
+                "punches":[
+                    {"cp":241,"time":"10:00:00"},
+                    {"cp":31,"time":"10:20:00"},
+                    {"cp":240,"time":"12:00:00"}
+                ]
+            }]
+        }"#;
+        let first_summary = import_phone_snapshot(&mut conn, first).unwrap();
+        assert_eq!(first_summary.imported, 1);
+        assert_eq!(first_summary.updated, 0);
+        let second = r#"{
+            "items":[{
+                "id":"q2",
+                "uid":"aa11",
+                "logicalId":8,
+                "punches":[
+                    {"cp":241,"time":"10:00:00"},
+                    {"cp":32,"time":"10:40:00"},
+                    {"cp":240,"time":"12:10:00"}
+                ]
+            }]
+        }"#;
+        let second_summary = import_phone_snapshot(&mut conn, second).unwrap();
+        assert_eq!(second_summary.imported, 0);
+        assert_eq!(second_summary.updated, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let cps: Vec<i64> = conn
+            .prepare("SELECT cp_number FROM marks_raw ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(cps, vec![241, 32, 240]);
+    }
+
+    #[test]
+    fn phone_snapshot_keeps_same_logical_different_physical() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{
+            "items":[
+                {"id":"q1","uid":"AA","logicalId":8,"punches":[{"cp":241,"time":"10:00:00"}]},
+                {"id":"q2","uid":"BB","logicalId":8,"punches":[{"cp":241,"time":"10:05:00"}]}
+            ]
+        }"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.updated, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn phone_snapshot_collapses_same_chip_in_one_file() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        let body = r#"{
+            "items":[
+                {"id":"q1","uid":"AA","logicalId":8,"punches":[{"cp":241,"time":"10:00:00"},{"cp":31,"time":"10:10:00"}]},
+                {"id":"q2","uid":"AA","logicalId":8,"punches":[{"cp":241,"time":"10:00:00"},{"cp":32,"time":"10:20:00"}]}
+            ]
+        }"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.updated, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let cp: i64 = conn
+            .query_row(
+                "SELECT cp_number FROM marks_raw WHERE seq = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cp, 32);
+        let again = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.updated, 0);
+        assert_eq!(again.already_imported, 2);
+    }
+
+    #[test]
+    fn delete_finish_participant_removes_dump_and_recalculates() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name) VALUES('8', 'Иванов')",
+            [],
+        )
+        .unwrap();
+        import_phone_snapshot(
+            &mut conn,
+            r#"{
+                "items":[{
+                    "id":"q1",
+                    "uid":"AA11",
+                    "logicalId":8,
+                    "punches":[
+                        {"cp":241,"time":"10:00:00"},
+                        {"cp":240,"time":"12:00:00"}
+                    ]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let finish_id: i64 = conn
+            .query_row("SELECT id FROM participants", [], |r| r.get(0))
+            .unwrap();
+        let status_before: String = conn
+            .query_row(
+                "SELECT status FROM results WHERE finish_participant_id = ?",
+                [finish_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(status_before, "Не стартовал");
+
+        delete_finish_participant(&mut conn, finish_id).unwrap();
+
+        let participants: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(participants, 0);
+        let marks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM marks_raw", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marks, 0);
+        let (status, finish): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finish_participant_id FROM results WHERE participant_id = '8'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "Не стартовал");
+        assert_eq!(finish, None);
+
+        let err = delete_finish_participant(&mut conn, finish_id).unwrap_err();
+        assert!(err.contains("не найдена"));
     }
 
     #[test]
@@ -11898,6 +12312,7 @@ mod tests {
             vec![format_id],
             Some(18),
             None,
+            None,
         )
         .unwrap();
         set_setting_value(&conn, "map_image_width", "2400").unwrap();
@@ -11916,6 +12331,97 @@ mod tests {
         assert!(json.contains("\"legends\""));
         assert!(json.contains("\"controls\""));
         assert!(json.contains("\"mapWidth\""));
+    }
+
+    #[test]
+    fn junior_award_group_matches_under_18_and_open() {
+        let mut conn = memory_db();
+        register_search_functions(&conn).unwrap();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n1;Юн;4ч;мужской;01.01.2009\n2;Взр;4ч;мужской;01.01.2008\n3;Вет;4ч;мужской;01.01.1970\n",
+            true,
+        )
+        .unwrap();
+        let format_id: i64 = conn
+            .query_row(
+                "SELECT id FROM start_protocol_formats WHERE format_name = '4ч'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let juniors = upsert_award_group(
+            &conn,
+            None,
+            "Юниоры".into(),
+            "male".into(),
+            vec![format_id],
+            None,
+            Some(18),
+            None,
+        )
+        .unwrap();
+        let open = upsert_award_group(
+            &conn,
+            None,
+            "МО".into(),
+            "male".into(),
+            vec![format_id],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let vet = upsert_award_group(
+            &conn,
+            None,
+            "М45".into(),
+            "male".into(),
+            vec![format_id],
+            Some(45),
+            None,
+            None,
+        )
+        .unwrap();
+        import_phone_snapshot(
+            &mut conn,
+            r#"{
+                "items":[
+                    {"id":"q1","uid":"A1","logicalId":1,"punches":[{"cp":241,"time":"10:00:00"},{"cp":240,"time":"12:00:00"}]},
+                    {"id":"q2","uid":"A2","logicalId":2,"punches":[{"cp":241,"time":"10:00:00"},{"cp":240,"time":"12:00:00"}]},
+                    {"id":"q3","uid":"A3","logicalId":3,"punches":[{"cp":241,"time":"10:00:00"},{"cp":240,"time":"12:00:00"}]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        fn bibs(conn: &Connection, group: i64) -> Vec<String> {
+            let (rows, _) = query_results(
+                conn,
+                50,
+                0,
+                None,
+                None,
+                None,
+                false,
+                Some(group),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let mut out: Vec<String> = rows.into_iter().map(|r| r.participant_id).collect();
+            out.sort();
+            out
+        }
+        assert_eq!(bibs(&conn, juniors.id), vec!["1".to_string()]);
+        assert_eq!(
+            bibs(&conn, open.id),
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+        assert_eq!(bibs(&conn, vet.id), vec!["3".to_string()]);
     }
 
     #[test]

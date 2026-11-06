@@ -5,6 +5,7 @@ data class AwardCategory(
     val genderMode: String = "any",
     val minAge: Int? = null,
     val formatNames: List<String> = emptyList(),
+    val maxAge: Int? = null,
 )
 
 data class AwardPerson(
@@ -57,13 +58,13 @@ internal fun awardCategoryMatches(
         else -> {}
     }
     val minAge = group.minAge?.takeIf { it > 0 }
-    if (minAge != null) {
-        val age = if (asTeam) {
-            if (ages.any { it == null }) null else ages.filterNotNull().minOrNull()
-        } else {
-            ages.firstOrNull()
-        }
-        if (age == null || age < minAge) return false
+    val maxAge = group.maxAge?.takeIf { it > 0 }
+    if (minAge != null || maxAge != null) {
+        if (asTeam && ages.any { it == null }) return false
+        val youngest = if (asTeam) ages.filterNotNull().minOrNull() else ages.firstOrNull()
+        val oldest = if (asTeam) ages.filterNotNull().maxOrNull() else ages.firstOrNull()
+        if (minAge != null && (youngest == null || youngest < minAge)) return false
+        if (maxAge != null && (oldest == null || oldest >= maxAge)) return false
     }
     return true
 }

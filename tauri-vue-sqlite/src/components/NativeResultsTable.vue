@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import AddToStartProtocolDialog, {
   type AddToStartProtocolDraft,
 } from "./AddToStartProtocolDialog.vue";
+import IconActionButton from "./IconActionButton.vue";
 
 type NativeResultRow = {
   id: number;
@@ -96,6 +98,10 @@ function isTeamBlockStart(row: NativeResultRow, index: number) {
   return pos === "start" || pos === "only";
 }
 
+function hasFinishDump(row: NativeResultRow) {
+  return row.finish_participant_id != null && row.finish_participant_id > 0;
+}
+
 function openAddToProtocol(row: NativeResultRow) {
   dialogDraft.value = {
     participant_id: row.participant_id,
@@ -103,6 +109,25 @@ function openAddToProtocol(row: NativeResultRow) {
     format_id: row.format_id,
   };
   dialogOpen.value = true;
+}
+
+async function deleteFinish(row: NativeResultRow) {
+  const finishId = row.finish_participant_id;
+  if (finishId == null || finishId <= 0) return;
+  if (
+    !window.confirm(
+      `Удалить ${row.participant_id} ${row.name} из финишного протокола?`,
+    )
+  ) {
+    return;
+  }
+  try {
+    await invoke("delete_finish_participant", { finishParticipantId: finishId });
+    emit("status", `Участник «${row.name}» удалён из финишного протокола.`);
+    emit("protocolUpdated");
+  } catch (error) {
+    emit("status", `Ошибка удаления: ${String(error)}`);
+  }
 }
 
 function closeDialog() {
@@ -211,7 +236,14 @@ function onSaved() {
             >
               Добавить в протокол
             </button>
-            <span v-else>—</span>
+            <IconActionButton
+              v-if="hasFinishDump(row)"
+              variant="delete"
+              label="Удалить из финишного протокола"
+              :disabled="busy"
+              @click="deleteFinish(row)"
+            />
+            <span v-else-if="!notInStartProtocol(row)">—</span>
           </td>
         </tr>
       </tbody>

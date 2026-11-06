@@ -91,6 +91,7 @@ data class AwardGroupView(
     val name: String,
     val genderMode: String,
     val minAge: Int?,
+    val maxAge: Int? = null,
     val formatNames: List<String>,
 )
 
@@ -376,6 +377,7 @@ class EventStore(
                     .put("name", row.name)
                     .put("genderMode", row.gender)
                     .put("minAge", row.minAge ?: JSONObject.NULL)
+                    .put("maxAge", row.maxAge ?: JSONObject.NULL)
                     .put("formatNames", JSONArray(row.formats)),
             )
         }
@@ -757,6 +759,8 @@ class EventStore(
                         genderMode = item.optString("genderMode").ifBlank { item.optString("gender_mode") },
                         minAge = item.optInt("minAge").takeIf { item.has("minAge") && !item.isNull("minAge") && it > 0 }
                             ?: item.optInt("min_age").takeIf { item.has("min_age") && !item.isNull("min_age") && it > 0 },
+                        maxAge = item.optInt("maxAge").takeIf { item.has("maxAge") && !item.isNull("maxAge") && it > 0 }
+                            ?: item.optInt("max_age").takeIf { item.has("max_age") && !item.isNull("max_age") && it > 0 },
                         formatNames = if (formats == null) {
                             emptyList()
                         } else {
@@ -846,6 +850,7 @@ class EventStore(
                         .put("name", row.name)
                         .put("genderMode", row.genderMode)
                         .put("minAge", row.minAge ?: JSONObject.NULL)
+                        .put("maxAge", row.maxAge ?: JSONObject.NULL)
                         .put("sortOrder", row.sortOrder)
                         .put("formatNames", JSONArray(row.formatNames)),
                 )
@@ -950,6 +955,7 @@ class EventStore(
             val name: String,
             val genderMode: String,
             val minAge: Int?,
+            val maxAge: Int? = null,
             val sortOrder: Int,
             val controls: List<Int>,
             val rows: List<ScoredResult>,
@@ -983,6 +989,7 @@ class EventStore(
                         name = group.name,
                         genderMode = group.genderMode.ifBlank { "any" },
                         minAge = group.minAge,
+                        maxAge = group.maxAge,
                         sortOrder = index,
                         controls = emptyList(),
                         rows = rankRogaineGroup(rows),
@@ -997,6 +1004,7 @@ class EventStore(
                             name = "без группы",
                             genderMode = "any",
                             minAge = null,
+                            maxAge = null,
                             sortOrder = award.size,
                             controls = emptyList(),
                             rows = rankRogaineGroup(unmatched),
@@ -1103,6 +1111,7 @@ class EventStore(
                 genderMode = genderMode,
                 minAge = minAge,
                 formatNames = formatNames,
+                maxAge = maxAge,
             )
 
         internal fun liveMapPoints(mapPointsJson: String, legendsJson: String): JSONArray {
@@ -1334,6 +1343,7 @@ class EventStore(
                         .put("name", bucket.name)
                         .put("gender_mode", bucket.genderMode.ifBlank { "any" })
                         .put("min_age", bucket.minAge ?: JSONObject.NULL)
+                        .put("max_age", bucket.maxAge ?: JSONObject.NULL)
                         .put("sort_order", bucket.sortOrder)
                         .put("course_cps", JSONArray(bucket.controls)),
                 )

@@ -30,6 +30,7 @@ data class AwardGroupCsvRow(
     val name: String,
     val gender: String,
     val minAge: Int?,
+    val maxAge: Int? = null,
     val formats: List<String>,
 )
 
@@ -174,6 +175,7 @@ object CsvImport {
                 name = name,
                 gender = cols.getOrElse(1) { "" }.trim(),
                 minAge = optionalPositiveInt(cols.getOrElse(2) { "" }, index + 1, "возраст"),
+                maxAge = optionalPositiveInt(cols.getOrElse(4) { "" }, index + 1, "макс. возраст"),
                 formats = formats,
             )
         }

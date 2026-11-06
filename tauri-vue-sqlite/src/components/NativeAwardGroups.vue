@@ -14,15 +14,18 @@ type AwardGroupRow = {
   name: string;
   gender_mode: string;
   min_age: number | null;
+  max_age: number | null;
   sort_order: number;
   format_ids: number[];
   format_names: string[];
 };
 
 type GenderMode = "any" | "male" | "female" | "mixed";
-type AgePresetKey = "" | "45" | "55" | "65" | "custom";
+type AgePresetKey = "" | "juniors" | "45" | "55" | "65" | "custom";
 
-const AGE_PRESETS: { key: Exclude<AgePresetKey, "" | "custom">; age: number; label: string }[] = [
+const JUNIOR_MAX_AGE = 18;
+
+const AGE_PRESETS: { key: Exclude<AgePresetKey, "" | "custom" | "juniors">; age: number; label: string }[] = [
   { key: "45", age: 45, label: "Ветераны — 45 и старше" },
   { key: "55", age: 55, label: "Суперветераны — 55 и старше" },
   { key: "65", age: 65, label: "Ультраветераны — 65 и старше" },
@@ -82,16 +85,22 @@ function genderModeText(mode: string) {
   return "Без ограничения по полу";
 }
 
-function ageText(age: number | null | undefined) {
-  if (age == null || age <= 0) return "Без ограничения";
-  if (age === 45) return "Ветераны (45+)";
-  if (age === 55) return "Суперветераны (55+)";
-  if (age === 65) return "Ультраветераны (65+)";
-  return `${age} и старше`;
+function ageText(minAge: number | null | undefined, maxAge: number | null | undefined) {
+  if (maxAge === JUNIOR_MAX_AGE && (minAge == null || minAge <= 0)) {
+    return "Юниоры (младше 18)";
+  }
+  if (maxAge != null && maxAge > 0 && (minAge == null || minAge <= 0)) {
+    return `младше ${maxAge}`;
+  }
+  if (minAge == null || minAge <= 0) return "Без ограничения";
+  if (minAge === 45) return "Ветераны (45+)";
+  if (minAge === 55) return "Суперветераны (55+)";
+  if (minAge === 65) return "Ультраветераны (65+)";
+  return `${minAge} и старше`;
 }
 
 function resolvedMinAge(): number | null {
-  if (agePreset.value === "") return null;
+  if (agePreset.value === "" || agePreset.value === "juniors") return null;
   if (agePreset.value === "custom") {
     const n = Number(customMinAge.value);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -100,19 +109,28 @@ function resolvedMinAge(): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function applyMinAgeToForm(age: number | null | undefined) {
-  if (age == null || age <= 0) {
+function resolvedMaxAge(): number | null {
+  return agePreset.value === "juniors" ? JUNIOR_MAX_AGE : null;
+}
+
+function applyAgeToForm(minAge: number | null | undefined, maxAge: number | null | undefined) {
+  if (maxAge === JUNIOR_MAX_AGE && (minAge == null || minAge <= 0)) {
+    agePreset.value = "juniors";
+    customMinAge.value = "";
+    return;
+  }
+  if (minAge == null || minAge <= 0) {
     agePreset.value = "";
     customMinAge.value = "";
     return;
   }
-  if (age === 45 || age === 55 || age === 65) {
-    agePreset.value = String(age) as AgePresetKey;
+  if (minAge === 45 || minAge === 55 || minAge === 65) {
+    agePreset.value = String(minAge) as AgePresetKey;
     customMinAge.value = "";
     return;
   }
   agePreset.value = "custom";
-  customMinAge.value = String(age);
+  customMinAge.value = String(minAge);
 }
 
 function resetForm() {
@@ -140,7 +158,7 @@ function openEdit(group: AwardGroupRow) {
     group.gender_mode === "mixed"
       ? group.gender_mode
       : "any";
-  applyMinAgeToForm(group.min_age);
+  applyAgeToForm(group.min_age, group.max_age);
   selectedFormatIds.value = group.format_ids.map(String);
   formOpen.value = true;
 }
@@ -186,6 +204,7 @@ async function saveForm() {
       genderMode: genderMode.value,
       formatIds: selectedFormatIds.value.map(Number),
       minAge: resolvedMinAge(),
+      maxAge: resolvedMaxAge(),
       sortOrder: null,
     });
     emit(
@@ -229,8 +248,9 @@ defineExpose({ refresh });
     </template>
     <p class="subtitle">
       Группа = набор форматов, правило пола и опционально возраст
-      (ветераны 45+, суперветераны 55+, ультраветераны 65+ или свой порог).
-      Возраст считается на 31 декабря года соревнования; в команде — по самому младшему.
+      (юниоры младше 18, ветераны 45+, суперветераны 55+, ультраветераны 65+ или свой порог).
+      Возраст считается на 31 декабря года соревнования.
+      Юниоры также входят в группу без возраста и не входят в группы с указанием возраста.
       Без даты рождения участник не попадает в возрастные группы.
       В результатах можно фильтровать финишный протокол по группе.
     </p>
@@ -254,7 +274,7 @@ defineExpose({ refresh });
             <td>{{ g.name }}</td>
             <td>{{ g.format_names.join(", ") || "—" }}</td>
             <td>{{ genderModeText(g.gender_mode) }}</td>
-            <td>{{ ageText(g.min_age) }}</td>
+            <td>{{ ageText(g.min_age, g.max_age) }}</td>
             <td>
               <IconActionButton
                 variant="edit"
@@ -319,6 +339,7 @@ defineExpose({ refresh });
             Возраст
             <select v-model="agePreset">
               <option value="">Без ограничения по возрасту</option>
+              <option value="juniors">Юниоры — младше 18</option>
               <option v-for="preset in AGE_PRESETS" :key="preset.key" :value="preset.key">
                 {{ preset.label }}
               </option>
@@ -331,9 +352,11 @@ defineExpose({ refresh });
           </label>
         </div>
         <p class="subtitle">
-          Возраст — на 31 декабря года соревнования. В команде берётся возраст самого младшего;
+          Возраст — на 31 декабря года соревнования.
+          Для ветеранов в команде берётся возраст самого младшего, для юниоров — самого старшего;
           если у кого-то из команды нет даты рождения, команда не входит в возрастную группу.
-          Участник (или команда) старше сразу нескольких порогов входит во все такие группы
+          Юниор входит в группу без возраста, но не в группы 45+/55+/65+.
+          Участник старше сразу нескольких нижних порогов входит во все такие группы
           и в группу без возраста.
         </p>
 

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS award_groups (
     name            TEXT NOT NULL,
     gender_mode     TEXT NOT NULL DEFAULT 'any',
     min_age         INTEGER NULL,
+    max_age         INTEGER NULL,
     sort_order      INTEGER NOT NULL DEFAULT 0,
     UNIQUE (event_id, source_id)
 );

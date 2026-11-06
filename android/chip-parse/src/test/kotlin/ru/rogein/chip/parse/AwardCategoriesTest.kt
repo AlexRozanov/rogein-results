@@ -112,6 +112,54 @@ class AwardCategoriesTest {
     }
 
     @Test
+    fun juniorMatchesOpenNotVeteran() {
+        val groups = listOf(
+            AwardCategory("МО", "male", null, listOf("4ч")),
+            AwardCategory("Юниоры", "male", null, listOf("4ч"), maxAge = 18),
+            AwardCategory("М45", "male", 45, listOf("4ч")),
+        )
+        assertEquals(
+            listOf("МО", "Юниоры"),
+            personAwardCategories("4ч", "мужской", "2009-01-01", "2026-11-06", groups),
+        )
+        assertEquals(
+            listOf("МО"),
+            personAwardCategories("4ч", "мужской", "2008-01-01", "2026-11-06", groups),
+        )
+        assertEquals(
+            listOf("МО", "М45"),
+            personAwardCategories("4ч", "мужской", "1970-01-01", "2026-11-06", groups),
+        )
+    }
+
+    @Test
+    fun juniorTeamUsesOldestMember() {
+        val junior = AwardCategory("Юниоры", "male", null, listOf("4ч"), maxAge = 18)
+        assertEquals(
+            emptyList<String>(),
+            personAwardCategories(
+                "4ч",
+                "мужской",
+                "2009-01-01",
+                "2026-11-06",
+                listOf(junior),
+                listOf(AwardPerson("мужской", "2008-01-01")),
+            ),
+        )
+        assertEquals(
+            listOf("Юниоры"),
+            personAwardCategories(
+                "4ч",
+                "мужской",
+                "2010-01-01",
+                "2026-11-06",
+                listOf(junior),
+                listOf(AwardPerson("мужской", "2009-01-01")),
+            ),
+        )
+    }
+
+    @Test
     fun teamAgeUsesYoungestMember() {
         val veteran = AwardCategory("МВет", "male", 40, listOf("4ч"))
         assertEquals(

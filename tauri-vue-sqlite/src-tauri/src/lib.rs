@@ -40,6 +40,7 @@ const COURSE_MAP_MIME_KEY: &str = "course_map_mime";
 #[derive(Serialize)]
 struct PhoneReadSummary {
     imported: i64,
+    updated: i64,
     already_imported: i64,
     unmatched: i64,
     skipped_empty: i64,
@@ -54,6 +55,7 @@ struct PhonePollResult {
     pulled: bool,
     pack_pushed: bool,
     imported: i64,
+    updated: i64,
     already_imported: i64,
     unmatched: i64,
     skipped_empty: i64,
@@ -452,6 +454,7 @@ fn phone_read_from_import(
 ) -> PhoneReadSummary {
     PhoneReadSummary {
         imported: summary.imported,
+        updated: summary.updated,
         already_imported: summary.already_imported,
         unmatched: summary.unmatched,
         skipped_empty: summary.skipped_empty,
@@ -467,6 +470,7 @@ fn empty_phone_poll() -> PhonePollResult {
         pulled: false,
         pack_pushed: false,
         imported: 0,
+        updated: 0,
         already_imported: 0,
         unmatched: 0,
         skipped_empty: 0,
@@ -581,6 +585,7 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         pulled: true,
         pack_pushed,
         imported: read_summary.imported,
+        updated: read_summary.updated,
         already_imported: read_summary.already_imported,
         unmatched: read_summary.unmatched,
         skipped_empty: read_summary.skipped_empty,
@@ -957,6 +962,7 @@ fn upsert_award_group(
     gender_mode: String,
     format_ids: Vec<i64>,
     min_age: Option<i64>,
+    max_age: Option<i64>,
     sort_order: Option<i64>,
 ) -> Result<AwardGroupRow, String> {
     let _guard = state
@@ -964,7 +970,16 @@ fn upsert_award_group(
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
-    domain::upsert_award_group(&conn, group_id, name, gender_mode, format_ids, min_age, sort_order)
+    domain::upsert_award_group(
+        &conn,
+        group_id,
+        name,
+        gender_mode,
+        format_ids,
+        min_age,
+        max_age,
+        sort_order,
+    )
 }
 
 #[tauri::command]
@@ -1509,6 +1524,22 @@ fn delete_start_protocol_entry(state: State<'_, AppState>, entry_id: i64) -> Res
         .map_err(|_| "database lock poisoned".to_string())?;
     let conn = domain::open_and_init_db(&state.db_path)?;
     domain::delete_start_protocol_entry(&conn, entry_id)
+}
+
+#[tauri::command]
+fn delete_finish_participant(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    finish_participant_id: i64,
+) -> Result<(), String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    domain::delete_finish_participant(&mut conn, finish_participant_id)?;
+    let _ = app.emit("results-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -2066,6 +2097,7 @@ pub fn run() {
             add_start_protocol_entry,
             update_start_protocol_entry,
             delete_start_protocol_entry,
+            delete_finish_participant,
             add_start_protocol_course,
             merge_start_protocol_team,
             leave_start_protocol_team,

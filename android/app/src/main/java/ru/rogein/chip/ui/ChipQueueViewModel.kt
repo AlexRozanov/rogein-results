@@ -2185,11 +2185,23 @@ class ChipQueueViewModel(
             item.logicalId == logicalId && courseKey(item.course) == courseKey(course)
         } ?: return
         val who = row.logicalId?.let { "№ $it" } ?: row.name
-        val head = listOf(who, row.course.ifBlank { "без дистанции" }, formatElapsed(row.calc.elapsedSeconds))
+        val courseLabel = if (isRogaine(settings.value.sportKind)) {
+            row.course.ifBlank { "без формата" }
+        } else {
+            row.course.ifBlank { "без дистанции" }
+        }
+        val head = listOf(who, courseLabel, formatElapsed(row.calc.elapsedSeconds))
             .filter { it.isNotBlank() }
             .joinToString(" · ")
-        val summary = "$head\n${resultStatusLine(row.calc.status, row.calc.diagnostics)}"
-        _printPrompt.value = PrintPrompt(summary = summary, text = receiptText(row))
+        val lines = mutableListOf(head, resultStatusLine(row.calc.status, row.calc.diagnostics))
+        if (isRogaine(settings.value.sportKind)) {
+            lines += "Все очки ${row.calc.pointsRaw}"
+            if (row.calc.penaltyPoints > 0) {
+                lines += "Штрафные очки ${row.calc.penaltyPoints}"
+            }
+            lines += "Очки с учётом штрафных ${row.calc.pointsFinal}"
+        }
+        _printPrompt.value = PrintPrompt(summary = lines.joinToString("\n"), text = receiptText(row))
     }
 
     private fun receiptText(row: ScoredResult): String {
@@ -2211,7 +2223,7 @@ class ChipQueueViewModel(
                 finishCp = settings.finishCp,
                 startClockSeconds = startClock,
                 pointsRaw = row.calc.pointsRaw,
-                penaltyMinutes = row.calc.penaltyMinutes,
+                penaltyPoints = row.calc.penaltyPoints,
                 pointsFinal = row.calc.pointsFinal,
                 rogaine = rogaine,
             ),

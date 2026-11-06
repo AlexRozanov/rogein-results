@@ -44,6 +44,7 @@ pub struct AwardGroupPublic {
     pub name: String,
     pub gender_mode: String,
     pub min_age: Option<i32>,
+    pub max_age: Option<i32>,
     pub sort_order: i32,
     pub course_cps: JsonValue,
 }
@@ -149,6 +150,8 @@ pub struct PublishAwardGroup {
     pub name: String,
     pub gender_mode: Option<String>,
     pub min_age: Option<i32>,
+    #[serde(default)]
+    pub max_age: Option<i32>,
     pub sort_order: Option<i32>,
     #[serde(default)]
     pub course_cps: Vec<i32>,

@@ -51,6 +51,7 @@ data class EventPackAwardGroupFile(
     val name: String,
     val genderMode: String,
     val minAge: Int?,
+    val maxAge: Int?,
     val sortOrder: Int,
     val formatNames: List<String>,
 )
@@ -119,6 +120,7 @@ fun parseEventPackJson(text: String): EventPackFile {
             name = name,
             genderMode = obj.optStr("genderMode", "gender_mode").ifBlank { "any" },
             minAge = objInt(obj, "minAge", "min_age"),
+            maxAge = objInt(obj, "maxAge", "max_age"),
             sortOrder = obj.optInt("sortOrder", obj.optInt("sort_order", 0)),
             formatNames = jsonArray(obj.optArr("formatNames", "format_names")).mapNotNull { value ->
                 value.toString().trim().takeIf { it.isNotEmpty() }

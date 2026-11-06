@@ -84,6 +84,10 @@ class CsvImportTest {
         assertEquals("ЖО", rows[1].name)
         assertEquals(null, rows[1].minAge)
         assertEquals(listOf("2ч"), rows[1].formats)
+        assertEquals(null, rows[0].maxAge)
+        val juniors = CsvImport.awardGroups("имя;пол;мин_возраст;форматы;макс_возраст\nЮниоры;мужской;;4ч;18\n")
+        assertEquals(18, juniors[0].maxAge)
+        assertEquals(null, juniors[0].minAge)
     }
 
     @Test

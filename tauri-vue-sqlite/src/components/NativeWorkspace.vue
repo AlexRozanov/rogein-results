@@ -27,6 +27,18 @@ type ImportSummary = {
   results_count: number;
 };
 
+type PhoneReadSummary = {
+  imported: number;
+  updated: number;
+  already_imported: number;
+  unmatched: number;
+  skipped_empty: number;
+  participants_count: number;
+  results_count: number;
+  snapshot_deleted: boolean;
+  snapshot_note: string;
+};
+
 type PhonePollResult = PhoneReadSummary & {
   pulled: boolean;
   pack_pushed: boolean;
@@ -362,8 +374,9 @@ function formatPhoneSummary(summary: PhoneReadSummary): string {
   const extra = summary.snapshot_note ? ` ${summary.snapshot_note}` : "";
   const skipped =
     summary.skipped_empty > 0 ? ` без отметок пропущены ${summary.skipped_empty}.` : "";
+  const updated = summary.updated > 0 ? ` обновлены ${summary.updated},` : "";
   return (
-    `С телефона: новых ${summary.imported}, уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
+    `С телефона: новых ${summary.imported},${updated} уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
     `Участников ${summary.participants_count}, результатов ${summary.results_count}.${extra}`
   );
 }
@@ -467,7 +480,7 @@ async function pollPhoneUsb() {
   phonePollInFlight = true;
   try {
     const result = await invoke<PhonePollResult>("poll_phone_usb");
-    if (result.imported > 0 || result.unmatched > 0) {
+    if (result.imported > 0 || result.updated > 0 || result.unmatched > 0) {
       nativeStatus.value = formatPhoneSummary(result);
       pageOffset.value = 0;
       await refreshNativeData();

@@ -223,6 +223,11 @@ const canAddToProtocol = computed(() => {
   return String(result.diagnostics_json || "").includes("not_in_start_protocol");
 });
 
+const canDeleteFinish = computed(() => {
+  const id = Number(finishKeyClean.value);
+  return Number.isFinite(id) && id > 0;
+});
+
 const addCpCounts = computed(() => {
   const remaining = new Map<number, number>();
   for (const c of details.value?.corrections ?? []) {
@@ -679,6 +684,30 @@ async function goBackToResults() {
   await closeAuxiliaryWindowOrClearHash(["participant-card"]);
 }
 
+async function deleteFromFinish() {
+  const finishId = Number(finishKeyClean.value);
+  if (!Number.isFinite(finishId) || finishId <= 0) return;
+  const bib =
+    details.value?.result?.participant_id ||
+    details.value?.participant.participant_id ||
+    "";
+  const name =
+    details.value?.result?.name || details.value?.participant.name || "";
+  if (!window.confirm(`Удалить ${bib} ${name} из финишного протокола?`)) {
+    return;
+  }
+  busy.value = true;
+  try {
+    await invoke("delete_finish_participant", { finishParticipantId: finishId });
+    status.value = `Участник «${name}» удалён из финишного протокола.`;
+    await goBackToResults();
+  } catch (error) {
+    status.value = `Ошибка удаления: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
 function openAddToProtocol() {
   addToProtocolOpen.value = true;
 }
@@ -770,6 +799,14 @@ async function openPathWindow() {
           @click="openAddToProtocol"
         >
           Добавить в протокол
+        </button>
+        <button
+          v-if="canDeleteFinish"
+          type="button"
+          :disabled="busy"
+          @click="deleteFromFinish"
+        >
+          Удалить из финишного протокола
         </button>
         <button
           v-if="details?.result && !isOrient"

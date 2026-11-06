@@ -79,7 +79,7 @@ class ReceiptTextTest {
                 status = STATUS_OK,
                 finishCp = 240,
                 pointsRaw = 12,
-                penaltyMinutes = 3,
+                penaltyPoints = 3,
                 pointsFinal = 9,
                 rogaine = true,
             ),
@@ -89,9 +89,9 @@ class ReceiptTextTest {
         assertTrue(text.contains(" 1  31  10:15:00 00:15:00"))
         assertTrue(text.contains("Финиш  14:03:00  03:48:00"))
         assertTrue(!text.contains(" 1 241"))
-        assertTrue(text.contains("Очки       12"))
-        assertTrue(text.contains("Штраф      3 мин"))
-        assertTrue(text.contains("Итого      9"))
+        assertTrue(text.contains("Все очки   12"))
+        assertTrue(text.contains("Штрафные очки 3"))
+        assertTrue(text.contains("Очки с учётом штрафных 9"))
         assertTrue(text.contains("Отметка    OK"))
     }
 }

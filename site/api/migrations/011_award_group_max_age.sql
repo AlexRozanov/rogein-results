@@ -1,0 +1,2 @@
+ALTER TABLE award_groups
+    ADD COLUMN IF NOT EXISTS max_age INTEGER NULL;
