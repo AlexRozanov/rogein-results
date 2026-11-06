@@ -31,7 +31,28 @@ class EventPackJsonTest {
         assertEquals(31, pack.exclusions[0].fromCp)
         assertEquals("start", pack.mapPoints[0].kind)
         assertEquals(1.5, pack.metersPerPixel)
+        assertEquals(2000, pack.mapWidth)
+        assertEquals(1500, pack.mapHeight)
         assertEquals("map.jpg", pack.mapFileName)
+    }
+
+    @Test
+    fun eventPackReadsMapSizeAndSnakeCasePoints() {
+        val json = """
+            {
+              "sport": "rogaine",
+              "map_points": [{"kind": "cp", "cp_number": 31, "map_x": 0.4, "map_y": 0.5}],
+              "meters_per_pixel": 2.5,
+              "map_width": 2400,
+              "map_height": 1800
+            }
+        """.trimIndent()
+        val pack = parseEventPackJson(json)
+        assertEquals(31, pack.mapPoints[0].cp)
+        assertEquals(0.4, pack.mapPoints[0].mapX)
+        assertEquals(2.5, pack.metersPerPixel)
+        assertEquals(2400, pack.mapWidth)
+        assertEquals(1800, pack.mapHeight)
     }
 
     @Test

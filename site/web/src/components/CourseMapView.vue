@@ -13,6 +13,10 @@ const props = defineProps<{
   path: PathPoint[];
 }>();
 
+const emit = defineEmits<{
+  size: [size: { width: number; height: number }];
+}>();
+
 const SCALE_PRESETS = [
   { value: "fit", label: "Вписать в окно" },
   { value: "0.125", label: "12.5%" },
@@ -127,6 +131,9 @@ function onImageLoad() {
   naturalWidth.value = img.naturalWidth;
   naturalHeight.value = img.naturalHeight;
   recomputeFitScale();
+  if (naturalWidth.value > 0 && naturalHeight.value > 0) {
+    emit("size", { width: naturalWidth.value, height: naturalHeight.value });
+  }
 }
 
 function nearestPreset(scale: number, direction: "up" | "down") {

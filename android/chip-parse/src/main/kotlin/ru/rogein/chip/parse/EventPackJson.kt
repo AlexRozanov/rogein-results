@@ -16,6 +16,8 @@ data class EventPackFile(
     val mapPoints: List<EventPackMapPointFile>,
     val metersPerPixel: Double?,
     val mapFileName: String,
+    val mapWidth: Int? = null,
+    val mapHeight: Int? = null,
 )
 
 data class EventPackSettingsFile(
@@ -164,12 +166,12 @@ fun parseEventPackJson(text: String): EventPackFile {
             maxLegSeconds = objInt(obj, "maxLegSeconds"),
         )
     }
-    val mapPoints = jsonObjects(root.optJSONArray("mapPoints")).mapNotNull { obj ->
-        val mapX = objDouble(obj, "mapX") ?: return@mapNotNull null
-        val mapY = objDouble(obj, "mapY") ?: return@mapNotNull null
+    val mapPoints = jsonObjects(root.optArr("mapPoints", "map_points")).mapNotNull { obj ->
+        val mapX = objDouble(obj, "mapX", "map_x") ?: return@mapNotNull null
+        val mapY = objDouble(obj, "mapY", "map_y") ?: return@mapNotNull null
         EventPackMapPointFile(
             kind = obj.optString("kind").trim().ifBlank { "cp" },
-            cp = objInt(obj, "cp"),
+            cp = objInt(obj, "cp", "cp_number"),
             name = obj.optString("name").trim(),
             mapX = mapX,
             mapY = mapY,
@@ -198,8 +200,10 @@ fun parseEventPackJson(text: String): EventPackFile {
         legends = legends,
         exclusions = exclusions,
         mapPoints = mapPoints,
-        metersPerPixel = objDouble(root, "metersPerPixel"),
-        mapFileName = root.optString("mapFileName").trim(),
+        metersPerPixel = objDouble(root, "metersPerPixel", "meters_per_pixel"),
+        mapWidth = objInt(root, "mapWidth", "map_width")?.takeIf { it > 0 },
+        mapHeight = objInt(root, "mapHeight", "map_height")?.takeIf { it > 0 },
+        mapFileName = root.optStr("mapFileName", "map_file_name"),
     )
 }
 

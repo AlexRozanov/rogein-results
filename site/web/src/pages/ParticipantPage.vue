@@ -105,10 +105,23 @@ const awardGroupName = computed(() => {
 });
 
 const isOrient = computed(() => event.value?.sport_kind === "orient");
+const mapImageSize = ref<{ width: number; height: number } | null>(null);
+watch(
+  () => event.value?.map_url,
+  () => {
+    mapImageSize.value = null;
+  },
+);
+const personMarks = computed(() => asMarks(person.value?.marks));
 const pathPoints = computed<PathPoint[]>(() => {
   const stored = normalizePath(person.value?.path);
   if (stored.length) return stored;
-  return pathFromMarks(person.value?.marks, event.value?.map_points);
+  return pathFromMarks(
+    personMarks.value,
+    event.value?.map_points,
+    event.value?.start_cp,
+    event.value?.finish_cp,
+  );
 });
 const selectedStatus = computed(() => selectedResult.value?.status || "OK");
 const isDsq = computed(() => {
@@ -130,7 +143,7 @@ const courseControls = computed(() => {
 const classifiedPunches = computed(() => {
   if (!isOrient.value) return [];
   return classifyCoursePunches(
-    person.value?.marks ?? [],
+    personMarks.value,
     courseControls.value,
     startCp.value,
     finishCp.value,
@@ -183,7 +196,7 @@ const courseError = computed(() => {
 const resolvedDistanceM = computed(() => {
   const stored = person.value?.distance_m;
   if (stored != null && Number.isFinite(stored) && stored > 0) return stored;
-  return pathDistanceM(pathPoints.value, event.value);
+  return pathDistanceM(pathPoints.value, event.value, mapImageSize.value);
 });
 
 const metrics = computed(() => {
@@ -198,8 +211,12 @@ const metrics = computed(() => {
   return { points, elapsed, pointsPerKm, pace, speed };
 });
 
+function onMapSize(size: { width: number; height: number }) {
+  if (size.width > 0 && size.height > 0) mapImageSize.value = size;
+}
+
 const markView = computed(() => {
-  const marks = person.value?.marks ?? [];
+  const marks = personMarks.value;
   const start = startCp.value;
   const finish = finishCp.value;
   let startIdx = start != null ? marks.findIndex((mark) => mark.cp_number === start) : 0;
@@ -254,10 +271,14 @@ const markView = computed(() => {
   };
 });
 
-function pathDistanceM(path: PathPoint[], ev: EventDetail | null) {
+function pathDistanceM(
+  path: PathPoint[],
+  ev: EventDetail | null,
+  imageSize?: { width: number; height: number } | null,
+) {
   if (!ev || path.length < 2) return null;
-  const w = Number(ev.map_width);
-  const h = Number(ev.map_height);
+  const w = Number(ev.map_width) || Number(imageSize?.width) || 0;
+  const h = Number(ev.map_height) || Number(imageSize?.height) || 0;
   const mpp = Number(ev.meters_per_pixel);
   if (!(w > 0) || !(h > 0) || !(mpp > 0)) return null;
   let distance = 0;
@@ -295,17 +316,51 @@ function mapPointCoords(raw: unknown): Array<{ x: number; y: number; cp: number 
   return out;
 }
 
-function pathFromMarks(marks: Mark[] | undefined, mapPoints: unknown): PathPoint[] {
+function asMarks(raw: unknown): Mark[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Mark[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const cp = Number(row.cp_number ?? row.cp);
+    if (!Number.isFinite(cp) || cp <= 0) continue;
+    const seq = Number(row.seq);
+    out.push({
+      seq: Number.isFinite(seq) && seq > 0 ? seq : out.length + 1,
+      cp_number: cp,
+      mark_time: String(row.mark_time ?? row.markTime ?? ""),
+    });
+  }
+  return out.sort((a, b) => a.seq - b.seq);
+}
+
+function pathFromMarks(
+  marks: Mark[] | undefined,
+  mapPoints: unknown,
+  startCp?: number | null,
+  finishCp?: number | null,
+): PathPoint[] {
   if (!marks?.length) return [];
   const byCp = new Map<number, { x: number; y: number; kind: string | null }>();
+  let startPt: { x: number; y: number; kind: string | null } | null = null;
+  let finishPt: { x: number; y: number; kind: string | null } | null = null;
   for (const point of mapPointCoords(mapPoints)) {
-    if (point.cp == null) continue;
-    byCp.set(point.cp, { x: point.x, y: point.y, kind: point.kind });
+    const xy = { x: point.x, y: point.y, kind: point.kind };
+    if (point.cp != null) byCp.set(point.cp, xy);
+    if (point.kind === "start") startPt = xy;
+    if (point.kind === "finish") finishPt = xy;
   }
-  if (!byCp.size) return [];
+  function lookup(cp: number) {
+    return (
+      byCp.get(cp) ??
+      (startCp != null && cp === startCp ? startPt : null) ??
+      (finishCp != null && cp === finishCp ? finishPt : null)
+    );
+  }
+  if (!byCp.size && !startPt && !finishPt) return [];
   const out: PathPoint[] = [];
   for (const mark of marks) {
-    const point = byCp.get(mark.cp_number);
+    const point = lookup(mark.cp_number);
     if (!point) continue;
     const last = out[out.length - 1];
     if (last && Math.abs(last.x - point.x) < 1e-9 && Math.abs(last.y - point.y) < 1e-9) continue;
@@ -631,7 +686,7 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       <section v-if="!isOrient" class="person-map">
         <h2>Путь на карте</h2>
         <div v-if="event.map_url" class="card map-card">
-          <CourseMapView :map-url="event.map_url" :path="pathPoints" />
+          <CourseMapView :map-url="event.map_url" :path="pathPoints" @size="onMapSize" />
         </div>
         <p v-else class="muted">Карта для этого старта не опубликована.</p>
       </section>

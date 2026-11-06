@@ -53,6 +53,8 @@ import java.time.LocalDate
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.hypot
 
 data class EventSettings(
     val startCp: Int = CP_START,
@@ -71,6 +73,9 @@ data class EventSettings(
     val livePending: Boolean = false,
     val sportKind: String = SPORT_ORIENT,
     val metersPerPixel: Double? = null,
+    val mapWidth: Int? = null,
+    val mapHeight: Int? = null,
+    val mapPointsJson: String = "",
     val formatSettingsJson: String = "",
     val legendsJson: String = "",
     val awardGroupsJson: String = "",
@@ -144,6 +149,8 @@ class EventStore(
         eventDao.upsertSetting(SettingEntity("title", next.title.trim()))
         eventDao.upsertSetting(SettingEntity("sport_kind", normalizeSportKind(next.sportKind)))
         eventDao.upsertSetting(SettingEntity("meters_per_pixel", next.metersPerPixel?.toString().orEmpty()))
+        eventDao.upsertSetting(SettingEntity("map_image_width", next.mapWidth?.toString().orEmpty()))
+        eventDao.upsertSetting(SettingEntity("map_image_height", next.mapHeight?.toString().orEmpty()))
     }
 
     fun saveChipLog(text: String, logicalId: Int?, uid: String): File {
@@ -303,6 +310,8 @@ class EventStore(
                 competitionDate = pack.settings.competitionDate.ifBlank { current.competitionDate },
                 title = pack.title.ifBlank { current.title },
                 metersPerPixel = pack.metersPerPixel ?: current.metersPerPixel,
+                mapWidth = pack.mapWidth ?: current.mapWidth,
+                mapHeight = pack.mapHeight ?: current.mapHeight,
             ),
         )
         eventDao.upsertSetting(SettingEntity("award_groups", awardGroupsJson(pack.awardGroups)))
@@ -680,6 +689,9 @@ class EventStore(
                 livePending = map["live_pending"] == "1",
                 sportKind = normalizeSportKind(map["sport_kind"]),
                 metersPerPixel = map["meters_per_pixel"]?.toDoubleOrNull(),
+                mapWidth = map["map_image_width"]?.toIntOrNull()?.takeIf { it > 0 },
+                mapHeight = map["map_image_height"]?.toIntOrNull()?.takeIf { it > 0 },
+                mapPointsJson = map["map_points"].orEmpty(),
                 formatSettingsJson = map["format_settings"].orEmpty(),
                 legendsJson = map["cp_legends"].orEmpty(),
                 awardGroupsJson = map["award_groups"].orEmpty(),
@@ -1093,6 +1105,158 @@ class EventStore(
                 formatNames = formatNames,
             )
 
+        internal fun liveMapPoints(mapPointsJson: String, legendsJson: String): JSONArray {
+            val fromPoints = parseLiveMapPoints(mapPointsJson)
+            if (fromPoints.length() > 0) return fromPoints
+            return parseLegendMapPoints(legendsJson)
+        }
+
+        internal fun livePath(
+            punches: List<OrientMark>,
+            mapPoints: JSONArray,
+            startCp: Int,
+            finishCp: Int,
+        ): JSONArray {
+            val byCp = HashMap<Int, Triple<Double, Double, String>>()
+            var startXy: Triple<Double, Double, String>? = null
+            var finishXy: Triple<Double, Double, String>? = null
+            for (i in 0 until mapPoints.length()) {
+                val point = mapPoints.optJSONObject(i) ?: continue
+                val x = point.optDouble("map_x")
+                val y = point.optDouble("map_y")
+                if (!x.isFinite() || !y.isFinite()) continue
+                val kind = point.optString("kind").trim().ifBlank { "cp" }
+                val xy = Triple(x, y, kind)
+                val cp = if (point.isNull("cp_number")) null else point.optInt("cp_number").takeIf { it > 0 }
+                if (cp != null) byCp[cp] = xy
+                if (kind == "start") startXy = xy
+                if (kind == "finish") finishXy = xy
+            }
+            fun lookup(cp: Int): Triple<Double, Double, String>? =
+                byCp[cp] ?: when (cp) {
+                    startCp -> startXy
+                    finishCp -> finishXy
+                    else -> null
+                }
+            val path = JSONArray()
+            for (punch in punches) {
+                val xy = lookup(punch.cp) ?: continue
+                if (path.length() > 0) {
+                    val last = path.getJSONObject(path.length() - 1)
+                    if (abs(last.optDouble("x") - xy.first) < 1e-9 &&
+                        abs(last.optDouble("y") - xy.second) < 1e-9
+                    ) {
+                        continue
+                    }
+                }
+                val kind = when (punch.cp) {
+                    startCp -> "start"
+                    finishCp -> "finish"
+                    else -> xy.third
+                }
+                path.put(
+                    JSONObject()
+                        .put("x", xy.first)
+                        .put("y", xy.second)
+                        .put("cp_number", punch.cp)
+                        .put("kind", kind),
+                )
+            }
+            return path
+        }
+
+        internal fun liveDistanceM(
+            path: JSONArray,
+            width: Double?,
+            height: Double?,
+            metersPerPixel: Double?,
+        ): Double? {
+            if (path.length() < 2) return null
+            val w = width?.takeIf { it > 0 } ?: return null
+            val h = height?.takeIf { it > 0 } ?: return null
+            val mpp = metersPerPixel?.takeIf { it > 0 } ?: return null
+            var distance = 0.0
+            for (i in 0 until path.length() - 1) {
+                val a = path.getJSONObject(i)
+                val b = path.getJSONObject(i + 1)
+                val dx = (b.optDouble("x") - a.optDouble("x")) * w
+                val dy = (b.optDouble("y") - a.optDouble("y")) * h
+                distance += hypot(dx, dy) * mpp
+            }
+            return distance.takeIf { it.isFinite() && it > 0 }
+        }
+
+        private fun parseLiveMapPoints(raw: String): JSONArray {
+            val out = JSONArray()
+            val array = try {
+                JSONArray(raw.ifBlank { "[]" })
+            } catch (_: Exception) {
+                return out
+            }
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val x = jsonCoord(item, "map_x", "mapX") ?: continue
+                val y = jsonCoord(item, "map_y", "mapY") ?: continue
+                val kind = item.optString("kind").trim().ifBlank { "cp" }
+                val cp = jsonPositiveInt(item, "cp_number", "cp")
+                out.put(
+                    JSONObject()
+                        .put("kind", kind)
+                        .put("cp_number", cp ?: JSONObject.NULL)
+                        .put("name", item.optString("name"))
+                        .put("map_x", x)
+                        .put("map_y", y),
+                )
+            }
+            return out
+        }
+
+        private fun parseLegendMapPoints(raw: String): JSONArray {
+            val out = JSONArray()
+            val array = try {
+                JSONArray(raw.ifBlank { "[]" })
+            } catch (_: Exception) {
+                return out
+            }
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val x = jsonCoord(item, "mapX", "map_x") ?: continue
+                val y = jsonCoord(item, "mapY", "map_y") ?: continue
+                val cp = jsonPositiveInt(item, "cp", "cpNumber", "cp_number") ?: continue
+                out.put(
+                    JSONObject()
+                        .put("kind", "cp")
+                        .put("cp_number", cp)
+                        .put("name", item.optString("name"))
+                        .put("map_x", x)
+                        .put("map_y", y),
+                )
+            }
+            return out
+        }
+
+        private fun jsonCoord(obj: JSONObject, vararg keys: String): Double? {
+            for (key in keys) {
+                if (!obj.has(key) || obj.isNull(key)) continue
+                val value = obj.optDouble(key)
+                if (value.isFinite()) return value
+            }
+            return null
+        }
+
+        private fun jsonPositiveInt(obj: JSONObject, vararg keys: String): Int? {
+            for (key in keys) {
+                if (!obj.has(key) || obj.isNull(key)) continue
+                val parsed = when (val value = obj.opt(key)) {
+                    is Number -> value.toInt()
+                    is String -> value.trim().toIntOrNull()
+                    else -> null
+                }
+                if (parsed != null && parsed > 0) return parsed
+            }
+            return null
+        }
+
         private fun buildPublishJson(
             settings: EventSettings,
             title: String,
@@ -1106,6 +1270,7 @@ class EventStore(
             val participants = JSONArray()
             val usedSourceIds = HashSet<Long>()
             val sourceByQueue = HashMap<String, Long>()
+            val mapPoints = liveMapPoints(settings.mapPointsJson, settings.legendsJson)
             val buckets = resultBuckets(
                 scored = scored,
                 people = people,
@@ -1136,6 +1301,13 @@ class EventStore(
                             .put("mark_time", "%sT%02d:%02d:%02d".format(Locale.US, settings.competitionDate, h, m, s)),
                     )
                 }
+                val path = livePath(row.punches, mapPoints, settings.startCp, settings.finishCp)
+                val distanceM = liveDistanceM(
+                    path,
+                    settings.mapWidth?.toDouble(),
+                    settings.mapHeight?.toDouble(),
+                    settings.metersPerPixel,
+                )
                 participants.put(
                     JSONObject()
                         .put("source_id", sourceId)
@@ -1149,7 +1321,8 @@ class EventStore(
                         .put("team_id", if (row.teamId > 0) row.teamId else JSONObject.NULL)
                         .put("format_name", row.course)
                         .put("marks", marks)
-                        .put("path", JSONArray())
+                        .put("path", path)
+                        .put("distance_m", distanceM ?: JSONObject.NULL)
                         .put("added_cps", JSONObject()),
                 )
                 return sourceId
@@ -1189,7 +1362,10 @@ class EventStore(
                 .put("award_groups", groups)
                 .put("participants", participants)
                 .put("results", results)
-                .put("map_points", JSONArray())
+                .put("map_points", mapPoints)
+                .put("meters_per_pixel", settings.metersPerPixel ?: JSONObject.NULL)
+                .put("map_width", settings.mapWidth ?: JSONObject.NULL)
+                .put("map_height", settings.mapHeight ?: JSONObject.NULL)
                 .toString()
         }
 

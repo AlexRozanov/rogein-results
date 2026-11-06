@@ -8410,6 +8410,10 @@ pub struct EventPack {
     pub map_points: Vec<EventPackMapPoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meters_per_pixel: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_width: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_height: Option<i32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub map_file_name: String,
 }
@@ -8599,6 +8603,13 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
         .and_then(|info| info.transform)
         .map(|t| t.meters_per_pixel)
         .filter(|v| v.is_finite() && *v > 0.0);
+    let (map_width, map_height) = load_map_image_size(conn)?;
+    let map_width = map_width
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v.round() as i32);
+    let map_height = map_height
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v.round() as i32);
     let map_file_name = get_setting_value(conn, "course_map_file_name")?
         .unwrap_or_default()
         .trim()
@@ -8624,6 +8635,8 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
         exclusions,
         map_points,
         meters_per_pixel,
+        map_width,
+        map_height,
         map_file_name,
     };
     Ok(EventPack {
@@ -8735,6 +8748,16 @@ fn event_pack_revision(pack: &EventPack) -> i64 {
         rule.to_cp.hash(&mut hasher);
         rule.max_leg_seconds.hash(&mut hasher);
     }
+    for point in &pack.map_points {
+        point.kind.hash(&mut hasher);
+        point.cp.hash(&mut hasher);
+        point.name.hash(&mut hasher);
+        point.map_x.to_bits().hash(&mut hasher);
+        point.map_y.to_bits().hash(&mut hasher);
+    }
+    pack.meters_per_pixel.map(f64::to_bits).hash(&mut hasher);
+    pack.map_width.hash(&mut hasher);
+    pack.map_height.hash(&mut hasher);
     hasher.finish() as i64
 }
 
@@ -11814,6 +11837,9 @@ mod tests {
         assert_eq!(pack.legends[0].cp, 31);
         assert_eq!(pack.award_groups[0].name, "МО");
         assert_eq!(pack.map_points[0].kind, "start");
+        assert_eq!(pack.map_width, Some(2000));
+        assert_eq!(pack.map_height, Some(1500));
+        assert_eq!(pack.meters_per_pixel, Some(1.5));
     }
 
     #[test]
@@ -11874,6 +11900,8 @@ mod tests {
             None,
         )
         .unwrap();
+        set_setting_value(&conn, "map_image_width", "2400").unwrap();
+        set_setting_value(&conn, "map_image_height", "1800").unwrap();
         let pack = build_event_pack(&conn, "Тестовый рогейн").unwrap();
         assert_eq!(pack.legends.len(), 2);
         assert_eq!(pack.legends[0].cp, 31);
@@ -11881,10 +11909,13 @@ mod tests {
         assert_eq!(pack.award_groups[0].name, "МО");
         assert_eq!(pack.award_groups[0].format_names, vec!["4ч".to_string()]);
         assert_eq!(pack.formats[0].controls, vec![31, 32]);
+        assert_eq!(pack.map_width, Some(2400));
+        assert_eq!(pack.map_height, Some(1800));
         let json = serde_json::to_string(&pack).unwrap();
         assert!(json.contains("\"awardGroups\""));
         assert!(json.contains("\"legends\""));
         assert!(json.contains("\"controls\""));
+        assert!(json.contains("\"mapWidth\""));
     }
 
     #[test]
