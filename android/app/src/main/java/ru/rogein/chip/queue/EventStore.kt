@@ -446,10 +446,17 @@ class EventStore(
     ): String {
         val slug = settings.slug.trim()
         val title = settings.title.trim()
-            val scored = score(items, people, courses, settings, corrections, exclusions)
-        if (scored.isEmpty()) error("Нет считанных результатов")
+        val scored = score(items, people, courses, settings, corrections, exclusions)
         val removed = removedCps(corrections)
-        val payload = buildPublishJson(settings, title, people, courses, scored, removed)
+        val payload = buildPublishJson(
+            settings,
+            title,
+            people,
+            courses,
+            scored,
+            removed,
+            requireResults = false,
+        )
         val url = "${normalizeBase(settings.apiBaseUrl)}/api/live/$slug"
         val (code, body) = request("PUT", url, payload, settings.publishToken)
         if (code == 409) error("этот старт уже в архиве сайта")
@@ -1273,6 +1280,7 @@ class EventStore(
             courses: List<StartCourse>,
             scored: List<ScoredResult>,
             removed: Set<Int>,
+            requireResults: Boolean = true,
         ): String {
             val groups = JSONArray()
             val results = JSONArray()
@@ -1362,7 +1370,9 @@ class EventStore(
                     )
                 }
             }
-            if (results.length() == 0) error("Нет результатов для публикации")
+            if (requireResults && results.length() == 0) {
+                error("Нет результатов для публикации")
+            }
             return JSONObject()
                 .put("title", title)
                 .put("competition_date", settings.competitionDate)

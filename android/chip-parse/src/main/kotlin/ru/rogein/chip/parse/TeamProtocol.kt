@@ -8,6 +8,18 @@ enum class TeamGroupPos {
     Only,
 }
 
+fun nextFreeTeamId(used: Collection<Int>): Int {
+    val blocked = HashSet<Int>(used.size)
+    for (id in used) {
+        if (id > 0) blocked.add(id)
+    }
+    var id = 1
+    while (id in blocked) {
+        id++
+    }
+    return id
+}
+
 fun teamGroupPos(teamId: Int, prevTeamId: Int, nextTeamId: Int): TeamGroupPos {
     if (teamId <= 0) return TeamGroupPos.None
     val samePrev = prevTeamId == teamId

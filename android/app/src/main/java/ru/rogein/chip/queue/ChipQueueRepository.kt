@@ -35,6 +35,7 @@ data class FinishCsvImportStats(
 class ChipQueueRepository(
     private val dao: ChipQueueDao,
     private val snapshot: ChipQueueSnapshotWriter,
+    private val appContext: Context,
     val startList: StartListStore,
     val event: EventStore,
     private val archive: StartArchiveStore,
@@ -49,6 +50,7 @@ class ChipQueueRepository(
     suspend fun applyRogaineEventPack(pack: EventPackFile, replace: Boolean): String {
         startList.applyEventPack(pack, replace)
         event.applyPackMeta(pack)
+        publishProtocolSnapshot()
         return eventPackLoadedMessage(pack)
     }
 
@@ -202,7 +204,24 @@ class ChipQueueRepository(
         )
     }
 
-    suspend fun republishSnapshot(): String? = publishSnapshot()
+    suspend fun republishSnapshot(): String? {
+        val queueError = publishSnapshot()
+        val protocolError = publishProtocolSnapshot()
+        return queueError ?: protocolError
+    }
+
+    suspend fun publishProtocolSnapshot(): String? {
+        return try {
+            RogeinDownloadJson.write(
+                appContext,
+                PROTOCOL_FILE_NAME,
+                startList.protocolSnapshotJson(),
+            )
+            null
+        } catch (e: Exception) {
+            e.message ?: "не удалось записать протокол"
+        }
+    }
 
     private suspend fun publishSnapshot(): String? {
         return try {
@@ -214,6 +233,8 @@ class ChipQueueRepository(
     }
 
     companion object {
+        const val PROTOCOL_FILE_NAME = "start-protocol.json"
+
         fun create(context: Context): ChipQueueRepository {
             val appContext = context.applicationContext
             val db = Room.databaseBuilder(
@@ -234,6 +255,7 @@ class ChipQueueRepository(
             return ChipQueueRepository(
                 db.dao(),
                 ChipQueueSnapshotWriter(appContext),
+                appContext,
                 StartListStore(appContext, db.startListDao()),
                 EventStore(appContext.filesDir, db.eventDao()),
                 StartArchiveStore(db),

@@ -7,6 +7,14 @@ class TeamProtocolTest {
     private data class P(val id: Int, val teamId: Int = 0)
 
     @Test
+    fun nextFreeTeamIdSkipsAssigned() {
+        assertEquals(1, nextFreeTeamId(emptyList()))
+        assertEquals(1, nextFreeTeamId(listOf(0, 0)))
+        assertEquals(2, nextFreeTeamId(listOf(1, 1, 3)))
+        assertEquals(3, nextFreeTeamId(listOf(1, 2)))
+    }
+
+    @Test
     fun individualsStayInChipOrder() {
         val rows = listOf(P(4), P(1), P(2))
         assertEquals(

@@ -5,6 +5,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -23,6 +26,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -86,6 +90,8 @@ import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipMemoryLog
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.isRogaine
+import ru.rogein.chip.parse.nextFreeLogicalId
+import ru.rogein.chip.parse.nextFreeTeamId
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
@@ -97,6 +103,7 @@ import kotlinx.coroutines.delay
 private val Green = Color(0xFF1B4D3E)
 private val Cream = Color(0xFFF4F1EA)
 private val Warn = Color(0xFF8A5A00)
+private val Danger = Color(0xFF8B3A3A)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -138,6 +145,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val newCourse by viewModel.newCourse.collectAsStateWithLifecycle()
     val newGender by viewModel.newGender.collectAsStateWithLifecycle()
     val newBirth by viewModel.newBirth.collectAsStateWithLifecycle()
+    val newTeamWith by viewModel.newTeamWith.collectAsStateWithLifecycle()
     val extraCourse by viewModel.extraCourse.collectAsStateWithLifecycle()
     val testCourse by viewModel.testCourse.collectAsStateWithLifecycle()
     val chipReady by viewModel.chipReady.collectAsStateWithLifecycle()
@@ -280,6 +288,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onStationProgram = viewModel::setStationProgram,
                     onStationControlNumber = viewModel::onStationControlNumber,
                     onDeleteQueued = viewModel::deleteQueued,
+                    liveReady = EventStore.liveReady(settings),
                     sportKind = settings.sportKind,
                     chipLog = chipMemoryLog,
                     chipStationLabel = chipStationLabel,
@@ -298,6 +307,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     newCourse = newCourse,
                     newGender = newGender,
                     newBirth = newBirth,
+                    newTeamWith = newTeamWith,
                     onQuery = viewModel::onQuery,
                     onSelect = hideKeyboardOnSelect,
                     onNew = viewModel::startNewPerson,
@@ -307,8 +317,10 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onNewCourse = viewModel::onNewCourse,
                     onNewGender = viewModel::onNewGender,
                     onNewBirth = viewModel::onNewBirth,
+                    onNewTeamWith = viewModel::onNewTeamWith,
                     onSavePerson = viewModel::saveManualPerson,
                     onDeletePerson = viewModel::deletePerson,
+                    onLeaveTeam = viewModel::leavePersonTeam,
                     onUsbProtocol = viewModel::loadUsbProtocol,
                     onUsbCourses = viewModel::loadUsbCourses,
                     onPickProtocol = { replace ->
@@ -677,6 +689,7 @@ private fun ChipSection(
     onStationProgram: (StationProgram) -> Unit,
     onStationControlNumber: (String) -> Unit,
     onDeleteQueued: (String) -> Unit,
+    liveReady: Boolean,
     sportKind: String,
     chipLog: ChipMemoryLog?,
     onShareChipLog: () -> Unit,
@@ -685,6 +698,8 @@ private fun ChipSection(
     modifier: Modifier = Modifier,
 ) {
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
+    val newTeamWith by viewModel.newTeamWith.collectAsStateWithLifecycle()
+    var confirmDelete by remember { mutableStateOf<QueuedChipEntity?>(null) }
     Column(modifier = modifier.fillMaxSize()) {
         ScrollableTabRow(
             selectedTabIndex = when (mode) {
@@ -720,6 +735,7 @@ private fun ChipSection(
             IssuePanel(
                 query = query,
                 people = viewModel.suggestions(),
+                roster = people,
                 items = items,
                 selected = selected,
                 selectedId = selectedId,
@@ -729,6 +745,7 @@ private fun ChipSection(
                 newName = newName,
                 newCourse = newCourse,
                 extraCourse = extraCourse,
+                newTeamWith = newTeamWith,
                 fillOpen = fillOpen,
                 sportKind = sportKind,
                 onQuery = viewModel::onQuery,
@@ -737,6 +754,7 @@ private fun ChipSection(
                 onNewNumber = viewModel::onNewNumber,
                 onNewName = viewModel::onNewName,
                 onNewCourse = viewModel::onNewCourse,
+                onNewTeamWith = viewModel::onNewTeamWith,
                 onCurrentCourse = viewModel::setCurrentCourse,
                 onExtraCourse = viewModel::onExtraCourse,
                 onAddCourse = viewModel::addSelectedCourse,
@@ -787,10 +805,38 @@ private fun ChipSection(
                     .weight(1f),
             ) {
                 items(items, key = { it.id }) { item ->
-                    SwipeFinishItem(item, onDelete = { onDeleteQueued(item.id) })
+                    SwipeFinishItem(item, onAskDelete = { confirmDelete = item })
                 }
             }
         }
+    }
+    confirmDelete?.let { item ->
+        val who = finishQueueWho(item)
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить из финиша?") },
+            text = {
+                Text(
+                    buildString {
+                        append("$who будет убран из финишного протокола.")
+                        if (liveReady) {
+                            append(" Запись также пропадёт из online на сайте.")
+                        }
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = null
+                        onDeleteQueued(item.id)
+                    },
+                ) { Text("Удалить", color = Danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = null }) { Text("Отмена") }
+            },
+        )
     }
 }
 
@@ -814,6 +860,7 @@ private fun topTitle(section: AppSection, morePage: MorePage, sportKind: String)
 private fun IssuePanel(
     query: String,
     people: List<StartPerson>,
+    roster: List<StartPerson>,
     items: List<QueuedChipEntity>,
     selected: StartPerson?,
     selectedId: Int?,
@@ -823,6 +870,7 @@ private fun IssuePanel(
     newName: String,
     newCourse: String,
     extraCourse: String,
+    newTeamWith: String,
     fillOpen: Boolean,
     sportKind: String = SPORT_ORIENT,
     onQuery: (String) -> Unit,
@@ -831,6 +879,7 @@ private fun IssuePanel(
     onNewNumber: (String) -> Unit,
     onNewName: (String) -> Unit,
     onNewCourse: (String) -> Unit,
+    onNewTeamWith: (String) -> Unit,
     onCurrentCourse: (String) -> Unit,
     onExtraCourse: (String) -> Unit,
     onAddCourse: () -> Unit,
@@ -846,6 +895,10 @@ private fun IssuePanel(
             keyboard?.show()
         }
     }
+    val usedIds = remember(roster) { roster.map { it.id }.toSet() }
+    val usedTeamIds = remember(roster) { roster.map { it.teamId } }
+    val nextChipId = nextFreeLogicalId(usedIds)
+    val nextTeamId = nextFreeTeamId(usedTeamIds)
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -854,7 +907,8 @@ private fun IssuePanel(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
                 value = newNumber,
@@ -867,15 +921,22 @@ private fun IssuePanel(
                 ),
                 keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
                 modifier = Modifier
-                    .weight(0.35f)
+                    .weight(0.28f)
                     .focusRequester(numberFocus),
             )
+            IconButton(
+                onClick = { nextChipId?.let { onNewNumber(it.toString()) } },
+                enabled = nextChipId != null,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Следующий свободный номер")
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = onQuery,
                 singleLine = true,
                 label = { Text("Фамилия") },
-                modifier = Modifier.weight(0.65f),
+                modifier = Modifier.weight(0.52f),
             )
         }
         val rogaine = isRogaine(sportKind)
@@ -910,6 +971,9 @@ private fun IssuePanel(
                     )
                     if (courses.isNotEmpty()) {
                         CourseChips(courseTitle, courses, newCourse, onNewCourse)
+                    }
+                    if (rogaine) {
+                        IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
                     }
                 }
             } else if (selected != null) {
@@ -955,6 +1019,21 @@ private fun IssuePanel(
                         )
                         CompactTextButton("Указать", onAddCourse, enabled = extraCourse.isNotBlank())
                     }
+                    if (rogaine) {
+                        val teamId = selected.teamId
+                        if (teamId > 0) {
+                            val mates = roster
+                                .filter { it.teamId == teamId && it.id != selected.id }
+                                .sortedBy { it.id }
+                                .joinToString(" · ") { "${it.id} ${it.displayName}" }
+                            Text(
+                                if (mates.isEmpty()) "Команда Т$teamId" else "Команда Т$teamId · $mates",
+                                color = Color(0xFF5C5C5C),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
+                    }
                     if (!rogaine && extras.isNotEmpty()) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -983,6 +1062,39 @@ private fun IssuePanel(
             onSelect = onSelect,
             modifier = Modifier.weight(1f),
         )
+    }
+}
+
+@Composable
+private fun IssueTeamField(value: String, onValue: (String) -> Unit, nextId: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValue,
+            singleLine = true,
+            label = { Text("№ команды") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Green)
+                .clickable { onValue(nextId.toString()) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = nextId.toString(),
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
     }
 }
 
@@ -1518,16 +1630,25 @@ private fun compactStatus(text: String): String {
     }
 }
 
+private fun finishQueueWho(item: QueuedChipEntity): String {
+    val name = item.personName.trim()
+    val num = item.logicalId?.let { "№ $it" }
+    return when {
+        name.isNotEmpty() && num != null -> "$num $name"
+        name.isNotEmpty() -> name
+        num != null -> num
+        else -> "участник без номера"
+    }
+}
+
 @Composable
-private fun SwipeFinishItem(item: QueuedChipEntity, onDelete: () -> Unit) {
+private fun SwipeFinishItem(item: QueuedChipEntity, onAskDelete: () -> Unit) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (value == SwipeToDismissBoxValue.EndToStart) {
-                onDelete()
-                true
-            } else {
-                false
+                onAskDelete()
             }
+            false
         },
     )
     SwipeToDismissBox(

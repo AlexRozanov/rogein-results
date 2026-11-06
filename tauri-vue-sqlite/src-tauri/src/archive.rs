@@ -407,3 +407,41 @@ pub fn pick_archive_file() -> Option<PathBuf> {
         .add_filter("ZIP", &["zip"])
         .pick_file()
 }
+
+pub fn with_rogein_extension(path: PathBuf) -> PathBuf {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
+        Some(ext) if ext == "rogein" || ext == "zip" => path,
+        _ => path.with_extension("rogein"),
+    }
+}
+
+pub fn pick_save_archive_file(suggested_stem: &str) -> Option<PathBuf> {
+    let file_name = if suggested_stem.to_ascii_lowercase().ends_with(".rogein") {
+        suggested_stem.to_string()
+    } else {
+        format!("{suggested_stem}.rogein")
+    };
+    rfd::FileDialog::new()
+        .add_filter("Архив старта Rogein", &["rogein"])
+        .set_file_name(&file_name)
+        .save_file()
+        .map(with_rogein_extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_rogein_extension;
+    use std::path::PathBuf;
+
+    #[test]
+    fn with_rogein_extension_keeps_and_adds() {
+        assert_eq!(
+            with_rogein_extension(PathBuf::from("/tmp/Старт_2026-08-02.rogein")),
+            PathBuf::from("/tmp/Старт_2026-08-02.rogein")
+        );
+        assert_eq!(
+            with_rogein_extension(PathBuf::from("/tmp/copy")),
+            PathBuf::from("/tmp/copy.rogein")
+        );
+    }
+}

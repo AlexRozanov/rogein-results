@@ -57,12 +57,24 @@ const emit = defineEmits<{
   saved: [];
 }>();
 
+type SortBy =
+  | "participant_id"
+  | "name"
+  | "format_name"
+  | "team_id"
+  | "gender"
+  | "birth_date"
+  | "has_result";
+type SortDir = "asc" | "desc";
+
 const rows = ref<StartProtocolRow[]>([]);
 const totalCount = ref(0);
 const search = ref("");
 const formatFilterId = ref<string>("");
 const onlyIncomplete = ref(false);
 const onlyMissingFormat = ref(false);
+const sortBy = ref<SortBy>("participant_id");
+const sortDir = ref<SortDir>("asc");
 const protocolFile = ref<File | null>(null);
 const importDialogOpen = ref(false);
 const importExistingCount = ref(0);
@@ -191,16 +203,42 @@ async function sendToPhone() {
   }
 }
 
+function protocolQuery(offset = pageOffset.value) {
+  return {
+    limit: pageSize.value,
+    offset,
+    search: search.value.trim() || null,
+    formatId: formatFilterId.value ? Number(formatFilterId.value) : null,
+    onlyIncomplete: onlyIncomplete.value,
+    onlyMissingFormat: onlyMissingFormat.value,
+    sortBy: sortBy.value,
+    sortDir: sortDir.value,
+  };
+}
+
+function sortMark(column: SortBy) {
+  if (sortBy.value !== column) return "";
+  return sortDir.value === "asc" ? " ▲" : " ▼";
+}
+
+function defaultSortDir(column: SortBy): SortDir {
+  return column === "has_result" ? "desc" : "asc";
+}
+
+async function onSortChanged(column: SortBy) {
+  if (sortBy.value === column) {
+    sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
+  } else {
+    sortBy.value = column;
+    sortDir.value = defaultSortDir(column);
+  }
+  pageOffset.value = 0;
+  await refresh();
+}
+
 async function refresh() {
   try {
-    const response = await invoke<StartProtocolResponse>("get_start_protocol", {
-      limit: pageSize.value,
-      offset: pageOffset.value,
-      search: search.value.trim() || null,
-      formatId: formatFilterId.value ? Number(formatFilterId.value) : null,
-      onlyIncomplete: onlyIncomplete.value,
-      onlyMissingFormat: onlyMissingFormat.value,
-    });
+    const response = await invoke<StartProtocolResponse>("get_start_protocol", protocolQuery());
     rows.value = response.rows;
     totalCount.value = response.total_count;
     pageOffset.value = response.offset;
@@ -208,14 +246,10 @@ async function refresh() {
       const lastPageOffset = Math.max(0, (Math.ceil(totalCount.value / pageSize.value) - 1) * pageSize.value);
       if (lastPageOffset !== pageOffset.value) {
         pageOffset.value = lastPageOffset;
-        const retry = await invoke<StartProtocolResponse>("get_start_protocol", {
-          limit: pageSize.value,
-          offset: pageOffset.value,
-          search: search.value.trim() || null,
-          formatId: formatFilterId.value ? Number(formatFilterId.value) : null,
-          onlyIncomplete: onlyIncomplete.value,
-          onlyMissingFormat: onlyMissingFormat.value,
-        });
+        const retry = await invoke<StartProtocolResponse>(
+          "get_start_protocol",
+          protocolQuery(pageOffset.value),
+        );
         rows.value = retry.rows;
         totalCount.value = retry.total_count;
         pageOffset.value = retry.offset;
@@ -911,14 +945,38 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
               />
             </th>
             <th v-if="!props.isOrient" class="team-brace-col" title="Группировка команды"></th>
-            <th>Номер</th>
-            <th>Имя</th>
-            <th>{{ props.isOrient ? "Дистанция" : "Формат" }}</th>
+            <th class="sortable-col" @click="onSortChanged('participant_id')">
+              Номер{{ sortMark("participant_id") }}
+            </th>
+            <th class="sortable-col" @click="onSortChanged('name')">Имя{{ sortMark("name") }}</th>
+            <th class="sortable-col" @click="onSortChanged('format_name')">
+              {{ props.isOrient ? "Дистанция" : "Формат" }}{{ sortMark("format_name") }}
+            </th>
             <th v-if="props.isOrient">Все дистанции</th>
-            <th v-if="!props.isOrient">Команда</th>
-            <th v-if="!props.isOrient">Пол</th>
-            <th v-if="!props.isOrient">Дата рождения</th>
-            <th>Есть в результатах</th>
+            <th
+              v-if="!props.isOrient"
+              class="sortable-col"
+              @click="onSortChanged('team_id')"
+            >
+              Команда{{ sortMark("team_id") }}
+            </th>
+            <th
+              v-if="!props.isOrient"
+              class="sortable-col"
+              @click="onSortChanged('gender')"
+            >
+              Пол{{ sortMark("gender") }}
+            </th>
+            <th
+              v-if="!props.isOrient"
+              class="sortable-col"
+              @click="onSortChanged('birth_date')"
+            >
+              Дата рождения{{ sortMark("birth_date") }}
+            </th>
+            <th class="sortable-col" @click="onSortChanged('has_result')">
+              Есть в результатах{{ sortMark("has_result") }}
+            </th>
             <th>Действие</th>
           </tr>
         </thead>

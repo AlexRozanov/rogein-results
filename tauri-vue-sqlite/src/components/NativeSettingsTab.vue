@@ -188,6 +188,26 @@ function closeSwitchDialog() {
   switchOverwrite.value = false;
 }
 
+async function exportCopy() {
+  localBusy.value = true;
+  try {
+    const suggested = await invoke<string>("suggest_finish_start_name");
+    const result = await invoke<{ title: string; archive_path: string } | null>(
+      "export_current_start",
+      { suggestedName: suggested },
+    );
+    if (!result) return;
+    emit(
+      "status",
+      `Копия «${result.title}» записана в ${result.archive_path}. Рабочая база не очищена.`,
+    );
+  } catch (error) {
+    emit("status", `Ошибка сохранения копии: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
 async function onWorkspaceReset() {
   await refresh();
   emit("workspaceReset");
@@ -202,7 +222,10 @@ async function onWorkspaceReset() {
       :busy="props.busy || localBusy"
       @status="emit('status', $event)"
     />
-    <div class="native-row" style="margin-top: 16px">
+    <div class="native-row" style="margin-top: 16px; flex-wrap: wrap">
+      <button type="button" :disabled="isBusy" @click="exportCopy">
+        Сохранить копию…
+      </button>
       <button type="button" :disabled="isBusy" @click="emit('finishStart')">
         Завершить старт
       </button>

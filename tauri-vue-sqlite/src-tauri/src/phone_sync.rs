@@ -32,6 +32,19 @@ const EVENT_PACK_PATHS: &[&str] = &[
     "/storage/emulated/0/Download/rogein/event-pack.json",
 ];
 
+const PROTOCOL_RUN_AS: &[&str] = &[
+    "files/start-protocol.json",
+    "/sdcard/Android/data/ru.rogein.chip/files/start-protocol.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/start-protocol.json",
+];
+
+const PROTOCOL_PATHS: &[&str] = &[
+    "/sdcard/Android/data/ru.rogein.chip/files/start-protocol.json",
+    "/storage/emulated/0/Android/data/ru.rogein.chip/files/start-protocol.json",
+    "/sdcard/Download/rogein/start-protocol.json",
+    "/storage/emulated/0/Download/rogein/start-protocol.json",
+];
+
 pub struct PhoneSnapshotRead {
     pub serial: String,
     pub path: String,
@@ -50,7 +63,17 @@ pub fn try_read_phone_snapshot() -> Result<Option<PhoneSnapshotRead>, String> {
     let Ok(serial) = connected_serial(&adb) else {
         return Ok(None);
     };
-    read_snapshot_body(&adb, &serial)
+    read_json_body(&adb, &serial, SNAPSHOT_RUN_AS, SNAPSHOT_PATHS)
+}
+
+pub fn try_read_phone_protocol() -> Result<Option<PhoneSnapshotRead>, String> {
+    let Ok(adb) = locate_adb() else {
+        return Ok(None);
+    };
+    let Ok(serial) = connected_serial(&adb) else {
+        return Ok(None);
+    };
+    read_json_body(&adb, &serial, PROTOCOL_RUN_AS, PROTOCOL_PATHS)
 }
 
 pub fn phone_is_ready() -> bool {
@@ -63,14 +86,19 @@ pub fn phone_is_ready() -> bool {
 pub fn read_phone_snapshot() -> Result<PhoneSnapshotRead, String> {
     let adb = locate_adb()?;
     let serial = connected_serial(&adb)?;
-    read_snapshot_body(&adb, &serial)?.ok_or_else(|| {
+    read_json_body(&adb, &serial, SNAPSHOT_RUN_AS, SNAPSHOT_PATHS)?.ok_or_else(|| {
         "На телефоне нет снимка очереди (chip-queue.json). Считайте финиш в приложении и не закрывайте его."
             .to_string()
     })
 }
 
-fn read_snapshot_body(adb: &Path, serial: &str) -> Result<Option<PhoneSnapshotRead>, String> {
-    for rel in SNAPSHOT_RUN_AS {
+fn read_json_body(
+    adb: &Path,
+    serial: &str,
+    run_as: &[&str],
+    paths: &[&str],
+) -> Result<Option<PhoneSnapshotRead>, String> {
+    for rel in run_as {
         match cat_run_as(adb, serial, rel) {
             Ok(Some(body)) => {
                 return Ok(Some(PhoneSnapshotRead {
@@ -82,7 +110,7 @@ fn read_snapshot_body(adb: &Path, serial: &str) -> Result<Option<PhoneSnapshotRe
             Ok(None) | Err(_) => {}
         }
     }
-    for path in SNAPSHOT_PATHS {
+    for path in paths {
         match cat_file(adb, serial, path) {
             Ok(Some(body)) => {
                 return Ok(Some(PhoneSnapshotRead {

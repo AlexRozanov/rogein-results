@@ -140,6 +140,7 @@ import ru.rogein.chip.parse.classifyActualPunches
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.courseProgress
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.nextFreeTeamId
 import ru.rogein.chip.parse.formatDayClock
 import ru.rogein.chip.parse.formatElapsed
 import ru.rogein.chip.parse.orientPunchWindow
@@ -613,6 +614,7 @@ fun ProtocolScreen(
     newCourse: String,
     newGender: String = "",
     newBirth: String = "",
+    newTeamWith: String = "",
     onQuery: (String) -> Unit,
     onSelect: (Int) -> Unit,
     onNew: () -> Unit,
@@ -622,8 +624,10 @@ fun ProtocolScreen(
     onNewCourse: (String) -> Unit,
     onNewGender: (String) -> Unit = {},
     onNewBirth: (String) -> Unit = {},
+    onNewTeamWith: (String) -> Unit = {},
     onSavePerson: () -> Unit,
     onDeletePerson: (Int) -> Unit,
+    onLeaveTeam: () -> Unit = {},
     onUsbProtocol: (Boolean) -> Unit,
     onUsbCourses: (Boolean) -> Unit,
     onPickProtocol: (Boolean) -> Unit,
@@ -653,6 +657,7 @@ fun ProtocolScreen(
 ) {
     var pane by remember { mutableStateOf(if (courseCheckOn) ProtocolPane.Check else ProtocolPane.People) }
     var confirmDelete by remember { mutableStateOf<StartPerson?>(null) }
+    var confirmLeave by remember { mutableStateOf<StartPerson?>(null) }
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
     val editorOpen = pane == ProtocolPane.People && !searching && (addingNew || selected != null)
@@ -726,6 +731,7 @@ fun ProtocolScreen(
                 newCourse = newCourse,
                 newGender = newGender,
                 newBirth = newBirth,
+                newTeamWith = newTeamWith,
                 competitionDate = competitionDate,
                 awardGroups = awardGroups,
                 rogaine = rogaine,
@@ -734,8 +740,14 @@ fun ProtocolScreen(
                 onNewCourse = onNewCourse,
                 onNewGender = onNewGender,
                 onNewBirth = onNewBirth,
+                onNewTeamWith = onNewTeamWith,
                 onSavePerson = onSavePerson,
                 onClose = onClearSelection,
+                onLeaveTeam = if (selected != null && !addingNew && (selected.teamId > 0)) {
+                    { confirmLeave = selected }
+                } else {
+                    null
+                },
                 onDelete = if (selected != null && !addingNew) {
                     { confirmDelete = selected }
                 } else {
@@ -1062,6 +1074,28 @@ fun ProtocolScreen(
         }
         }
     }
+    confirmLeave?.let { person ->
+        AlertDialog(
+            onDismissRequest = { confirmLeave = null },
+            title = { Text("Выйти из команды Т${person.teamId}?") },
+            text = {
+                Text(
+                    "${person.displayName.ifBlank { "№ ${person.id}" }} останется в протоколе, но без команды.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmLeave = null
+                        onLeaveTeam()
+                    },
+                ) { Text("Выйти", color = Danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLeave = null }) { Text("Отмена") }
+            },
+        )
+    }
     confirmDelete?.let { person ->
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
@@ -1165,6 +1199,7 @@ private fun ProtocolPersonEditor(
     newCourse: String,
     newGender: String,
     newBirth: String,
+    newTeamWith: String,
     competitionDate: String,
     awardGroups: List<AwardGroupView>,
     rogaine: Boolean,
@@ -1173,8 +1208,10 @@ private fun ProtocolPersonEditor(
     onNewCourse: (String) -> Unit,
     onNewGender: (String) -> Unit,
     onNewBirth: (String) -> Unit,
+    onNewTeamWith: (String) -> Unit,
     onSavePerson: () -> Unit,
     onClose: () -> Unit,
+    onLeaveTeam: (() -> Unit)? = null,
     onDelete: (() -> Unit)?,
     numberFocus: FocusRequester,
 ) {
@@ -1247,6 +1284,45 @@ private fun ProtocolPersonEditor(
             )
             if (rogaine) {
                 val teamId = selected?.teamId ?: 0
+                val nextTeamId = nextFreeTeamId(people.map { it.teamId })
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = newTeamWith,
+                        onValueChange = onNewTeamWith,
+                        singleLine = true,
+                        label = { Text("№ команды") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(OkGreen)
+                            .clickable { onNewTeamWith(nextTeamId.toString()) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = nextTeamId.toString(),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
+                }
+                Text(
+                    "Одинаковый номер команды связывает участников. Сохраните карточку.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 if (!addingNew && teamId > 0) {
                     val mates = people
                         .filter { it.teamId == teamId && it.id != selected?.id }
@@ -1257,6 +1333,9 @@ private fun ProtocolPersonEditor(
                         color = Muted,
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    if (onLeaveTeam != null) {
+                        CompactTextButton("Выйти из команды", onLeaveTeam, Danger)
+                    }
                 }
                 RogainePersonFields(
                     gender = newGender,

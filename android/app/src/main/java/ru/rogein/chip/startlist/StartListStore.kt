@@ -18,6 +18,8 @@ import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.SPORT_ROGAINE
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.normalizeSportKind
+import ru.rogein.chip.parse.StartProtocolSnapshotPerson
+import ru.rogein.chip.parse.buildStartProtocolSnapshotJson
 import ru.rogein.chip.parse.parseEventPackJson
 import ru.rogein.chip.queue.StartCourseEntity
 import ru.rogein.chip.queue.StartListDao
@@ -88,7 +90,6 @@ class StartListStore(
 
     suspend fun applyEventPack(pack: EventPackFile, replace: Boolean) {
         if (replace) {
-            dao.clearPeople()
             dao.clearCourses()
             dao.clearMeta()
         }
@@ -129,7 +130,7 @@ class StartListStore(
                 )
             },
         )
-        applyPeople(peoplePack, replace = false)
+        applyPeople(peoplePack, replace)
     }
 
     suspend fun loadCoursesFromUsb(replace: Boolean): String {
@@ -174,8 +175,13 @@ class StartListStore(
     }
 
     private suspend fun applyPeople(pack: StartPack, replace: Boolean) {
+        val packIds = pack.people.map { it.id }.toSet()
         if (replace) {
-            dao.clearPeople()
+            for (person in dao.listPeople()) {
+                if (person.origin != ORIGIN_PHONE && person.logicalId !in packIds) {
+                    dao.deletePerson(person.logicalId)
+                }
+            }
             dao.clearMeta()
         }
         val meta = dao.meta()
@@ -196,7 +202,7 @@ class StartListStore(
             dao.upsertPerson(
                 StartPersonEntity(
                     logicalId = person.id,
-                    name = person.name,
+                    name = person.name.ifBlank { local?.name.orEmpty() },
                     currentCourse = current,
                     coursesJson = JSONArray(union.toList()).toString(),
                     origin = ORIGIN_DESKTOP,
@@ -205,7 +211,7 @@ class StartListStore(
                     issuedCourse = local?.issuedCourse.orEmpty(),
                     gender = person.gender.ifBlank { local?.gender.orEmpty() },
                     birthDate = person.birthDate.ifBlank { local?.birthDate.orEmpty() },
-                    teamId = person.teamId,
+                    teamId = if (person.teamId > 0) person.teamId else local?.teamId ?: 0,
                 ),
             )
         }
@@ -447,6 +453,66 @@ class StartListStore(
                 teamId = existing?.teamId ?: 0,
             ),
         )
+    }
+
+    suspend fun joinTeam(id: Int, otherId: Int): Int {
+        if (id == otherId) error("Нужен другой номер для команды")
+        if (id !in 1..MAX_LOGICAL_ID || otherId !in 1..MAX_LOGICAL_ID) {
+            error("Номер чипа вне 1…$MAX_LOGICAL_ID")
+        }
+        val first = dao.person(id) ?: error("№ $id нет в протоколе")
+        val second = dao.person(otherId) ?: error("№ $otherId нет в протоколе")
+        val teamId = when {
+            first.teamId > 0 && second.teamId > 0 -> minOf(first.teamId, second.teamId).also { keep ->
+                val drop = maxOf(first.teamId, second.teamId)
+                if (keep != drop) {
+                    for (person in dao.listPeople()) {
+                        if (person.teamId == drop) {
+                            dao.upsertPerson(person.copy(teamId = keep))
+                        }
+                    }
+                }
+            }
+            first.teamId > 0 -> first.teamId
+            second.teamId > 0 -> second.teamId
+            else -> (dao.listPeople().maxOfOrNull { it.teamId } ?: 0) + 1
+        }
+        if (first.teamId != teamId) dao.upsertPerson(first.copy(teamId = teamId))
+        val secondNow = dao.person(otherId) ?: second
+        if (secondNow.teamId != teamId) dao.upsertPerson(secondNow.copy(teamId = teamId))
+        return teamId
+    }
+
+    suspend fun assignTeam(id: Int, teamId: Int): Int {
+        if (teamId <= 0) error("Номер команды должен быть больше 0")
+        val person = dao.person(id) ?: error("№ $id нет в протоколе")
+        if (person.teamId != teamId) {
+            dao.upsertPerson(person.copy(teamId = teamId))
+        }
+        return teamId
+    }
+
+    suspend fun leaveTeam(id: Int): Int {
+        val person = dao.person(id) ?: error("№ $id нет в протоколе")
+        if (person.teamId <= 0) return 0
+        val teamId = person.teamId
+        dao.upsertPerson(person.copy(teamId = 0))
+        return teamId
+    }
+
+    suspend fun protocolSnapshotJson(): String {
+        val people = dao.listPeople().map { person ->
+            StartProtocolSnapshotPerson(
+                id = person.logicalId,
+                name = person.name,
+                format = person.currentCourse,
+                gender = person.gender,
+                birthDate = person.birthDate,
+                teamId = person.teamId,
+                origin = person.origin,
+            )
+        }
+        return buildStartProtocolSnapshotJson(people)
     }
 
     suspend fun markIssued(id: Int, course: String = "") {

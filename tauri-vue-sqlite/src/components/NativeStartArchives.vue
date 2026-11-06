@@ -185,16 +185,38 @@ async function pickAndOpen() {
   }
 }
 
+async function exportCopy() {
+  localBusy.value = true;
+  try {
+    const suggested = await invoke<string>("suggest_finish_start_name");
+    const result = await invoke<ArchiveActionResult | null>("export_current_start", {
+      suggestedName: suggested,
+    });
+    if (!result) return;
+    emit(
+      "status",
+      `Копия «${result.title}» записана в ${result.archive_path}. Рабочая база не очищена.`,
+    );
+    await refresh();
+  } catch (error) {
+    emit("status", `Ошибка сохранения копии: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
 defineExpose({ refresh });
 </script>
 
 <template>
   <CollapsiblePanel panel-id="archives" title="Архивы стартов">
     <p class="subtitle">
-      «Завершить старт» сохраняет все данные в файл
+      «Сохранить копию» записывает файл
       <code>.rogein</code>
-      и очищает рабочую базу. Архивы из папки программы можно открыть из списка;
-      также можно выбрать файл с другого диска или компьютера.
+      (на флешку или диск) и оставляет текущую работу как есть — так можно перенести старт
+      на ноутбук. «Завершить старт» тоже пишет
+      <code>.rogein</code>, но очищает рабочую базу. Архивы из папки программы открываются
+      из списка; файл с другого диска — через «Выбрать файл…».
     </p>
     <p v-if="archivesDir" class="subtitle">Папка архивов: {{ archivesDir }}</p>
     <p v-if="activeArchive" class="subtitle">
@@ -204,6 +226,9 @@ defineExpose({ refresh });
     </p>
 
     <div class="native-row" style="flex-wrap: wrap">
+      <button type="button" :disabled="isBusy" @click="exportCopy">
+        Сохранить копию…
+      </button>
       <button type="button" :disabled="isBusy" @click="openFinishDialog">
         Завершить старт
       </button>

@@ -42,6 +42,18 @@ const val CP_START = 241
 const val CP_CLEAR = 243
 const val MAX_LOGICAL_ID = 39_999
 
+fun nextFreeLogicalId(used: Collection<Int>, vararg extraUsed: Int): Int? {
+    val blocked = HashSet<Int>(used.size + extraUsed.size)
+    blocked.addAll(used)
+    for (id in extraUsed) {
+        if (id > 0) blocked.add(id)
+    }
+    for (id in 1..MAX_LOGICAL_ID) {
+        if (id !in blocked) return id
+    }
+    return null
+}
+
 enum class StationCommand {
     Control,
     Start,

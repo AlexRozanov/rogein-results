@@ -35,6 +35,8 @@ type PhoneReadSummary = {
   skipped_empty: number;
   participants_count: number;
   results_count: number;
+  protocol_added?: number;
+  protocol_updated?: number;
   snapshot_deleted: boolean;
   snapshot_note: string;
 };
@@ -375,9 +377,16 @@ function formatPhoneSummary(summary: PhoneReadSummary): string {
   const skipped =
     summary.skipped_empty > 0 ? ` без отметок пропущены ${summary.skipped_empty}.` : "";
   const updated = summary.updated > 0 ? ` обновлены ${summary.updated},` : "";
+  const protocolAdded = summary.protocol_added ?? 0;
+  const protocolUpdated = summary.protocol_updated ?? 0;
+  const protocol =
+    protocolAdded > 0 || protocolUpdated > 0
+      ? ` Протокол: +${protocolAdded}, обновлены ${protocolUpdated}.`
+      : "";
   return (
-    `С телефона: новых ${summary.imported},${updated} уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped} ` +
-    `Участников ${summary.participants_count}, результатов ${summary.results_count}.${extra}`
+    `С телефона: новых ${summary.imported},${updated} уже были ${summary.already_imported}, без человека в протоколе ${summary.unmatched}.${skipped}` +
+    protocol +
+    ` Участников ${summary.participants_count}, результатов ${summary.results_count}.${extra}`
   );
 }
 
@@ -480,7 +489,13 @@ async function pollPhoneUsb() {
   phonePollInFlight = true;
   try {
     const result = await invoke<PhonePollResult>("poll_phone_usb");
-    if (result.imported > 0 || result.updated > 0 || result.unmatched > 0) {
+    if (
+      result.imported > 0 ||
+      result.updated > 0 ||
+      result.unmatched > 0 ||
+      (result.protocol_added ?? 0) > 0 ||
+      (result.protocol_updated ?? 0) > 0
+    ) {
       nativeStatus.value = formatPhoneSummary(result);
       pageOffset.value = 0;
       await refreshNativeData();

@@ -46,6 +46,8 @@ struct PhoneReadSummary {
     skipped_empty: i64,
     participants_count: i64,
     results_count: i64,
+    protocol_added: i64,
+    protocol_updated: i64,
     snapshot_deleted: bool,
     snapshot_note: String,
 }
@@ -61,6 +63,8 @@ struct PhonePollResult {
     skipped_empty: i64,
     participants_count: i64,
     results_count: i64,
+    protocol_added: i64,
+    protocol_updated: i64,
     snapshot_deleted: bool,
     snapshot_note: String,
 }
@@ -435,6 +439,47 @@ fn pick_start_archive_file() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn export_current_start(
+    state: State<'_, AppState>,
+    suggested_name: Option<String>,
+) -> Result<Option<ArchiveActionResult>, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let counts = domain::get_data_presence_counts(&conn)?;
+    if counts.finish_participants <= 0
+        && counts.start_protocol <= 0
+        && counts.cp_legends <= 0
+        && counts.courses <= 0
+    {
+        return Err("Нечего сохранять: рабочая база пуста.".into());
+    }
+    let settings = domain::get_settings(&conn)?;
+    drop(conn);
+    let suggested = suggested_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| archive::default_archive_title(&settings.competition_date));
+    let stem = archive::sanitize_archive_stem(&suggested).unwrap_or(suggested);
+    let Some(archive_path) = archive::pick_save_archive_file(&stem) else {
+        return Ok(None);
+    };
+    let title = archive_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&stem)
+        .to_string();
+    let map_path = course_map_path(&state);
+    let manifest = archive::create_start_archive(&state.db_path, &map_path, &archive_path, &title)?;
+    Ok(Some(ArchiveActionResult {
+        archive_path: archive_path.to_string_lossy().to_string(),
+        title: manifest.title,
+        cleared: false,
+    }))
+}
+
+#[tauri::command]
 fn import_csv_content(
     state: State<'_, AppState>,
     csv_content: String,
@@ -460,6 +505,8 @@ fn phone_read_from_import(
         skipped_empty: summary.skipped_empty,
         participants_count: summary.participants_count,
         results_count: summary.results_count,
+        protocol_added: summary.protocol_added,
+        protocol_updated: summary.protocol_updated,
         snapshot_deleted: deleted.deleted,
         snapshot_note: deleted.note,
     }
@@ -476,6 +523,8 @@ fn empty_phone_poll() -> PhonePollResult {
         skipped_empty: 0,
         participants_count: 0,
         results_count: 0,
+        protocol_added: 0,
+        protocol_updated: 0,
         snapshot_deleted: false,
         snapshot_note: String::new(),
     }
@@ -544,16 +593,54 @@ fn remember_pack_body(state: &AppState, body: String) -> Result<(), String> {
     Ok(())
 }
 
+fn import_phone_payloads(
+    conn: &mut rusqlite::Connection,
+    protocol_body: Option<&str>,
+    queue_body: Option<&str>,
+) -> Result<PhoneImportSummary, String> {
+    let (protocol_added, protocol_updated) = if let Some(body) = protocol_body {
+        domain::import_phone_protocol(conn, body)?
+    } else {
+        (0, 0)
+    };
+    let mut summary = if let Some(body) = queue_body {
+        domain::import_phone_snapshot(conn, body)?
+    } else {
+        domain::phone_import_summary(conn, 0, 0, 0, 0, 0)?
+    };
+    summary.protocol_added = protocol_added;
+    summary.protocol_updated = protocol_updated;
+    Ok(summary)
+}
+
 #[tauri::command]
 fn import_phone_snapshot(state: State<'_, AppState>) -> Result<PhoneReadSummary, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    let read = phone_sync::read_phone_snapshot()?;
+    let protocol = phone_sync::try_read_phone_protocol()?;
+    let queue = phone_sync::try_read_phone_snapshot()?;
+    if protocol.is_none() && queue.is_none() {
+        return Err(
+            "На телефоне нет снимка протокола (start-protocol.json) и очереди (chip-queue.json)."
+                .to_string(),
+        );
+    }
     let mut conn = domain::open_and_init_db(&state.db_path)?;
-    let summary: PhoneImportSummary = domain::import_phone_snapshot(&mut conn, &read.body)?;
-    let deleted = phone_sync::delete_snapshot_if_unchanged(&read)?;
+    let summary = import_phone_payloads(
+        &mut conn,
+        protocol.as_ref().map(|read| read.body.as_str()),
+        queue.as_ref().map(|read| read.body.as_str()),
+    )?;
+    let deleted = if let Some(read) = queue.as_ref() {
+        phone_sync::delete_snapshot_if_unchanged(read)?
+    } else {
+        phone_sync::SnapshotDelete {
+            deleted: false,
+            note: String::new(),
+        }
+    };
     Ok(phone_read_from_import(summary, deleted))
 }
 
@@ -566,23 +653,31 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
+    let protocol = phone_sync::try_read_phone_protocol()?;
+    let queue = phone_sync::try_read_phone_snapshot()?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let summary = import_phone_payloads(
+        &mut conn,
+        protocol.as_ref().map(|read| read.body.as_str()),
+        queue.as_ref().map(|read| read.body.as_str()),
+    )?;
     let pack_pushed = match push_start_pack_if_needed(&state, false) {
         Ok(Some(_)) => true,
         Ok(None) => false,
         Err(_) => false,
     };
-    let Some(read) = phone_sync::try_read_phone_snapshot()? else {
-        return Ok(PhonePollResult {
-            pack_pushed,
-            ..empty_phone_poll()
-        });
+    let deleted = if let Some(read) = queue.as_ref() {
+        phone_sync::delete_snapshot_if_unchanged(read)?
+    } else {
+        phone_sync::SnapshotDelete {
+            deleted: false,
+            note: String::new(),
+        }
     };
-    let mut conn = domain::open_and_init_db(&state.db_path)?;
-    let summary: PhoneImportSummary = domain::import_phone_snapshot(&mut conn, &read.body)?;
-    let deleted = phone_sync::delete_snapshot_if_unchanged(&read)?;
+    let pulled = protocol.is_some() || queue.is_some();
     let read_summary = phone_read_from_import(summary, deleted);
     Ok(PhonePollResult {
-        pulled: true,
+        pulled,
         pack_pushed,
         imported: read_summary.imported,
         updated: read_summary.updated,
@@ -591,6 +686,8 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         skipped_empty: read_summary.skipped_empty,
         participants_count: read_summary.participants_count,
         results_count: read_summary.results_count,
+        protocol_added: read_summary.protocol_added,
+        protocol_updated: read_summary.protocol_updated,
         snapshot_deleted: read_summary.snapshot_deleted,
         snapshot_note: read_summary.snapshot_note,
     })
@@ -857,6 +954,8 @@ fn get_start_protocol(
     format_id: Option<i64>,
     only_incomplete: Option<bool>,
     only_missing_format: Option<bool>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
 ) -> Result<StartProtocolResponse, String> {
     let _guard = state
         .db_lock
@@ -873,6 +972,8 @@ fn get_start_protocol(
         format_id,
         only_incomplete.unwrap_or(false),
         only_missing_format.unwrap_or(false),
+        sort_by,
+        sort_dir,
     )?;
     Ok(StartProtocolResponse {
         rows,
@@ -2034,6 +2135,7 @@ pub fn run() {
             get_active_start_archive,
             suggest_finish_start_name,
             finish_current_start,
+            export_current_start,
             open_start_archive,
             pick_start_archive_file,
             get_site_publish_settings,

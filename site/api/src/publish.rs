@@ -99,9 +99,6 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
     if payload.title.trim().is_empty() {
         bail!("title is required");
     }
-    if payload.participants.is_empty() {
-        bail!("participants must not be empty");
-    }
 
     let mut tx = pool.begin().await?;
     let existing = sqlx::query_as::<_, (i64, String)>(

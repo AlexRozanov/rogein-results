@@ -298,6 +298,9 @@ class ChipQueueViewModel(
     private val _newBirth = MutableStateFlow("")
     val newBirth = _newBirth.asStateFlow()
 
+    private val _newTeamWith = MutableStateFlow("")
+    val newTeamWith = _newTeamWith.asStateFlow()
+
     private val _extraCourse = MutableStateFlow("")
     val extraCourse = _extraCourse.asStateFlow()
 
@@ -521,9 +524,13 @@ class ChipQueueViewModel(
                 gender = storedPersonGender(_newGender.value),
                 birthDate = storedBirthDate(_newBirth.value),
             )
+            val teamNote = assignSavedPersonTeam(id)
+            runCatching { repository.publishProtocolSnapshot() }
             _addingNew.value = false
             _selectedId.value = null
+            _newTeamWith.value = ""
             _status.value = when {
+                teamNote != null -> teamNote
                 name.isNotEmpty() && existing?.name.isNullOrBlank() ->
                     "№ $id: ФИО сохранено"
                 savedCourse.isEmpty() ->
@@ -534,9 +541,49 @@ class ChipQueueViewModel(
         }
     }
 
+    private suspend fun assignSavedPersonTeam(id: Int): String? {
+        if (!isRogaine(settings.value.sportKind)) return null
+        val teamId = _newTeamWith.value.toIntOrNull() ?: return null
+        if (teamId <= 0) return null
+        repository.startList.assignTeam(id, teamId)
+        val mates = repository.startList.peopleNow()
+            .filter { it.teamId == teamId && it.id != id }
+            .sortedBy { it.id }
+            .joinToString(" · ") { "№ ${it.id}" }
+        return if (mates.isEmpty()) {
+            "№ $id в команде Т$teamId"
+        } else {
+            "№ $id в команде Т$teamId с $mates"
+        }
+    }
+
+    fun leavePersonTeam() {
+        if (!isRogaine(settings.value.sportKind)) return
+        val id = _selectedId.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val person = repository.startList.person(id) ?: return@launch
+            if (person.teamId <= 0) return@launch
+            val teamId = repository.startList.leaveTeam(id)
+            runCatching { repository.publishProtocolSnapshot() }
+            _newTeamWith.value = ""
+            _status.value = "№ $id вышел из команды Т$teamId"
+        }
+    }
+
+    private suspend fun nextUnissuedTeammate(issuedId: Int): Int? {
+        if (!isRogaine(settings.value.sportKind)) return null
+        val person = repository.startList.person(issuedId) ?: return null
+        if (person.teamId <= 0) return null
+        return repository.startList.peopleNow()
+            .filter { it.teamId == person.teamId && it.id != issuedId && !it.issued }
+            .minByOrNull { it.id }
+            ?.id
+    }
+
     fun deletePerson(id: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.startList.deletePerson(id)
+            runCatching { repository.publishProtocolSnapshot() }
             if (_selectedId.value == id) {
                 _selectedId.value = null
             }
@@ -817,6 +864,7 @@ class ChipQueueViewModel(
         _newCourse.value = person?.currentCourse.orEmpty()
         _newGender.value = personGenderChoice(person?.gender.orEmpty())
         _newBirth.value = displayBirthDate(person?.birthDate.orEmpty())
+        _newTeamWith.value = person?.teamId?.takeIf { it > 0 }?.toString().orEmpty()
         _testCourse.value = person?.currentCourse
             ?.takeIf { it.isNotBlank() }
             ?: person?.courses?.firstOrNull().orEmpty()
@@ -829,6 +877,7 @@ class ChipQueueViewModel(
         _query.value = ""
         _extraCourse.value = ""
         _testCourse.value = ""
+        _newTeamWith.value = ""
         promptStatus()
     }
 
@@ -841,6 +890,7 @@ class ChipQueueViewModel(
         _newCourse.value = courses.value.firstOrNull()?.name.orEmpty()
         _newGender.value = ""
         _newBirth.value = ""
+        _newTeamWith.value = ""
         if (_section.value != AppSection.Chip) {
             _query.value = ""
         }
@@ -877,11 +927,14 @@ class ChipQueueViewModel(
             _newCourse.value = person.currentCourse
             _newGender.value = personGenderChoice(person.gender)
             _newBirth.value = displayBirthDate(person.birthDate)
+            if (person.teamId > 0) {
+                _newTeamWith.value = person.teamId.toString()
+            }
         } else {
             _selectedId.value = null
             _addingNew.value = true
             _newName.value = ""
-            _newCourse.value = ""
+            _newCourse.value = courses.value.firstOrNull()?.name.orEmpty()
             _newGender.value = ""
             _newBirth.value = ""
         }
@@ -898,6 +951,10 @@ class ChipQueueViewModel(
 
     fun onNewBirth(value: String) {
         _newBirth.value = value
+    }
+
+    fun onNewTeamWith(value: String) {
+        _newTeamWith.value = value.filter { it.isDigit() }.take(5)
     }
 
     fun onNewCourse(value: String) {
@@ -1512,13 +1569,12 @@ class ChipQueueViewModel(
         try {
             io.issue(order, id, pointerEnd, chipBlockCount)
             repository.startList.upsertLocal(id, name, course)
+            val teamNote = assignSavedPersonTeam(id)
             repository.startList.markIssued(id, course)
-            _selectedId.value = null
-            _addingNew.value = false
+            runCatching { repository.publishProtocolSnapshot() }
+            val nextMate = nextUnissuedTeammate(id)
             _query.value = ""
-            _newNumber.value = ""
             _newName.value = ""
-            _newCourse.value = ""
             _newGender.value = ""
             _newBirth.value = ""
             _extraCourse.value = ""
@@ -1529,9 +1585,20 @@ class ChipQueueViewModel(
             val dist = course.ifBlank {
                 if (isRogaine(settings.value.sportKind)) "без формата" else "без дистанции"
             }
-            _status.value = "$who · $dist. Чип выдан."
+            val teamPart = teamNote?.let { " $it." } ?: ""
+            if (nextMate != null) {
+                _newNumber.value = nextMate.toString()
+                syncIssueNumber(nextMate.toString())
+                _status.value = "$who · $dist. Чип выдан.$teamPart Далее № $nextMate."
+            } else {
+                _selectedId.value = null
+                _addingNew.value = false
+                _newNumber.value = ""
+                _newCourse.value = ""
+                _status.value = "$who · $dist. Чип выдан.$teamPart"
+            }
             signalSuccess()
-            if (personNeedsFill(name, course)) {
+            if (shouldAskIssueFill(name, course) && nextMate == null) {
                 openIssueFill(id, name, course)
             }
         } catch (e: Exception) {
@@ -1735,6 +1802,11 @@ class ChipQueueViewModel(
 
     private fun personNeedsFill(name: String, course: String): Boolean =
         name.isBlank() || course.isBlank()
+
+    private fun shouldAskIssueFill(name: String, course: String): Boolean {
+        if (isRogaine(settings.value.sportKind)) return course.isBlank()
+        return personNeedsFill(name, course)
+    }
 
     private fun openIssueFill(id: Int, name: String, course: String) {
         _issueFillPrompt.value = IssueFillPrompt(id = id, name = name, course = course)
@@ -1974,6 +2046,7 @@ class ChipQueueViewModel(
     fun deleteQueued(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val snapshotError = repository.deleteQueued(id)
+            repository.requestLiveSend()
             _status.value = if (snapshotError == null) {
                 "Участник убран из финишного протокола."
             } else {

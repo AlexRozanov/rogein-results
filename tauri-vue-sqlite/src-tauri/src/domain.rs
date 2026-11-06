@@ -42,6 +42,10 @@ pub struct PhoneImportSummary {
     pub skipped_empty: i64,
     pub participants_count: i64,
     pub results_count: i64,
+    #[serde(default)]
+    pub protocol_added: i64,
+    #[serde(default)]
+    pub protocol_updated: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1869,6 +1873,29 @@ fn parse_logical_bib(raw: &str) -> Option<i64> {
     raw.parse().ok()
 }
 
+fn sql_is_numeric_bib(col: &str) -> String {
+    format!("(TRIM({col}) GLOB '[0-9]*' AND TRIM({col}) NOT GLOB '*[^0-9]*')")
+}
+
+fn sql_numeric_bib(col: &str) -> String {
+    let is_num = sql_is_numeric_bib(col);
+    format!("CASE WHEN {is_num} THEN CAST(TRIM({col}) AS INTEGER) END")
+}
+
+/// Numeric chip/bib order: 1, 2, 10 — not 1, 10, 2. Non-numeric values follow.
+fn sql_bib_order(col: &str, dir: &str) -> String {
+    let dir_sql = if dir.eq_ignore_ascii_case("desc") {
+        "DESC"
+    } else {
+        "ASC"
+    };
+    let is_num = sql_is_numeric_bib(col);
+    let numeric = sql_numeric_bib(col);
+    format!(
+        "CASE WHEN {is_num} THEN 0 ELSE 1 END ASC, {numeric} {dir_sql}, TRIM({col}) COLLATE NOCASE {dir_sql}"
+    )
+}
+
 fn bib_match_key(raw: &str) -> String {
     parse_logical_bib(raw)
         .map(|n| n.to_string())
@@ -2018,7 +2045,7 @@ fn load_phone_import_ids(conn: &Connection) -> Result<HashSet<String>, String> {
     Ok(ids)
 }
 
-fn phone_import_summary(
+pub fn phone_import_summary(
     conn: &Connection,
     imported: i64,
     updated: i64,
@@ -2040,7 +2067,308 @@ fn phone_import_summary(
         skipped_empty,
         participants_count,
         results_count,
+        protocol_added: 0,
+        protocol_updated: 0,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct PhoneProtocolFile {
+    #[serde(default)]
+    people: Vec<PhoneProtocolPerson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhoneProtocolPerson {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default, alias = "formatName", alias = "currentCourse", alias = "course")]
+    format: String,
+    #[serde(default)]
+    gender: String,
+    #[serde(default, alias = "birthDate", alias = "birth")]
+    birth_date: String,
+    #[serde(default, alias = "teamId")]
+    team_id: Option<i64>,
+}
+
+pub fn import_phone_protocol(
+    conn: &mut Connection,
+    body: &str,
+) -> Result<(i64, i64), String> {
+    let file: PhoneProtocolFile = serde_json::from_str(body)
+        .map_err(|e| format!("снимок протокола повреждён: {e}"))?;
+    let mut added = 0_i64;
+    let mut updated = 0_i64;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("start protocol snapshot transaction: {e}"))?;
+    let mut changed = false;
+    for person in &file.people {
+        let id = person.id;
+        if id <= 0 {
+            continue;
+        }
+        let bib = id.to_string();
+        let phone_name = person.name.trim();
+        let phone_format = person.format.trim();
+        let phone_gender = person.gender.trim();
+        let (phone_birth_raw, phone_birth_iso) = parse_phone_birth(&person.birth_date);
+        match find_protocol_by_bib_tx(&tx, &bib)? {
+            None => {
+                let (format_id, format_name) = if phone_format.is_empty() {
+                    (None, String::new())
+                } else {
+                    let name = ensure_course_name_tx(&tx, phone_format)?;
+                    (Some(ensure_format_id_tx(&tx, &name)?), name)
+                };
+                tx.execute(
+                    r#"
+                    INSERT INTO start_protocol(
+                        participant_id, name, format_id, format_name,
+                        gender, birth_date_raw, birth_date_iso, source_row
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+                    "#,
+                    params![
+                        bib,
+                        phone_name,
+                        format_id,
+                        format_name,
+                        if phone_gender.is_empty() {
+                            None
+                        } else {
+                            Some(phone_gender)
+                        },
+                        phone_birth_raw.as_deref(),
+                        phone_birth_iso.as_deref()
+                    ],
+                )
+                .map_err(|e| format!("insert phone protocol № {id}: {e}"))?;
+                let entry_id = tx.last_insert_rowid();
+                if !format_name.is_empty() {
+                    link_protocol_course_tx(&tx, entry_id, &format_name)?;
+                }
+                added += 1;
+                changed = true;
+            }
+            Some((entry_id, existing_name)) => {
+                let row: (String, Option<i64>, String, Option<String>, Option<String>, Option<String>) =
+                    tx.query_row(
+                        r#"
+                        SELECT name, format_id, format_name, gender, birth_date_raw, birth_date_iso
+                        FROM start_protocol WHERE id = ?
+                        "#,
+                        params![entry_id],
+                        |r| {
+                            Ok((
+                                r.get(0)?,
+                                r.get(1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                                r.get(4)?,
+                                r.get(5)?,
+                            ))
+                        },
+                    )
+                    .map_err(|e| format!("load protocol № {id}: {e}"))?;
+                let (name, format_id, format_name, gender, birth_raw, birth_iso) = row;
+                let mut next_name = name;
+                let mut next_format_id = format_id;
+                let mut next_format_name = format_name;
+                let mut next_gender = gender;
+                let mut next_birth_raw = birth_raw;
+                let mut next_birth_iso = birth_iso;
+                let mut row_changed = false;
+                if protocol_name_blank(&next_name) && !phone_name.is_empty() {
+                    next_name = phone_name.to_string();
+                    row_changed = true;
+                }
+                if protocol_name_blank(&next_format_name)
+                    && format_id_missing(next_format_id)
+                    && !phone_format.is_empty()
+                {
+                    let course = ensure_course_name_tx(&tx, phone_format)?;
+                    next_format_id = Some(ensure_format_id_tx(&tx, &course)?);
+                    next_format_name = course;
+                    row_changed = true;
+                }
+                if next_gender.as_deref().unwrap_or("").trim().is_empty() && !phone_gender.is_empty()
+                {
+                    next_gender = Some(phone_gender.to_string());
+                    row_changed = true;
+                }
+                let birth_blank = next_birth_raw
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+                    && next_birth_iso
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty();
+                if birth_blank && phone_birth_iso.is_some() {
+                    next_birth_raw = phone_birth_raw.clone();
+                    next_birth_iso = phone_birth_iso.clone();
+                    row_changed = true;
+                }
+                if row_changed {
+                    tx.execute(
+                        r#"
+                        UPDATE start_protocol
+                        SET name = ?, format_id = ?, format_name = ?,
+                            gender = ?, birth_date_raw = ?, birth_date_iso = ?
+                        WHERE id = ?
+                        "#,
+                        params![
+                            next_name,
+                            next_format_id,
+                            next_format_name,
+                            next_gender,
+                            next_birth_raw,
+                            next_birth_iso,
+                            entry_id
+                        ],
+                    )
+                    .map_err(|e| format!("update phone protocol № {id}: {e}"))?;
+                    if !next_format_name.is_empty() {
+                        link_protocol_course_tx(&tx, entry_id, &next_format_name)?;
+                    }
+                    let _ = existing_name;
+                    updated += 1;
+                    changed = true;
+                }
+            }
+        }
+    }
+    let team_updated = apply_phone_protocol_teams_tx(&tx, &file.people)?;
+    updated += team_updated;
+    if team_updated > 0 {
+        changed = true;
+    }
+    if changed {
+        apply_placeholder_finish_names_from_protocol_tx(&tx)?;
+        recalculate_tx(&tx)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit phone protocol snapshot: {e}"))?;
+    Ok((added, updated))
+}
+
+fn protocol_name_blank(name: &str) -> bool {
+    name.trim().is_empty()
+}
+
+fn format_id_missing(format_id: Option<i64>) -> bool {
+    format_id.unwrap_or(0) <= 0
+}
+
+fn parse_phone_birth(value: &str) -> (Option<String>, Option<String>) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    if let Some(iso) = parse_birth_date_ru(trimmed) {
+        return (Some(trimmed.to_string()), Some(iso));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return (
+            Some(date.format("%d.%m.%Y").to_string()),
+            Some(date.format("%Y-%m-%d").to_string()),
+        );
+    }
+    (Some(trimmed.to_string()), None)
+}
+
+fn apply_phone_protocol_teams_tx(
+    tx: &Transaction<'_>,
+    people: &[PhoneProtocolPerson],
+) -> Result<i64, String> {
+    let mut groups: HashMap<i64, Vec<i64>> = HashMap::new();
+    for person in people {
+        let phone_team = person.team_id.unwrap_or(0);
+        if person.id <= 0 || phone_team <= 0 {
+            continue;
+        }
+        groups.entry(phone_team).or_default().push(person.id);
+    }
+    let mut updated = 0_i64;
+    for (_phone_team, members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut existing_desk: Vec<i64> = Vec::new();
+        for bib in &members {
+            if let Some((entry_id, _)) = find_protocol_by_bib_tx(tx, &bib.to_string())? {
+                let team_id: Option<i64> = tx
+                    .query_row(
+                        "SELECT team_id FROM start_protocol WHERE id = ?",
+                        params![entry_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| format!("load team for № {bib}: {e}"))?;
+                if let Some(tid) = team_id {
+                    if tid > 0 && !existing_desk.contains(&tid) {
+                        existing_desk.push(tid);
+                    }
+                }
+            }
+        }
+        let desk_team = if let Some(first) = existing_desk.first().copied() {
+            first
+        } else {
+            next_team_id(tx)?
+        };
+        for bib in members {
+            let Some((entry_id, _)) = find_protocol_by_bib_tx(tx, &bib.to_string())? else {
+                continue;
+            };
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT team_id FROM start_protocol WHERE id = ?",
+                    params![entry_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("load team before assign № {bib}: {e}"))?;
+            if current.unwrap_or(0) > 0 {
+                continue;
+            }
+            tx.execute(
+                "UPDATE start_protocol SET team_id = ? WHERE id = ?",
+                params![desk_team, entry_id],
+            )
+            .map_err(|e| format!("assign phone team № {bib}: {e}"))?;
+            updated += 1;
+        }
+    }
+    for person in people {
+        if person.id <= 0 || person.team_id.unwrap_or(0) > 0 {
+            continue;
+        }
+        let bib = person.id.to_string();
+        let Some((entry_id, _)) = find_protocol_by_bib_tx(tx, &bib)? else {
+            continue;
+        };
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE id = ?",
+                params![entry_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("load team before leave № {bib}: {e}"))?;
+        if current.unwrap_or(0) <= 0 {
+            continue;
+        }
+        tx.execute(
+            "UPDATE start_protocol SET team_id = NULL WHERE id = ?",
+            params![entry_id],
+        )
+        .map_err(|e| format!("leave phone team № {bib}: {e}"))?;
+        updated += 1;
+    }
+    Ok(updated)
 }
 
 fn detect_csv_delimiter(content: &str) -> u8 {
@@ -4363,36 +4691,38 @@ fn append_course_name_filter(
 
 fn orient_results_order_sql(sort_by: &str, sort_dir: &str) -> String {
     let status_rank = "CASE results.status WHEN 'OK' THEN 0 WHEN 'Дисквалификация' THEN 1 WHEN 'Ошибка' THEN 2 WHEN 'Не стартовал' THEN 3 ELSE 4 END";
+    let bib_asc = sql_bib_order("results.participant_id", "asc");
+    let bib_desc = sql_bib_order("results.participant_id", "desc");
     match (sort_by, sort_dir) {
         ("participant_id", "desc") => {
-            "results.participant_id COLLATE NOCASE DESC, results.elapsed_seconds ASC".to_string()
+            format!("{bib_desc}, results.elapsed_seconds ASC")
         }
         ("participant_id", _) => {
-            "results.participant_id COLLATE NOCASE ASC, results.elapsed_seconds ASC".to_string()
+            format!("{bib_asc}, results.elapsed_seconds ASC")
         }
         ("name", "desc") => {
-            "results.name COLLATE NOCASE DESC, results.participant_id COLLATE NOCASE ASC".to_string()
+            format!("results.name COLLATE NOCASE DESC, {bib_asc}")
         }
         ("name", _) => {
-            "results.name COLLATE NOCASE ASC, results.participant_id COLLATE NOCASE ASC".to_string()
+            format!("results.name COLLATE NOCASE ASC, {bib_asc}")
         }
         ("points_raw", "desc") => {
-            "results.points_raw DESC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC".to_string()
+            format!("results.points_raw DESC, results.elapsed_seconds ASC, {bib_asc}")
         }
         ("points_raw", _) => {
-            "results.points_raw ASC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC".to_string()
+            format!("results.points_raw ASC, results.elapsed_seconds ASC, {bib_asc}")
         }
         ("elapsed_seconds", "desc") => format!(
-            "{status_rank} ASC, results.elapsed_seconds DESC, results.participant_id COLLATE NOCASE ASC"
+            "{status_rank} ASC, results.elapsed_seconds DESC, {bib_asc}"
         ),
         ("elapsed_seconds", _) => format!(
-            "{status_rank} ASC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{status_rank} ASC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("place", "desc") => format!(
-            "{status_rank} DESC, results.elapsed_seconds DESC, results.participant_id COLLATE NOCASE DESC"
+            "{status_rank} DESC, results.elapsed_seconds DESC, {bib_desc}"
         ),
         _ => format!(
-            "{status_rank} ASC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{status_rank} ASC, results.elapsed_seconds ASC, {bib_asc}"
         ),
     }
 }
@@ -4419,6 +4749,7 @@ pub fn query_results(
     let effective_p = sql_effective_course_name("p");
     let effective_p2 = sql_effective_course_name("p2");
     let protocol_join = start_finish_protocol_join("results", "sp");
+    let bib_rank = sql_bib_order("r.participant_id", "asc");
     let mut query = format!(
         r#"
         SELECT
@@ -4480,7 +4811,7 @@ pub fn query_results(
                 r.id AS result_id,
                 RANK() OVER (
                         PARTITION BY {effective_p2}
-                    ORDER BY r.elapsed_seconds ASC, r.participant_id COLLATE NOCASE ASC
+                    ORDER BY r.elapsed_seconds ASC, {bib_rank}
                 ) AS place
             FROM results r
             LEFT JOIN participants p2 ON p2.id = r.finish_participant_id
@@ -4599,11 +4930,17 @@ pub fn query_results(
     let team_name_max_key =
         format!("COALESCE((SELECT MAX(r2.name) {team_join}), results.name)");
     let team_bib_min_key = format!(
-        "COALESCE((SELECT MIN(r2.participant_id) {team_join}), results.participant_id)"
+        "COALESCE((SELECT MIN({n}) {team_join}), {self_n})",
+        n = sql_numeric_bib("r2.participant_id"),
+        self_n = sql_numeric_bib("results.participant_id"),
     );
     let team_bib_max_key = format!(
-        "COALESCE((SELECT MAX(r2.participant_id) {team_join}), results.participant_id)"
+        "COALESCE((SELECT MAX({n}) {team_join}), {self_n})",
+        n = sql_numeric_bib("r2.participant_id"),
+        self_n = sql_numeric_bib("results.participant_id"),
     );
+    let bib_asc = sql_bib_order("results.participant_id", "asc");
+    let bib_desc = sql_bib_order("results.participant_id", "desc");
     let status_rank = "CASE results.status WHEN 'OK' THEN 0 WHEN 'Не стартовал' THEN 1 WHEN 'Нет в протоколе' THEN 2 WHEN 'Дисквалификация' THEN 3 ELSE 4 END";
     let team_status_key = format!(
         "COALESCE((SELECT MIN(CASE r2.status WHEN 'OK' THEN 0 WHEN 'Не стартовал' THEN 1 WHEN 'Нет в протоколе' THEN 2 WHEN 'Дисквалификация' THEN 3 ELSE 4 END) {team_join}), {status_rank})"
@@ -4617,34 +4954,34 @@ pub fn query_results(
     } else {
         match (safe_sort_by, safe_sort_dir) {
         ("participant_id", "asc") => format!(
-            "{team_bib_min_key} COLLATE NOCASE ASC, {team_group_tail}, results.participant_id COLLATE NOCASE ASC, results.points_raw DESC, results.elapsed_seconds ASC"
+            "{team_bib_min_key} ASC, {team_group_tail}, {bib_asc}, results.points_raw DESC, results.elapsed_seconds ASC"
         ),
         ("participant_id", "desc") => format!(
-            "{team_bib_max_key} COLLATE NOCASE DESC, {team_group_tail}, results.participant_id COLLATE NOCASE DESC, results.points_raw DESC, results.elapsed_seconds ASC"
+            "{team_bib_max_key} DESC, {team_group_tail}, {bib_desc}, results.points_raw DESC, results.elapsed_seconds ASC"
         ),
         ("name", "asc") => format!(
-            "{team_name_min_key} COLLATE NOCASE ASC, {team_group_tail}, results.name COLLATE NOCASE ASC, results.participant_id COLLATE NOCASE ASC"
+            "{team_name_min_key} COLLATE NOCASE ASC, {team_group_tail}, results.name COLLATE NOCASE ASC, {bib_asc}"
         ),
         ("name", "desc") => format!(
-            "{team_name_max_key} COLLATE NOCASE DESC, {team_group_tail}, results.name COLLATE NOCASE DESC, results.participant_id COLLATE NOCASE ASC"
+            "{team_name_max_key} COLLATE NOCASE DESC, {team_group_tail}, results.name COLLATE NOCASE DESC, {bib_asc}"
         ),
         ("points_raw", "asc") => format!(
-            "{team_points_raw_key} ASC, {team_group_tail}, results.points_raw ASC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{team_points_raw_key} ASC, {team_group_tail}, results.points_raw ASC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("points_raw", "desc") => format!(
-            "{team_points_raw_key} DESC, {team_group_tail}, results.points_raw DESC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{team_points_raw_key} DESC, {team_group_tail}, results.points_raw DESC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("points_final", "asc") => format!(
-            "{team_status_key} ASC, {team_points_final_key} ASC, {team_group_tail}, results.points_final ASC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{team_status_key} ASC, {team_points_final_key} ASC, {team_group_tail}, results.points_final ASC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("points_final", "desc") => format!(
-            "{team_status_key} ASC, {team_points_final_key} DESC, {team_group_tail}, results.points_final DESC, results.elapsed_seconds ASC, results.participant_id COLLATE NOCASE ASC"
+            "{team_status_key} ASC, {team_points_final_key} DESC, {team_group_tail}, results.points_final DESC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("elapsed_seconds", "desc") => format!(
-            "{team_elapsed_key} DESC, {team_group_tail}, results.elapsed_seconds DESC, results.points_final DESC, results.participant_id COLLATE NOCASE ASC"
+            "{team_elapsed_key} DESC, {team_group_tail}, results.elapsed_seconds DESC, results.points_final DESC, {bib_asc}"
         ),
         _ => format!(
-            "{team_elapsed_key} ASC, {team_group_tail}, results.elapsed_seconds ASC, results.points_final DESC, results.participant_id COLLATE NOCASE ASC"
+            "{team_elapsed_key} ASC, {team_group_tail}, results.elapsed_seconds ASC, results.points_final DESC, {bib_asc}"
         ),
         }
     };
@@ -4836,15 +5173,16 @@ pub fn query_status_counts(
 }
 
 pub fn query_error_list(conn: &Connection) -> Result<Vec<ErrorRow>, String> {
+    let order = sql_bib_order("participant_id", "asc");
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r#"
             SELECT id, participant_id, name, diagnostics_json
             FROM results
             WHERE status = ?
-            ORDER BY participant_id COLLATE NOCASE ASC, name COLLATE NOCASE ASC, id ASC
+            ORDER BY {order}, name COLLATE NOCASE ASC, id ASC
             "#,
-        )
+        ))
         .map_err(|e| format!("prepare error list: {e}"))?;
     let rows = stmt
         .query_map(params![STATUS_ERR], |r| {
@@ -5219,6 +5557,7 @@ fn suggest_from_table(
     let safe_limit = limit.clamp(1, 50);
     let wildcard = format!("%{normalized}%");
     let prefix = format!("{normalized}%");
+    let id_order = sql_bib_order(id_col, "asc");
     let sql = format!(
         r#"
         SELECT DISTINCT {id_col}, {name_col}
@@ -5230,7 +5569,7 @@ fn suggest_from_table(
                 WHEN u_lower({name_col}) LIKE ? THEN 1
                 ELSE 2
             END,
-            {id_col} COLLATE NOCASE ASC,
+            {id_order},
             {name_col} COLLATE NOCASE ASC
         LIMIT ?
         "#
@@ -5343,6 +5682,97 @@ fn attach_start_protocol_courses(
     Ok(())
 }
 
+fn start_protocol_order_sql(sort_by: &str, sort_dir: &str, keep_teams: bool) -> String {
+    let desc = sort_dir.eq_ignore_ascii_case("desc");
+    let dir = if desc { "DESC" } else { "ASC" };
+    let agg = if desc { "MAX" } else { "MIN" };
+    let bib = sql_bib_order("sp.participant_id", if desc { "desc" } else { "asc" });
+    let bib_asc = sql_bib_order("sp.participant_id", "asc");
+    let team_tail =
+        "CASE WHEN sp.team_id IS NULL THEN 1 ELSE 0 END ASC, IFNULL(sp.team_id, 0) ASC";
+    let team_bib = format!(
+        "COALESCE((SELECT {agg}({n}) FROM start_protocol t2 WHERE sp.team_id IS NOT NULL AND t2.team_id = sp.team_id), {own})",
+        n = sql_numeric_bib("t2.participant_id"),
+        own = sql_numeric_bib("sp.participant_id"),
+    );
+    let team_bib_min = format!(
+        "COALESCE((SELECT MIN({n}) FROM start_protocol t2 WHERE sp.team_id IS NOT NULL AND t2.team_id = sp.team_id), {own})",
+        n = sql_numeric_bib("t2.participant_id"),
+        own = sql_numeric_bib("sp.participant_id"),
+    );
+    match sort_by {
+        "name" => {
+            let key = if keep_teams {
+                format!(
+                    "COALESCE((SELECT {agg}(t2.name) FROM start_protocol t2 WHERE sp.team_id IS NOT NULL AND t2.team_id = sp.team_id), sp.name) COLLATE NOCASE {dir}"
+                )
+            } else {
+                format!("sp.name COLLATE NOCASE {dir}")
+            };
+            if keep_teams {
+                format!("{key}, {team_tail}, sp.name COLLATE NOCASE {dir}, {bib_asc}")
+            } else {
+                format!("{key}, {bib_asc}")
+            }
+        }
+        "format_name" => {
+            let key = format!("sp.format_name COLLATE NOCASE {dir}");
+            if keep_teams {
+                format!("{key}, {team_bib_min} ASC, {team_tail}, {bib_asc}")
+            } else {
+                format!("{key}, {bib_asc}")
+            }
+        }
+        "team_id" => format!(
+            "CASE WHEN sp.team_id IS NULL THEN 1 ELSE 0 END ASC, IFNULL(sp.team_id, 0) {dir}, {bib_asc}"
+        ),
+        "gender" => {
+            let key = if keep_teams {
+                format!(
+                    "COALESCE((SELECT {agg}(IFNULL(t2.gender, '')) FROM start_protocol t2 WHERE sp.team_id IS NOT NULL AND t2.team_id = sp.team_id), IFNULL(sp.gender, '')) COLLATE NOCASE {dir}"
+                )
+            } else {
+                format!("IFNULL(sp.gender, '') COLLATE NOCASE {dir}")
+            };
+            if keep_teams {
+                format!("{key}, {team_tail}, IFNULL(sp.gender, '') COLLATE NOCASE {dir}, {bib_asc}")
+            } else {
+                format!("{key}, {bib_asc}")
+            }
+        }
+        "birth_date" => {
+            let birth_t2 = "IFNULL(t2.birth_date_iso, IFNULL(t2.birth_date_raw, ''))";
+            let birth_sp = "IFNULL(sp.birth_date_iso, IFNULL(sp.birth_date_raw, ''))";
+            let key = if keep_teams {
+                format!(
+                    "COALESCE((SELECT {agg}({birth_t2}) FROM start_protocol t2 WHERE sp.team_id IS NOT NULL AND t2.team_id = sp.team_id), {birth_sp}) {dir}"
+                )
+            } else {
+                format!("{birth_sp} {dir}")
+            };
+            if keep_teams {
+                format!("{key}, {team_tail}, {birth_sp} {dir}, {bib_asc}")
+            } else {
+                format!("{key}, {bib_asc}")
+            }
+        }
+        "has_result" => {
+            if keep_teams {
+                format!("has_result {dir}, {team_tail}, {bib_asc}")
+            } else {
+                format!("has_result {dir}, {bib_asc}")
+            }
+        }
+        _ => {
+            if keep_teams {
+                format!("{team_bib} {dir}, {team_tail}, {bib}")
+            } else {
+                bib
+            }
+        }
+    }
+}
+
 pub fn query_start_protocol(
     conn: &Connection,
     limit: i64,
@@ -5351,6 +5781,8 @@ pub fn query_start_protocol(
     format_id: Option<i64>,
     only_incomplete: bool,
     only_missing_format: bool,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
 ) -> Result<(Vec<StartProtocolRow>, i64), String> {
     let safe_limit = limit.clamp(1, 2000);
     let safe_offset = offset.max(0);
@@ -5390,9 +5822,30 @@ pub fn query_start_protocol(
         query.push_str(" AND ");
         query.push_str(missing_format_expr);
     }
-    query.push_str(
-        " ORDER BY sp.format_name, CASE WHEN sp.team_id IS NULL THEN 1 ELSE 0 END, sp.team_id, sp.participant_id COLLATE NOCASE ASC LIMIT ? OFFSET ? ",
-    );
+    let safe_sort_by = match sort_by.as_deref() {
+        Some("name") => "name",
+        Some("format_name") => "format_name",
+        Some("team_id") => "team_id",
+        Some("gender") => "gender",
+        Some("birth_date") => "birth_date",
+        Some("has_result") => "has_result",
+        _ => "participant_id",
+    };
+    let safe_sort_dir = match sort_dir.as_deref() {
+        Some("desc") => "desc",
+        Some("asc") => "asc",
+        _ => {
+            if safe_sort_by == "has_result" {
+                "desc"
+            } else {
+                "asc"
+            }
+        }
+    };
+    let order = start_protocol_order_sql(safe_sort_by, safe_sort_dir, !orient);
+    query.push_str(" ORDER BY ");
+    query.push_str(&order);
+    query.push_str(" LIMIT ? OFFSET ? ");
     params_dyn.push(rusqlite::types::Value::Integer(safe_limit));
     params_dyn.push(rusqlite::types::Value::Integer(safe_offset));
 
@@ -8595,7 +9048,7 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
             controls: row.controls,
         })
         .collect::<Vec<_>>();
-    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false)?;
+    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false, None, None)?;
     let mut people = Vec::new();
     for row in rows {
         let Ok(id) = row.participant_id.trim().parse::<i64>() else {
@@ -8821,7 +9274,7 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             format_names: row.format_names,
         })
         .collect::<Vec<_>>();
-    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false)?;
+    let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false, None, None)?;
     let mut people = Vec::new();
     for row in rows {
         let Ok(id) = row.participant_id.trim().parse::<i64>() else {
@@ -9162,6 +9615,7 @@ pub fn query_participant_details(
     let effective_p = sql_effective_course_name("p");
     let effective_p2 = sql_effective_course_name("p2");
     let protocol_join = start_finish_protocol_join("results", "sp");
+    let bib_rank = sql_bib_order("r.participant_id", "asc");
     let mut result = tx
         .query_row(
             &format!(
@@ -9225,7 +9679,7 @@ pub fn query_participant_details(
                     r.id AS result_id,
                     RANK() OVER (
                         PARTITION BY {effective_p2}
-                        ORDER BY r.elapsed_seconds ASC, r.participant_id COLLATE NOCASE ASC
+                        ORDER BY r.elapsed_seconds ASC, {bib_rank}
                     ) AS place
                 FROM results r
                 LEFT JOIN participants p2 ON p2.id = r.finish_participant_id
@@ -11237,7 +11691,7 @@ mod tests {
         add_cp_correction, calculate_orient_result, ManualCorrection,
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
-        import_courses_content, import_csv_content, import_phone_snapshot,
+        import_courses_content, import_csv_content, import_phone_snapshot, import_phone_protocol,
         import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
         delete_finish_participant,
         build_start_pack, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
@@ -11257,12 +11711,127 @@ mod tests {
     }
 
     #[test]
+    fn phone_protocol_adds_walkups_and_fills_blanks() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name, format_name) VALUES('8', '', '4ч')",
+            [],
+        )
+        .unwrap();
+        let body = r#"{
+            "people":[
+                {"id":8,"name":"Иванов","format":"4ч","gender":"мужской","birthDate":"2009-01-01","teamId":1,"origin":"phone"},
+                {"id":9,"name":"","format":"4ч","gender":"","birthDate":"","teamId":1,"origin":"phone"}
+            ]
+        }"#;
+        let (added, updated) = import_phone_protocol(&mut conn, body).unwrap();
+        assert_eq!(added, 1);
+        assert!(updated >= 1);
+        let eight: (String, String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT name, format_name, gender, team_id FROM start_protocol WHERE participant_id = '8'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(eight.0, "Иванов");
+        assert_eq!(eight.2.as_deref(), Some("мужской"));
+        let nine: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT name, team_id FROM start_protocol WHERE participant_id = '9'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(nine.0, "");
+        assert_eq!(eight.3, nine.1);
+        assert!(eight.3.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn phone_protocol_does_not_overwrite_desktop_name() {
+        let mut conn = memory_db();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name) VALUES('8', 'Петров')",
+            [],
+        )
+        .unwrap();
+        let body = r#"{"people":[{"id":8,"name":"Иванов","format":"4ч"}]}"#;
+        let (added, updated) = import_phone_protocol(&mut conn, body).unwrap();
+        assert_eq!(added, 0);
+        assert_eq!(updated, 1);
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM start_protocol WHERE participant_id = '8'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "Петров");
+        let format: String = conn
+            .query_row(
+                "SELECT format_name FROM start_protocol WHERE participant_id = '8'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(format, "4ч");
+    }
+
+    #[test]
+    fn phone_protocol_clears_team_when_member_left() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        let joined = r#"{
+            "people":[
+                {"id":8,"name":"Иванов","format":"4ч","teamId":1},
+                {"id":9,"name":"Петрова","format":"4ч","teamId":1}
+            ]
+        }"#;
+        import_phone_protocol(&mut conn, joined).unwrap();
+        let team_before: Option<i64> = conn
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE participant_id = '8'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(team_before.unwrap_or(0) > 0);
+        let left = r#"{
+            "people":[
+                {"id":8,"name":"Иванов","format":"4ч","teamId":null},
+                {"id":9,"name":"Петрова","format":"4ч","teamId":1}
+            ]
+        }"#;
+        let (added, updated) = import_phone_protocol(&mut conn, left).unwrap();
+        assert_eq!(added, 0);
+        assert!(updated >= 1);
+        let eight: Option<i64> = conn
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE participant_id = '8'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let nine: Option<i64> = conn
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE participant_id = '9'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(eight.unwrap_or(0) <= 0);
+        assert_eq!(nine, team_before);
+    }
+
+    #[test]
     fn orient_start_protocol_csv_merges_second_course() {
         let conn = memory_db();
         set_setting_value(&conn, "sport_kind", "orient").unwrap();
         let csv = "номер;фио;дистанция\n8;Иванов Иван;D1\n8;Иванов Иван;D2\n9;Петров;D1\n";
         import_start_protocol_content(&conn, csv, true).unwrap();
-        let (rows, total) = query_start_protocol(&conn, 50, 0, None, None, false, false).unwrap();
+        let (rows, total) = query_start_protocol(&conn, 50, 0, None, None, false, false, None, None).unwrap();
         assert_eq!(total, 2);
         let ivan = rows.iter().find(|r| r.participant_id == "8").unwrap();
         assert_eq!(ivan.name, "Иванов Иван");
@@ -11276,7 +11845,7 @@ mod tests {
 
         import_start_protocol_content(&conn, "номер;фио;дистанция\n8;Иванов Иван;D1\n", false)
             .unwrap();
-        let (rows, _) = query_start_protocol(&conn, 50, 0, None, None, false, false).unwrap();
+        let (rows, _) = query_start_protocol(&conn, 50, 0, None, None, false, false, None, None).unwrap();
         let ivan = rows.iter().find(|r| r.participant_id == "8").unwrap();
         assert_eq!(ivan.format_name, "D2");
         assert!(ivan.courses.iter().any(|c| c == "D1"));
@@ -11295,7 +11864,7 @@ mod tests {
         .unwrap();
         assert_eq!(summary.imported_rows, 3);
         assert_eq!(summary.missing_course_count, 2);
-        let (rows, total) = query_start_protocol(&conn, 50, 0, None, None, false, false).unwrap();
+        let (rows, total) = query_start_protocol(&conn, 50, 0, None, None, false, false, None, None).unwrap();
         assert_eq!(total, 3);
         let ivan = rows.iter().find(|r| r.participant_id == "8").unwrap();
         assert_eq!(ivan.format_name, "");
@@ -11304,6 +11873,130 @@ mod tests {
         assert_eq!(petrov.format_name, "D1");
         let sidorov = rows.iter().find(|r| r.participant_id == "10").unwrap();
         assert_eq!(sidorov.format_name, "");
+    }
+
+    #[test]
+    fn start_protocol_sorts_chip_numbers_as_integers() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n10;Десять;4ч;мужской;1990-01-01\n2;Два;4ч;мужской;1990-01-01\n1;Один;4ч;мужской;1990-01-01\n11;Одиннадцать;4ч;мужской;1990-01-01\n",
+            true,
+        )
+        .unwrap();
+        let (rows, _) = query_start_protocol(&conn, 50, 0, None, None, false, false, None, None).unwrap();
+        let bibs: Vec<_> = rows.iter().map(|r| r.participant_id.as_str()).collect();
+        assert_eq!(bibs, vec!["1", "2", "10", "11"]);
+    }
+
+    #[test]
+    fn start_protocol_keeps_team_at_lowest_chip() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n10;Десять;4ч;мужской;1990-01-01\n2;Два;4ч;мужской;1990-01-01\n11;Одиннадцать;4ч;мужской;1990-01-01\n",
+            true,
+        )
+        .unwrap();
+        let ids: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM start_protocol WHERE participant_id IN ('10', '11') ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        merge_start_protocol_team(&conn, ids).unwrap();
+        let (rows, _) = query_start_protocol(&conn, 50, 0, None, None, false, false, None, None).unwrap();
+        let bibs: Vec<_> = rows.iter().map(|r| r.participant_id.as_str()).collect();
+        assert_eq!(bibs, vec!["2", "10", "11"]);
+    }
+
+    #[test]
+    fn results_sort_chip_numbers_as_integers() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        for (bib, name) in [("10", "Десять"), ("2", "Два"), ("1", "Один")] {
+            conn.execute(
+                "INSERT INTO results(participant_id, name, status, points_raw, penalty_points, points_final, elapsed_seconds, delay_seconds, penalty_minutes, diagnostics_json)
+                 VALUES(?, ?, 'OK', 0, 0, 0, 0, 0, 0, '{}')",
+                rusqlite::params![bib, name],
+            )
+            .unwrap();
+        }
+        let (rows, _) = query_results(
+            &conn,
+            50,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some("participant_id".into()),
+            Some("asc".into()),
+        )
+        .unwrap();
+        let bibs: Vec<_> = rows.iter().map(|r| r.participant_id.as_str()).collect();
+        assert_eq!(bibs, vec!["1", "2", "10"]);
+    }
+
+    #[test]
+    fn start_protocol_sorts_by_name_and_format() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n10;Carl;8ч;мужской;1990-01-01\n2;Ann;4ч;женский;1991-01-01\n1;Boris;8ч;мужской;1992-01-01\n",
+            true,
+        )
+        .unwrap();
+        let names = |sort_by: &str, sort_dir: &str| {
+            let (rows, _) = query_start_protocol(
+                &conn,
+                50,
+                0,
+                None,
+                None,
+                false,
+                false,
+                Some(sort_by.into()),
+                Some(sort_dir.into()),
+            )
+            .unwrap();
+            rows.into_iter().map(|r| r.name).collect::<Vec<_>>()
+        };
+        assert_eq!(names("name", "asc"), vec!["Ann", "Boris", "Carl"]);
+        assert_eq!(names("name", "desc"), vec!["Carl", "Boris", "Ann"]);
+        let formats = {
+            let (rows, _) = query_start_protocol(
+                &conn,
+                50,
+                0,
+                None,
+                None,
+                false,
+                false,
+                Some("format_name".into()),
+                Some("asc".into()),
+            )
+            .unwrap();
+            rows.into_iter()
+                .map(|r| (r.format_name, r.participant_id))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            formats,
+            vec![
+                ("4ч".to_string(), "2".to_string()),
+                ("8ч".to_string(), "1".to_string()),
+                ("8ч".to_string(), "10".to_string())
+            ]
+        );
     }
 
     #[test]
