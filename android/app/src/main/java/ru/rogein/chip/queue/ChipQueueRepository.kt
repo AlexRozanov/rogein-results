@@ -4,9 +4,11 @@ import android.content.Context
 import androidx.room.Room
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.toChipDump
 import ru.rogein.chip.printer.PrinterStore
 import ru.rogein.chip.startlist.StartListStore
+import ru.rogein.chip.startlist.eventPackLoadedMessage
 import java.util.UUID
 
 sealed class EnqueueResult {
@@ -43,6 +45,12 @@ class ChipQueueRepository(
     suspend fun itemsNow() = dao.listAll()
 
     fun observeStarts() = archive.observe()
+
+    suspend fun applyRogaineEventPack(pack: EventPackFile, replace: Boolean): String {
+        startList.applyEventPack(pack, replace)
+        event.applyPackMeta(pack)
+        return eventPackLoadedMessage(pack)
+    }
 
     suspend fun ensureCurrentStart() = archive.ensureCurrent()
 

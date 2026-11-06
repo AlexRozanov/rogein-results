@@ -14,8 +14,10 @@ object SfrChipMemory {
     /**
      * Программатор станции: как в SFR basic, всё лишнее (номер, время очистки, отметки) — нули.
      * Иначе финиш увидит старый логический номер.
-     * Старт/финиш/очистка/КП: блоки 4–6. Активный/пассивный/батарея: только блок 4, 5–6 обнуляются.
+     * Старт/финиш/очистка/КП: блоки 4–6, хвост до конца чипа — нули.
+     * Активный/пассивный/батарея: только блок 4, 5–6 обнуляются.
      */
+    @Suppress("UNUSED_PARAMETER")
     fun stationProgramPlan(
         command: StationCommand,
         hour: Int,
@@ -28,16 +30,11 @@ object SfrChipMemory {
         require(blockCount in MIN_BLOCK_COUNT..BLOCK_COUNT) { "blockCount $blockCount" }
         val zeros = ByteArray(BLOCK_SIZE)
         val lastWritable = blockCount - 1
-        val lastPunch = when (oldPointerEnd) {
-            null -> lastWritable
-            in 5..lastWritable -> oldPointerEnd
-            else -> lastWritable
-        }
         val cp = when (command) {
             StationCommand.Control -> controlNumber?.also(::requireStationControlNumber)
             else -> command.controlCp
         }
-        val plan = ArrayList<Pair<Int, ByteArray>>(lastPunch + 4)
+        val plan = ArrayList<Pair<Int, ByteArray>>(lastWritable + 4)
         // Блоки режима — первыми. Иначе длинная очистка хвоста не успевает,
         // чип убирают на нуле отсчёта, и на нём остаётся прежний программатор.
         if (cp != null) {
@@ -57,7 +54,7 @@ object SfrChipMemory {
         plan += 1 to zeros.copyOf()
         plan += 2 to zeros.copyOf()
         if (cp != null) {
-            for (block in 7..lastPunch) {
+            for (block in 7..lastWritable) {
                 plan += block to zeros.copyOf()
             }
         }
@@ -96,7 +93,12 @@ object SfrChipMemory {
         return byteArrayOf(cp.toByte(), bcd(hour), bcd(minute), bcd(second))
     }
 
-    /** Порядок как в SFR basic: сначала прячем старые отметки, потом затираем их. Блок 3 не трогаем. */
+    /**
+     * Порядок как в SFR basic: сначала прячем старые отметки указателем, потом затираем все ячейки до конца чипа.
+     * [pointerEnd] оставляем в сигнатуре: выдача/очистка всё равно нулят хвост, иначе при чтении можно подхватить мусор.
+     * Блок 3 не трогаем.
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun clearPlan(
         pointerEnd: Int?,
         hour: Int,
@@ -107,13 +109,9 @@ object SfrChipMemory {
         require(blockCount in MIN_BLOCK_COUNT..BLOCK_COUNT) { "blockCount $blockCount" }
         val zeros = ByteArray(BLOCK_SIZE)
         val lastWritable = blockCount - 1
-        val lastPunch = when (pointerEnd) {
-            null -> lastWritable
-            else -> pointerEnd.coerceIn(5, lastWritable)
-        }
-        val plan = ArrayList<Pair<Int, ByteArray>>(lastPunch)
+        val plan = ArrayList<Pair<Int, ByteArray>>(lastWritable)
         plan += 4 to byteArrayOf(0x05, 0, 0, 0)
-        for (block in 5..lastPunch) {
+        for (block in 5..lastWritable) {
             plan += block to zeros.copyOf()
         }
         plan += 1 to clearTimeBlock(hour, minute, second)
@@ -156,6 +154,23 @@ object SfrChipMemory {
 }
 
 object TestCoursePlan {
+    val defaultRogainePool = listOf(31, 32, 33, 41, 42, 43, 51, 52, 53, 61, 62, 71, 81, 91)
+
+    fun randomRogaineSequence(
+        startCp: Int,
+        finishCp: Int,
+        pool: List<Int> = defaultRogainePool,
+        count: Int = 8,
+        random: kotlin.random.Random = kotlin.random.Random.Default,
+    ): List<Int> {
+        val start = if (startCp > 0) startCp else CP_START
+        val finish = if (finishCp > 0) finishCp else CP_FINISH
+        val inner = pool.filter { it > 0 && it != start && it != finish && it != CP_CLEAR }.distinct()
+        val source = if (inner.isEmpty()) defaultRogainePool.filter { it != start && it != finish } else inner
+        val take = source.shuffled(random).take(count.coerceIn(1, source.size.coerceAtLeast(1)))
+        return listOf(start) + take + listOf(finish)
+    }
+
     fun fullSequence(controls: List<Int>): List<Int> {
         val inner = controls.filter { it != CP_START && it != CP_FINISH }
         require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }

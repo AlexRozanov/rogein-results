@@ -203,6 +203,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            override fun readAllBlocks(): Pair<String, List<ByteArray>> {
+                val tag = sessionTag ?: error("Чип убран")
+                return try {
+                    synchronized(nfcLock) {
+                        formatUid(tag.id) to reader.readAllBlocks(tag)
+                    }
+                } catch (e: Exception) {
+                    dropChip()
+                    throw e
+                }
+            }
+
             override fun writeStationProgram(
                 order: BlockOrder,
                 command: StationCommand,
@@ -329,7 +341,7 @@ class MainActivity : ComponentActivity() {
                             val read = reader.readFinish(tag)
                             read.blocks to read.blockCount
                         }
-                        mode == ChipMode.Station -> {
+                        mode == ChipMode.Station || mode == ChipMode.Tests -> {
                             val read = reader.readHeader(tag)
                             read.blocks to read.blockCount
                         }

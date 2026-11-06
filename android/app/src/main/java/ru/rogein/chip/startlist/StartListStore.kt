@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import ru.rogein.chip.parse.AwardGroupCsvRow
 import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.EventPackCpTypeRuleFile
 import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.FormatCsvRow
 import ru.rogein.chip.parse.LegendCsvRow
@@ -96,10 +97,19 @@ class StartListStore(
         pack.people.map { it.format.trim() }.filter { it.isNotEmpty() }.forEach { formatNames += it }
         for (name in formatNames) {
             val existing = dao.listCourses().find { it.name.equals(name, true) }
+            val format = pack.formats.find { it.name.equals(name, true) }
+            val fromFormat = format?.controls.orEmpty().filter { it > 0 }
+            val fromLegends = pack.innerLegendCps(format?.cpTypeRules.orEmpty())
+            val nextControls = when {
+                fromFormat.isNotEmpty() -> fromFormat
+                fromLegends.isNotEmpty() -> fromLegends
+                existing != null && !replace -> parseInts(existing.controlsJson)
+                else -> emptyList()
+            }
             dao.upsertCourse(
                 StartCourseEntity(
                     name = name,
-                    controlsJson = existing?.controlsJson ?: JSONArray().toString(),
+                    controlsJson = JSONArray(nextControls).toString(),
                 ),
             )
         }
@@ -358,6 +368,15 @@ class StartListStore(
 
     fun parseLegendsCsv(text: String): List<LegendCsvRow> = CsvImport.legends(text)
 
+    suspend fun fillEmptyFormatControls(cps: List<Int>) {
+        val next = cps.filter { it > 0 }.distinct()
+        if (next.isEmpty()) return
+        for (course in dao.listCourses()) {
+            if (parseInts(course.controlsJson).isNotEmpty()) continue
+            dao.upsertCourse(course.copy(controlsJson = JSONArray(next).toString()))
+        }
+    }
+
     suspend fun deletePerson(id: Int) {
         dao.deletePerson(id)
     }
@@ -518,8 +537,28 @@ private data class UsbEventPackLoad(
     val error: String? = null,
 )
 
-private fun eventPackLoadedMessage(pack: EventPackFile): String {
-    return "Пакет старта: ${pack.people.size} участников, ${pack.formats.size} форматов."
+internal fun eventPackLoadedMessage(pack: EventPackFile, prefix: String = "Пакет старта"): String {
+    val cps = pack.legends.size.takeIf { it > 0 } ?: pack.innerLegendCps().size
+    val groups = pack.awardGroups.size
+    val cpNote = if (cps > 0) "$cps КП" else "без списка КП"
+    val groupNote = if (groups > 0) "$groups групп" else "без групп награждения"
+    return "$prefix: ${pack.people.size} участников, ${pack.formats.size} форматов, $cpNote, $groupNote."
+}
+
+private fun EventPackFile.innerLegendCps(
+    rules: List<EventPackCpTypeRuleFile> = emptyList(),
+): List<Int> {
+    val start = settings.startCp
+    val finish = settings.finishCp
+    val allowed = rules.map { it.type.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
+    return legends.mapNotNull { legend ->
+        if (legend.cp <= 0 || legend.cp == start || legend.cp == finish) return@mapNotNull null
+        if (allowed.isNotEmpty()) {
+            val type = legend.type.trim().lowercase()
+            if (type.isEmpty() || type !in allowed) return@mapNotNull null
+        }
+        legend.cp
+    }.distinct()
 }
 
 private fun shortPackReadError(e: Exception): String {

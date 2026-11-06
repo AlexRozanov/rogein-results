@@ -29,7 +29,11 @@ class SfrChipMemoryTest {
         assertArrayEquals(byteArrayOf(0x05, 0, 0, 0), plan.first().second)
         assertTrue(plan.any { it.first == 8 })
         assertFalse(plan.any { it.first == 3 })
-        assertFalse(plan.any { it.first == 9 })
+        assertTrue(plan.any { it.first == 9 })
+        assertTrue(plan.any { it.first == BLOCK_COUNT - 1 })
+        assertFalse(plan.any { it.first >= BLOCK_COUNT })
+        assertArrayEquals(ByteArray(BLOCK_SIZE), plan.first { it.first == 9 }.second)
+        assertArrayEquals(ByteArray(BLOCK_SIZE), plan.first { it.first == BLOCK_COUNT - 1 }.second)
         val time = plan.first { it.first == 1 }.second
         assertArrayEquals(byteArrayOf(0x00, 0x09, 0x01, 0x02), time)
     }
@@ -61,7 +65,9 @@ class SfrChipMemoryTest {
         assertArrayEquals(ByteArray(4), byBlock[0])
         assertArrayEquals(ByteArray(4), byBlock[7])
         assertArrayEquals(ByteArray(4), byBlock[8])
-        assertFalse(byBlock.containsKey(9))
+        assertArrayEquals(ByteArray(4), byBlock[9])
+        assertArrayEquals(ByteArray(4), byBlock[63])
+        assertFalse(byBlock.containsKey(64))
         assertArrayEquals(byteArrayOf(0x00, 0x01, 0x00, 0x00), byBlock[4])
         assertArrayEquals(byteArrayOf(CP_START.toByte(), 0x12, 0x00, 0x00), byBlock[5])
         assertArrayEquals(byteArrayOf(0x00, 0x25, 0x00, 0x00), byBlock[6])

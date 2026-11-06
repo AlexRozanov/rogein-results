@@ -8441,6 +8441,18 @@ pub struct EventPackFormat {
     pub finish_cp: Option<i64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub competition_start_time: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_type_rules: Vec<EventPackCpTypeRule>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPackCpTypeRule {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_count: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -8511,15 +8523,39 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
                 .into(),
         );
     }
+    let legends = query_cp_legends(conn)?
+        .into_iter()
+        .map(|row| EventPackLegend {
+            cp: row.cp_number,
+            name: row.name,
+            r#type: row.cp_type_name,
+            map_x: row.map_x,
+            map_y: row.map_y,
+        })
+        .collect::<Vec<_>>();
+    let type_rules_by_format = event_pack_type_rules_by_format(conn)?;
     let formats = query_format_settings(conn)?
         .into_iter()
-        .map(|row| EventPackFormat {
-            name: row.format_name,
-            control_minutes: row.control_minutes,
-            penalty_per_minute: row.penalty_per_minute,
-            dq_minutes: row.dq_minutes,
-            finish_cp: row.finish_cp,
-            competition_start_time: row.competition_start_time.unwrap_or_default(),
+        .map(|row| {
+            let cp_type_rules = type_rules_by_format
+                .get(&row.format_name.trim().to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            EventPackFormat {
+                name: row.format_name,
+                control_minutes: row.control_minutes,
+                penalty_per_minute: row.penalty_per_minute,
+                dq_minutes: row.dq_minutes,
+                finish_cp: row.finish_cp,
+                competition_start_time: row.competition_start_time.unwrap_or_default(),
+                controls: event_pack_format_cps(
+                    &legends,
+                    settings.start_cp,
+                    settings.finish_cp,
+                    &cp_type_rules,
+                ),
+                cp_type_rules,
+            }
         })
         .collect::<Vec<_>>();
     let award_groups = query_award_groups(conn)?
@@ -8553,16 +8589,6 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             team: row.teammates,
         });
     }
-    let legends = query_cp_legends(conn)?
-        .into_iter()
-        .map(|row| EventPackLegend {
-            cp: row.cp_number,
-            name: row.name,
-            r#type: row.cp_type_name,
-            map_x: row.map_x,
-            map_y: row.map_y,
-        })
-        .collect::<Vec<_>>();
     let exclusions = query_event_pack_exclusions(conn)?;
     let map_points = collect_event_pack_map_points(conn)?;
     let meters_per_pixel = get_map_georef_info(conn)
@@ -8603,6 +8629,57 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
     })
 }
 
+fn event_pack_type_rules_by_format(
+    conn: &Connection,
+) -> Result<HashMap<String, Vec<EventPackCpTypeRule>>, String> {
+    let mut map: HashMap<String, Vec<EventPackCpTypeRule>> = HashMap::new();
+    for bundle in query_format_cp_type_rules(conn)? {
+        map.insert(
+            bundle.format_name.trim().to_lowercase(),
+            bundle
+                .rules
+                .into_iter()
+                .filter(|rule| !rule.cp_type_name.trim().is_empty())
+                .map(|rule| EventPackCpTypeRule {
+                    r#type: rule.cp_type_name,
+                    max_count: rule.max_count,
+                })
+                .collect(),
+        );
+    }
+    Ok(map)
+}
+
+fn event_pack_format_cps(
+    legends: &[EventPackLegend],
+    start_cp: Option<i64>,
+    finish_cp: i64,
+    rules: &[EventPackCpTypeRule],
+) -> Vec<i64> {
+    let allowed: HashSet<String> = rules
+        .iter()
+        .map(|rule| rule.r#type.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in legends {
+        if row.cp <= 0 || start_cp == Some(row.cp) || row.cp == finish_cp {
+            continue;
+        }
+        if !allowed.is_empty() {
+            let kind = row.r#type.trim().to_lowercase();
+            if kind.is_empty() || !allowed.contains(&kind) {
+                continue;
+            }
+        }
+        if seen.insert(row.cp) {
+            out.push(row.cp);
+        }
+    }
+    out
+}
+
 fn event_pack_revision(pack: &EventPack) -> i64 {
     let mut hasher = DefaultHasher::new();
     pack.sport.hash(&mut hasher);
@@ -8622,6 +8699,11 @@ fn event_pack_revision(pack: &EventPack) -> i64 {
         format.dq_minutes.hash(&mut hasher);
         format.finish_cp.hash(&mut hasher);
         format.competition_start_time.hash(&mut hasher);
+        format.controls.hash(&mut hasher);
+        for rule in &format.cp_type_rules {
+            rule.r#type.hash(&mut hasher);
+            rule.max_count.hash(&mut hasher);
+        }
     }
     for group in &pack.award_groups {
         group.name.hash(&mut hasher);
@@ -10881,7 +10963,9 @@ mod tests {
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot,
-        import_start_protocol_content, init_db, build_event_pack, build_start_pack, EventPack,
+        import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
+        build_start_pack, set_format_cp_type_rules, upsert_award_group, EventPack,
+        FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, resolve_orient_leg_to,
         set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
@@ -11724,6 +11808,7 @@ mod tests {
         assert_eq!(pack.people[0].format, "4ч");
         assert_eq!(pack.people[0].gender, "мужской");
         assert_eq!(pack.legends[0].cp, 31);
+        assert_eq!(pack.award_groups[0].name, "МО");
         assert_eq!(pack.map_points[0].kind, "start");
     }
 
@@ -11749,6 +11834,100 @@ mod tests {
         assert!(pack.formats.iter().any(|format| format.name == "4ч"));
         let orient = build_event_pack_after_switch_orient(&conn);
         assert!(orient.is_err());
+    }
+
+    #[test]
+    fn rogaine_event_pack_includes_legends_and_award_groups() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n8;Иванов Иван;4ч;мужской;1990-01-01\n",
+            true,
+        )
+        .unwrap();
+        import_cp_legends_content(
+            &conn,
+            "номер;название;тип\n31;Камень;обычный\n32;Яма;обычный\n",
+            true,
+        )
+        .unwrap();
+        let format_id: i64 = conn
+            .query_row(
+                "SELECT id FROM start_protocol_formats WHERE format_name = '4ч'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        upsert_award_group(
+            &conn,
+            None,
+            "МО".into(),
+            "male".into(),
+            vec![format_id],
+            Some(18),
+            None,
+        )
+        .unwrap();
+        let pack = build_event_pack(&conn, "Тестовый рогейн").unwrap();
+        assert_eq!(pack.legends.len(), 2);
+        assert_eq!(pack.legends[0].cp, 31);
+        assert_eq!(pack.award_groups.len(), 1);
+        assert_eq!(pack.award_groups[0].name, "МО");
+        assert_eq!(pack.award_groups[0].format_names, vec!["4ч".to_string()]);
+        assert_eq!(pack.formats[0].controls, vec![31, 32]);
+        let json = serde_json::to_string(&pack).unwrap();
+        assert!(json.contains("\"awardGroups\""));
+        assert!(json.contains("\"legends\""));
+        assert!(json.contains("\"controls\""));
+    }
+
+    #[test]
+    fn rogaine_event_pack_filters_format_cps_by_type_rules() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n8;Иванов Иван;4ч;мужской;1990-01-01\n",
+            true,
+        )
+        .unwrap();
+        import_cp_legends_content(
+            &conn,
+            "номер;название;тип\n31;Камень;обычный\n32;Яма;обычный\n51;Башня;бонус\n",
+            true,
+        )
+        .unwrap();
+        let format_id: i64 = conn
+            .query_row(
+                "SELECT id FROM start_protocol_formats WHERE format_name = '4ч'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT id FROM cp_legend_types WHERE type_name = 'обычный'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_format_cp_type_rules(
+            &conn,
+            format_id,
+            vec![FormatCpTypeRuleInput {
+                cp_type_id: type_id,
+                max_count: Some(1),
+            }],
+        )
+        .unwrap();
+        let pack = build_event_pack(&conn, "Тестовый рогейн").unwrap();
+        assert_eq!(pack.formats[0].controls, vec![31, 32]);
+        assert_eq!(pack.formats[0].cp_type_rules.len(), 1);
+        assert_eq!(pack.formats[0].cp_type_rules[0].r#type, "обычный");
+        assert_eq!(pack.formats[0].cp_type_rules[0].max_count, Some(1));
+        assert_eq!(pack.legends.len(), 3);
     }
 
     fn build_event_pack_after_switch_orient(conn: &Connection) -> Result<EventPack, String> {

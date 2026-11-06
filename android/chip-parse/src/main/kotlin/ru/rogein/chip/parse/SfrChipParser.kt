@@ -109,6 +109,9 @@ object SfrChipParser {
 
     fun stationRole(blocks: List<ByteArray>): StationRole? = orientedStation(blocks)?.role
 
+    fun stationByteOrder(blocks: List<ByteArray>): BlockOrder? =
+        orientedStation(blocks)?.let { if (it.flipped) BlockOrder.NfcTools else BlockOrder.Hid }
+
     fun stationCommand(blocks: List<ByteArray>): StationCommand? = stationRole(blocks)?.command
 
     fun stationProgramCp(blocks: List<ByteArray>): Int? = stationRole(blocks)?.cp
@@ -138,7 +141,7 @@ object SfrChipParser {
             else -> false
         }
         val role = (if (useFlipped) flipped else direct) ?: return null
-        return OrientedStation(role, if (useFlipped) flippedBlock5 else block5)
+        return OrientedStation(role, if (useFlipped) flippedBlock5 else block5, useFlipped)
     }
 
     private fun formatStationMode(role: StationRole, logicalBlock5: ByteArray?): String {
@@ -178,7 +181,7 @@ object SfrChipParser {
         else -> null
     }
 
-    private data class OrientedStation(val role: StationRole, val block5: ByteArray?)
+    private data class OrientedStation(val role: StationRole, val block5: ByteArray?, val flipped: Boolean)
 
     private fun matchStation(block4: ByteArray, block5: ByteArray?, block6: ByteArray?): StationRole? {
         if (block4.contentEquals(STATION_ACTIVE_BLOCK)) {

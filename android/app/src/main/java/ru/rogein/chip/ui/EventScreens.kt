@@ -61,6 +61,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -115,6 +116,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import ru.rogein.chip.parse.StationCheckMark
 import ru.rogein.chip.parse.StationCheckReport
+import ru.rogein.chip.parse.CP_CLEAR
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.OrientMark
 import ru.rogein.chip.parse.CP_START
@@ -131,16 +133,23 @@ import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.formatDayClock
 import ru.rogein.chip.parse.formatElapsed
 import ru.rogein.chip.parse.orientPunchWindow
+import ru.rogein.chip.parse.rogaineSplitRows
+import ru.rogein.chip.parse.RogaineSplitKind
 import ru.rogein.chip.parse.protocolRunStatus
 import ru.rogein.chip.parse.ProtocolRunStatus
+import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
+import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
+import ru.rogein.chip.parse.RogaineCpTypeRule
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.punchLegSeconds
+import ru.rogein.chip.queue.AwardGroupView
 import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.queue.EventSettings
 import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.ExclusionEntity
+import ru.rogein.chip.queue.LegendView
 import ru.rogein.chip.queue.SavedStart
 import ru.rogein.chip.queue.ScoredResult
 import ru.rogein.chip.startlist.StartCourse
@@ -187,8 +196,9 @@ internal fun PersonProtocolLine(
     status: ProtocolRunStatus,
     selected: Boolean,
     onClick: () -> Unit,
+    emptyCourseLabel: String = "без дистанции",
 ) {
-    val courseMark = person.currentCourse.ifBlank { "без дистанции" }
+    val courseMark = person.currentCourse.ifBlank { emptyCourseLabel }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -553,6 +563,10 @@ fun ProtocolScreen(
     onPickLegends: (Boolean) -> Unit = {},
     onSaveCourse: (String, List<Int>, String?) -> Unit,
     onDeleteCourse: (String) -> Unit,
+    legendCps: List<Int> = emptyList(),
+    legends: List<LegendView> = emptyList(),
+    formatTypeRules: Map<String, List<RogaineCpTypeRule>> = emptyMap(),
+    awardGroups: List<AwardGroupView> = emptyList(),
     courseCheckOn: Boolean,
     courseCheckName: String,
     courseCheckReport: StationCheckReport?,
@@ -580,6 +594,9 @@ fun ProtocolScreen(
         if (isRogaine(sportKind) && pane == ProtocolPane.Check) {
             pane = ProtocolPane.People
             onCourseCheck(false)
+        }
+        if (!isRogaine(sportKind) && (pane == ProtocolPane.Groups || pane == ProtocolPane.Cps)) {
+            pane = ProtocolPane.People
         }
     }
     var loadMenu by remember { mutableStateOf(false) }
@@ -613,6 +630,8 @@ fun ProtocolScreen(
                 },
             )
         }
+        if (rogaine && legends.isNotEmpty()) add("${legends.size} КП")
+        if (rogaine && awardGroups.isNotEmpty()) add("${awardGroups.size} групп")
         if (withoutCourse > 0) add(if (rogaine) "$withoutCourse без формата" else "$withoutCourse без дистанции")
         if (!rogaine && unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
     }.joinToString(" · ")
@@ -627,6 +646,8 @@ fun ProtocolScreen(
                 selectedTabIndex = when (pane) {
                     ProtocolPane.People -> 0
                     ProtocolPane.Courses -> 1
+                    ProtocolPane.Cps -> 2
+                    ProtocolPane.Groups -> 3
                     ProtocolPane.Check -> if (rogaine) 0 else 2
                 },
                 containerColor = CardWhite,
@@ -656,7 +677,24 @@ fun ProtocolScreen(
                         )
                     },
                 )
-                if (!rogaine) {
+                if (rogaine) {
+                    Tab(
+                        selected = pane == ProtocolPane.Cps,
+                        onClick = {
+                            pane = ProtocolPane.Cps
+                            onCourseCheck(false)
+                        },
+                        text = { Text("КП", maxLines = 1, softWrap = false) },
+                    )
+                    Tab(
+                        selected = pane == ProtocolPane.Groups,
+                        onClick = {
+                            pane = ProtocolPane.Groups
+                            onCourseCheck(false)
+                        },
+                        text = { Text("Группы", maxLines = 1, softWrap = false) },
+                    )
+                } else {
                     Tab(
                         selected = pane == ProtocolPane.Check,
                         onClick = {
@@ -787,6 +825,10 @@ fun ProtocolScreen(
                     Text(
                         if (pane == ProtocolPane.People) {
                             "Номер или фамилия"
+                        } else if (pane == ProtocolPane.Cps) {
+                            "номер, легенда или тип"
+                        } else if (pane == ProtocolPane.Groups) {
+                            "Название группы"
                         } else if (rogaine) {
                             "Название формата"
                         } else {
@@ -898,18 +940,46 @@ fun ProtocolScreen(
                         status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
                         selected = person.id == selected?.id,
                         onClick = { onSelect(person.id) },
+                        emptyCourseLabel = if (rogaine) "без формата" else "без дистанции",
                     )
                 }
             }
         } else if (pane == ProtocolPane.Courses) {
-            Button(onClick = { requestAddCourse = true }) { Text("Новая") }
-            CoursesPanel(
-                courses = courses,
+            if (rogaine) {
+                RogaineFormatsPanel(
+                    courses = courses,
+                    query = query,
+                    formatTypeRules = formatTypeRules,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+            } else {
+                Button(onClick = { requestAddCourse = true }) { Text("Новая") }
+                CoursesPanel(
+                    courses = courses,
+                    query = query,
+                    requestAdd = requestAddCourse,
+                    onRequestAddConsumed = { requestAddCourse = false },
+                    onSave = onSaveCourse,
+                    onDelete = onDeleteCourse,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+            }
+        } else if (pane == ProtocolPane.Cps) {
+            LegendsPanel(
+                legends = legends,
                 query = query,
-                requestAdd = requestAddCourse,
-                onRequestAddConsumed = { requestAddCourse = false },
-                onSave = onSaveCourse,
-                onDelete = onDeleteCourse,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            )
+        } else if (pane == ProtocolPane.Groups) {
+            AwardGroupsPanel(
+                groups = awardGroups,
+                query = query,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -1020,7 +1090,7 @@ private fun askCourseLoad(
     )
 }
 
-private enum class ProtocolPane { People, Courses, Check }
+private enum class ProtocolPane { People, Courses, Cps, Groups, Check }
 
 @Composable
 private fun CourseStationCheckPanel(
@@ -1240,6 +1310,184 @@ private fun CoursesPanel(
 }
 
 @Composable
+private fun AwardGroupsPanel(
+    groups: List<AwardGroupView>,
+    query: String,
+    modifier: Modifier = Modifier,
+) {
+    val q = query.trim().lowercase().replace('ё', 'е')
+    val visible = if (q.isEmpty()) {
+        groups
+    } else {
+        groups.filter { it.name.lowercase().replace('ё', 'е').contains(q) }
+    }
+    if (visible.isEmpty()) {
+        Text(
+            if (groups.isEmpty()) {
+                "Нет групп награждения. Загрузите пакет с компьютера."
+            } else {
+                "Группы не найдены"
+            },
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = modifier.padding(top = 8.dp),
+        )
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(bottom = 16.dp),
+    ) {
+        items(visible, key = { it.name }) { group ->
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Text(group.name, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    listOfNotNull(
+                        awardGenderLabel(group.genderMode),
+                        group.minAge?.let { "от $it лет" } ?: "без возраста",
+                        group.formatNames.takeIf { it.isNotEmpty() }?.joinToString(),
+                    ).joinToString(" · "),
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RogaineFormatsPanel(
+    courses: List<StartCourse>,
+    query: String,
+    formatTypeRules: Map<String, List<RogaineCpTypeRule>>,
+    modifier: Modifier = Modifier,
+) {
+    val q = query.trim().lowercase().replace('ё', 'е')
+    val visible = if (q.isEmpty()) {
+        courses
+    } else {
+        courses.filter { it.name.lowercase().replace('ё', 'е').contains(q) }
+    }
+    if (visible.isEmpty()) {
+        Text(
+            if (courses.isEmpty()) {
+                "Форматов нет. Загрузите пакет с компьютера."
+            } else {
+                "Форматы не найдены"
+            },
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = modifier.padding(top = 8.dp),
+        )
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp),
+    ) {
+        items(visible, key = { it.name }) { course ->
+            val rules = formatTypeRules[courseKey(course.name)].orEmpty()
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(course.name, style = MaterialTheme.typography.titleMedium)
+                if (rules.isEmpty()) {
+                    Text("Можно брать все типы", color = Muted, style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text("Можно брать:", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    rules.forEach { rule ->
+                        Text(
+                            formatTypeLine(rule),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatTypeLine(rule: RogaineCpTypeRule): String {
+    val type = rule.type.ifBlank { "тип" }
+    val limit = rule.maxCount
+    return if (limit == null) type else "$type, не больше $limit"
+}
+
+@Composable
+private fun LegendsPanel(
+    legends: List<LegendView>,
+    query: String,
+    modifier: Modifier = Modifier,
+) {
+    val q = query.trim().lowercase().replace('ё', 'е')
+    val visible = if (q.isEmpty()) {
+        legends
+    } else {
+        legends.filter { row ->
+            row.cp.toString().contains(q) ||
+                row.name.lowercase().replace('ё', 'е').contains(q) ||
+                row.type.lowercase().replace('ё', 'е').contains(q)
+        }
+    }
+    if (visible.isEmpty()) {
+        Text(
+            if (legends.isEmpty()) {
+                "Нет КП. Загрузите пакет с компьютера."
+            } else {
+                "КП не найдены"
+            },
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = modifier.padding(top = 8.dp),
+        )
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        contentPadding = PaddingValues(bottom = 16.dp),
+    ) {
+        items(visible, key = { it.cp }) { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    row.cp.toString(),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.widthIn(min = 40.dp),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        row.name.ifBlank { "КП ${row.cp}" },
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        row.type.ifBlank { "без типа" },
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun awardGenderLabel(mode: String): String =
+    when (mode.trim().lowercase()) {
+        "male", "мужской", "мужчины", "мужские" -> "мужской"
+        "female", "женский", "женщины", "женские" -> "женский"
+        "mixed", "смешанный", "смешанные" -> "смешанный"
+        else -> "все"
+    }
+
+@Composable
 private fun CourseEditorCard(
     course: StartCourse,
     expanded: Boolean,
@@ -1288,7 +1536,11 @@ private fun CourseEditorCard(
                     }
                 }
                 if (course.controls.isEmpty()) {
-                    Text("КП нет. Добавьте номера в порядке дистанции.", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "КП нет. Добавьте номера в порядке дистанции.",
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 ReorderableCpList(
                     cps = course.controls,
@@ -1698,11 +1950,15 @@ fun ResultsScreen(
     liveShareText: String?,
     onSendLive: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
+    onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
     canPrint: Boolean = false,
     onPrint: (ScoredResult) -> Unit = {},
     onPickFinishCsv: () -> Unit = {},
+    sportKind: String = SPORT_ORIENT,
+    startClockSeconds: Int? = null,
+    legendCps: List<Int> = emptyList(),
 ) {
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
@@ -1716,6 +1972,7 @@ fun ResultsScreen(
                 row.course.lowercase().replace('ё', 'е').contains(q)
         }
     }
+    val rogaine = isRogaine(sportKind)
     val groups = remember(filtered) { filtered.groupBy { courseKey(it.course) }.toList() }
     val removedCps = remember(corrections) { EventStore.removedCps(corrections) }
     LaunchedEffect(q) {
@@ -1785,7 +2042,7 @@ fun ResultsScreen(
                 }
             }
             groups.forEach { (groupKey, rows) ->
-                val label = rows.first().course.ifBlank { "без дистанции" }
+                val label = rows.first().course.ifBlank { if (rogaine) "без формата" else "без дистанции" }
                 val open = groupKey !in collapsed
                 item(key = "course-$groupKey") {
                     CourseGroupHeader(
@@ -1812,10 +2069,14 @@ fun ResultsScreen(
                                 expandedId = if (expandedId == live.queueId) null else live.queueId
                             },
                             onAddCp = onAddCp,
+                            onRemoveCp = onRemoveCp,
                             onAssignCourse = onAssignCourse,
                             onDeleteCorrection = onDeleteCorrection,
                             canPrint = canPrint,
                             onPrint = onPrint,
+                            rogaine = rogaine,
+                            startClockSeconds = startClockSeconds,
+                            legendCps = legendCps,
                         )
                     }
                 }
@@ -1876,10 +2137,14 @@ private fun ResultProtocolRow(
     finishCp: Int,
     onToggle: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
+    onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     canPrint: Boolean = false,
     onPrint: (ScoredResult) -> Unit = {},
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    rogaine: Boolean = false,
+    startClockSeconds: Int? = null,
+    legendCps: List<Int> = emptyList(),
 ) {
     val dq = row.calc.status == STATUS_DQ
     val rowColor = if (dq) Danger else Color.Unspecified
@@ -1919,6 +2184,16 @@ private fun ResultProtocolRow(
                 color = rowColor,
                 style = MaterialTheme.typography.bodyMedium,
             )
+            if (rogaine) {
+                Text(
+                    "${row.calc.pointsFinal}",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = rowColor,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
             Text(
                 formatElapsed(row.calc.elapsedSeconds),
                 fontFamily = FontFamily.Monospace,
@@ -1935,6 +2210,15 @@ private fun ResultProtocolRow(
                     .padding(start = 6.dp),
                 textAlign = TextAlign.End,
             )
+            if (row.chipHint != null) {
+                Text(
+                    "!",
+                    color = Warn,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
         }
         if (expanded) {
             ResultRowDetails(
@@ -1946,10 +2230,14 @@ private fun ResultProtocolRow(
                 finishCp = finishCp,
                 onClose = onToggle,
                 onAddCp = onAddCp,
+                onRemoveCp = onRemoveCp,
                 onAssignCourse = onAssignCourse,
                 onDeleteCorrection = onDeleteCorrection,
                 canPrint = canPrint,
                 onPrint = onPrint,
+                rogaine = rogaine,
+                startClockSeconds = startClockSeconds,
+                legendCps = legendCps,
             )
         }
         HorizontalDivider()
@@ -1966,10 +2254,14 @@ private fun ResultRowDetails(
     finishCp: Int,
     onClose: () -> Unit,
     onAddCp: (Int, String, Int) -> Unit,
+    onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
     canPrint: Boolean,
     onPrint: (ScoredResult) -> Unit,
+    rogaine: Boolean = false,
+    startClockSeconds: Int? = null,
+    legendCps: List<Int> = emptyList(),
 ) {
     val id = row.logicalId
     val required = filterCourseCps(
@@ -1987,21 +2279,45 @@ private fun ResultRowDetails(
         modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
     ) {
         Text(
-            "${statusLabel(row.calc.status)} · ${row.calc.taken} КП · ${formatElapsed(row.calc.elapsedSeconds)}",
+            if (rogaine) {
+                "${statusLabel(row.calc.status)} · ${row.calc.pointsFinal} оч. (${row.calc.pointsRaw}−${row.calc.penaltyPoints}) · ${row.calc.taken} КП · ${formatElapsed(row.calc.elapsedSeconds)}"
+            } else {
+                "${statusLabel(row.calc.status)} · ${row.calc.taken} КП · ${formatElapsed(row.calc.elapsedSeconds)}"
+            },
             color = statusColor(row.calc.status),
             style = MaterialTheme.typography.bodySmall,
         )
         if (row.calc.diagnostics.isNotEmpty()) {
             Text(row.calc.diagnostics.joinToString(", "), color = Muted, style = MaterialTheme.typography.bodySmall)
         }
+        row.chipHint?.let { hint ->
+            Text(
+                "Возможна ошибка считки: $hint. Полный лог — «Чип» → «Тесты».",
+                color = Warn,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { marksOpen = true }) { Text("Отметки") }
             if (id != null && courses.isNotEmpty()) {
-                TextButton(onClick = { courseChangeOpen = true }) { Text("Сменить дистанцию") }
+                TextButton(onClick = { courseChangeOpen = true }) { Text(if (rogaine) "Сменить формат" else "Сменить дистанцию") }
             }
         }
         if (id != null) {
-            if (addable.isNotEmpty()) {
+            if (rogaine) {
+                val formatCps = rogaineFormatCps(row.course, courses, legendCps, startCp, finishCp)
+                val added = EventStore.rogaineAddedCps(id, corrections)
+                val removed = corrections.mapNotNull { item ->
+                    if (item.type == "remove_cp" && item.logicalId == id) EventStore.correctionCp(item) else null
+                }.toSet()
+                RogainePersonalCorrectionForm(
+                    cps = formatCps,
+                    added = added,
+                    removed = removed,
+                    onAdd = { cp -> onAddCp(id, row.course, cp) },
+                    onRemove = { cp, mode -> onRemoveCp(id, cp, mode) },
+                )
+            } else if (addable.isNotEmpty()) {
                 CourseChoice(
                     "Добавить взятие КП",
                     addable.map { (cp, count) -> if (count > 1) "$cp (ещё $count)" else cp.toString() },
@@ -2011,7 +2327,11 @@ private fun ResultRowDetails(
                 }
             }
             val personal = corrections.filter {
-                (it.type == "add_cp" || it.type == "assign_course") && it.logicalId == id
+                it.logicalId == id && (
+                    it.type == "add_cp" ||
+                        it.type == "assign_course" ||
+                        (rogaine && it.type == "remove_cp")
+                    )
             }
             if (personal.isNotEmpty()) {
                 Text("Персональные корректировки", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -2021,7 +2341,7 @@ private fun ResultRowDetails(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(correctionLabel(item), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text(correctionLabel(item, rogaine), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                         TextButton(onClick = { onDeleteCorrection(item.id) }) {
                             Text("Отменить")
                         }
@@ -2041,6 +2361,11 @@ private fun ResultRowDetails(
             onDismiss = { marksOpen = false },
             canPrint = canPrint,
             onPrint = { onPrint(row) },
+            rogaine = rogaine,
+            pointsRaw = row.calc.pointsRaw,
+            penaltyMinutes = row.calc.penaltyMinutes,
+            pointsFinal = row.calc.pointsFinal,
+            startClockSeconds = startClockSeconds,
         )
     }
     if (courseChangeOpen && id != null) {
@@ -2065,8 +2390,12 @@ private fun UsedMarksDialog(
     onDismiss: () -> Unit,
     canPrint: Boolean,
     onPrint: () -> Unit,
+    rogaine: Boolean = false,
+    pointsRaw: Int = 0,
+    penaltyMinutes: Int = 0,
+    pointsFinal: Int = 0,
+    startClockSeconds: Int? = null,
 ) {
-    val classified = classifyActualPunches(punches, required, startCp, finishCp)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = null,
@@ -2075,45 +2404,58 @@ private fun UsedMarksDialog(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
-                if (classified.isEmpty()) {
-                    Text("Нет отметок", color = Muted)
+                if (rogaine) {
+                    RogaineMarksList(
+                        punches = punches,
+                        startCp = startCp,
+                        finishCp = finishCp,
+                        startClockSeconds = startClockSeconds,
+                        pointsRaw = pointsRaw,
+                        penaltyMinutes = penaltyMinutes,
+                        pointsFinal = pointsFinal,
+                    )
                 } else {
-                    classified.forEachIndexed { index, item ->
-                        val mark = item.mark
-                        val color = if (item.wrong) Danger else Color.Unspecified
-                        val leg = if (index == 0) {
-                            "—"
-                        } else {
-                            formatDayClock(punchLegSeconds(classified[index - 1].mark.seconds, mark.seconds))
-                        }
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                "${index + 1}",
-                                modifier = Modifier.width(28.dp),
-                                fontFamily = FontFamily.Monospace,
-                                color = color,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                if (mark.added) "${mark.cp}*" else mark.cp.toString(),
-                                modifier = Modifier.width(44.dp),
-                                fontFamily = FontFamily.Monospace,
-                                color = color,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                formatDayClock(mark.seconds),
-                                modifier = Modifier.weight(1f),
-                                fontFamily = FontFamily.Monospace,
-                                color = color,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                leg,
-                                fontFamily = FontFamily.Monospace,
-                                color = color,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                    val classified = classifyActualPunches(punches, required, startCp, finishCp)
+                    if (classified.isEmpty()) {
+                        Text("Нет отметок", color = Muted)
+                    } else {
+                        classified.forEachIndexed { index, item ->
+                            val mark = item.mark
+                            val color = if (item.wrong) Danger else Color.Unspecified
+                            val leg = if (index == 0) {
+                                "—"
+                            } else {
+                                formatDayClock(punchLegSeconds(classified[index - 1].mark.seconds, mark.seconds))
+                            }
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    "${index + 1}",
+                                    modifier = Modifier.width(28.dp),
+                                    fontFamily = FontFamily.Monospace,
+                                    color = color,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    if (mark.added) "${mark.cp}*" else mark.cp.toString(),
+                                    modifier = Modifier.width(44.dp),
+                                    fontFamily = FontFamily.Monospace,
+                                    color = color,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    formatDayClock(mark.seconds),
+                                    modifier = Modifier.weight(1f),
+                                    fontFamily = FontFamily.Monospace,
+                                    color = color,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    leg,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = color,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                         }
                     }
                 }
@@ -2128,6 +2470,100 @@ private fun UsedMarksDialog(
             }
         },
     )
+}
+
+@Composable
+private fun RogaineMarksList(
+    punches: List<OrientMark>,
+    startCp: Int,
+    finishCp: Int,
+    startClockSeconds: Int?,
+    pointsRaw: Int,
+    penaltyMinutes: Int,
+    pointsFinal: Int,
+) {
+    val rows = rogaineSplitRows(punches, startCp, finishCp, startClockSeconds)
+    if (rows.isEmpty()) {
+        Text("Нет отметок", color = Muted)
+        return
+    }
+    rows.forEach { row ->
+        val time = formatDayClock(row.seconds)
+        val leg = row.legSeconds?.let(::formatDayClock) ?: ""
+        when (row.kind) {
+            RogaineSplitKind.Start -> Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Старт",
+                    modifier = Modifier.width(72.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    time,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            RogaineSplitKind.Finish -> Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Финиш",
+                    modifier = Modifier.width(72.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    time,
+                    modifier = Modifier.weight(1f),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    leg,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            RogaineSplitKind.Control -> Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "${row.seq ?: ""}",
+                    modifier = Modifier.width(28.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (row.added) "${row.cp}*" else "${row.cp ?: ""}",
+                    modifier = Modifier.width(44.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    time,
+                    modifier = Modifier.weight(1f),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    leg.ifBlank { "—" },
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+    Text(
+        "Очки $pointsRaw",
+        modifier = Modifier.padding(top = 8.dp),
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.SemiBold,
+    )
+    if (penaltyMinutes > 0) {
+        Text("Штраф $penaltyMinutes мин", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "С учётом штрафа $pointsFinal",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
 }
 
 @Composable
@@ -2254,11 +2690,12 @@ fun StartsScreen(
 }
 
 @Composable
-fun MoreMenu(onOpen: (MorePage) -> Unit) {
+fun MoreMenu(onOpen: (MorePage) -> Unit, sportKind: String = SPORT_ORIENT) {
+    val rogaine = isRogaine(sportKind)
     val items = listOf(
         MorePage.Starts to "Старты и экспорт",
         MorePage.Printer to "Принтер",
-        MorePage.Removed to "Снятые КП",
+        MorePage.Removed to if (rogaine) "Общие корректировки" else "Снятые КП",
         MorePage.Exclusions to "Исключение перегонов",
         MorePage.Corrections to "Персональные корректировки",
         MorePage.Publish to "Публикация на сайт",
@@ -2288,8 +2725,96 @@ fun RemovedCpsScreen(
     corrections: List<CorrectionEntity>,
     onAdd: (Int) -> Unit,
     onUndo: (Long) -> Unit,
+    sportKind: String = SPORT_ORIENT,
+    onAddRogaine: (Int, String) -> Unit = { _, _ -> },
+    startCp: Int = CP_START,
+    finishCp: Int = CP_FINISH,
+    legendCps: List<Int> = emptyList(),
 ) {
+    val rogaine = isRogaine(sportKind)
     val removed = corrections.filter { it.type == "remove_cp" && it.logicalId == null }
+    if (rogaine) {
+        val formatNames = courses.map { it.name }
+        var formatName by remember { mutableStateOf(formatNames.firstOrNull().orEmpty()) }
+        LaunchedEffect(formatNames) {
+            if (formatName.isNotBlank() && formatNames.none { it.equals(formatName, true) }) {
+                formatName = formatNames.firstOrNull().orEmpty()
+            }
+        }
+        val cps = rogaineFormatCps(formatName, courses, legendCps, startCp, finishCp)
+        val already = EventStore.removedCps(corrections)
+        val available = cps.filter { it !in already }
+        var selected by remember { mutableStateOf<Int?>(null) }
+        var removeMode by remember { mutableStateOf(ROGAINE_REMOVE_LEGS) }
+        LaunchedEffect(available) {
+            if (selected != null && selected !in available) selected = null
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "Удаление КП для всех участников. Выберите КП формата. Можно убрать только очки или ещё перегоны во времени.",
+                color = Muted,
+            )
+            if (formatNames.size > 1 && courses.any { it.controls.isNotEmpty() }) {
+                ChoiceMenu(
+                    label = "Формат",
+                    options = formatNames,
+                    current = formatNames.find { it.equals(formatName, true) },
+                    placeholder = "Выберите формат",
+                    optionLabel = { it },
+                    onSelect = {
+                        formatName = it
+                        selected = null
+                    },
+                )
+            }
+            if (cps.isEmpty()) {
+                Text("Нет КП формата. Загрузите легенду КП.", color = Danger)
+            } else if (available.isEmpty()) {
+                Text("Все КП этого формата уже сняты.", color = Muted)
+            } else {
+                ChoiceMenu(
+                    label = "КП формата",
+                    options = available,
+                    current = selected,
+                    placeholder = "Выберите КП",
+                    optionLabel = { "КП $it" },
+                    onSelect = { selected = it },
+                )
+                RogaineRemoveModeChoice(mode = removeMode, onMode = { removeMode = it })
+                Button(
+                    onClick = {
+                        val cp = selected ?: return@Button
+                        onAddRogaine(cp, removeMode)
+                        selected = null
+                    },
+                    enabled = selected != null,
+                ) {
+                    Text("Добавить корректировку")
+                }
+            }
+            if (removed.isEmpty()) {
+                Text("Общих корректировок нет", color = Muted)
+            } else {
+                removed.forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(correctionLabel(row, rogaine = true), modifier = Modifier.weight(1f))
+                        TextButton(onClick = { onUndo(row.id) }) { Text("Отменить") }
+                    }
+                }
+            }
+        }
+        return
+    }
     val removedNums = EventStore.removedCps(corrections)
     val available = courses.flatMap { it.controls }.distinct().sorted()
         .filter { it !in removedNums && it != CP_START && it != CP_FINISH }
@@ -2463,24 +2988,18 @@ fun CorrectionsScreen(
     finishCp: Int,
     onAddCp: (Int, String, Int) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    sportKind: String = SPORT_ORIENT,
+    onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
+    legendCps: List<Int> = emptyList(),
 ) {
-    val personal = corrections.filter { it.logicalId != null && (it.type == "add_cp" || it.type == "assign_course") }
-    val removedCps = EventStore.removedCps(corrections)
-    val candidates = results.mapNotNull { row ->
-        val id = row.logicalId ?: return@mapNotNull null
-        val missed = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
-        if (missed.isEmpty()) null else Triple(row, id, missed)
+    val rogaine = isRogaine(sportKind)
+    val personal = corrections.filter { row ->
+        row.logicalId != null && (
+            row.type == "add_cp" ||
+                row.type == "assign_course" ||
+                (rogaine && row.type == "remove_cp")
+            )
     }
-    var personId by remember { mutableStateOf<Int?>(null) }
-    var addCp by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(candidates.map { it.second }) {
-        if (personId != null && candidates.none { it.second == personId }) {
-            personId = null
-            addCp = null
-        }
-    }
-    val selected = candidates.find { it.second == personId }
-    val missed = selected?.third.orEmpty()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2488,45 +3007,104 @@ fun CorrectionsScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(
-            "Только участники с невзятыми КП. После выбора появляется список пропущенных пунктов — как в финишном протоколе.",
-            color = Muted,
-        )
-        if (candidates.isEmpty()) {
-            Text("Нет участников с пропущенными КП.", color = Muted)
-        } else {
-            ChoiceMenu(
-                label = "Участник",
-                options = candidates,
-                current = selected,
-                placeholder = "Выберите участника",
-                optionLabel = { (row, id, rowMissed) ->
-                    val left = rowMissed.sumOf { item -> item.second }
-                    "$id · ${row.name} · не хватает $left"
-                },
-                onSelect = {
-                    personId = it.second
-                    addCp = null
-                },
+        if (rogaine) {
+            val numbered = results.filter { it.logicalId != null }
+            var personId by remember { mutableStateOf<Int?>(null) }
+            val selected = numbered.find { it.logicalId == personId }
+            Text(
+                "Добавить или удалить КП у конкретного участника. Список — КП выбранного формата.",
+                color = Muted,
             )
-            if (selected != null) {
+            if (numbered.isEmpty()) {
+                Text("Нет считанных участников с номером.", color = Muted)
+            } else {
                 ChoiceMenu(
-                    label = "Невзятые КП",
-                    options = missed,
-                    current = missed.find { it.first == addCp },
-                    placeholder = "Выберите КП",
-                    optionLabel = { (cp, count) -> if (count > 1) "$cp (ещё $count)" else "КП $cp" },
-                    onSelect = { addCp = it.first },
+                    label = "Участник",
+                    options = numbered,
+                    current = selected,
+                    placeholder = "Выберите участника",
+                    optionLabel = { row -> "${row.logicalId} · ${row.name}" },
+                    onSelect = { personId = it.logicalId },
                 )
-                Button(
-                    enabled = addCp != null,
-                    onClick = {
-                        val id = personId ?: return@Button
-                        val cp = addCp ?: return@Button
-                        onAddCp(id, selected.first.course, cp)
+                if (selected != null) {
+                    val id = selected.logicalId
+                    if (id != null) {
+                        val formatCps = rogaineFormatCps(selected.course, courses, legendCps, startCp, finishCp)
+                        val added = EventStore.rogaineAddedCps(id, corrections)
+                        val removedPersonal = corrections.mapNotNull { item ->
+                            if (item.type == "remove_cp" && item.logicalId == id) {
+                                EventStore.correctionCp(item)
+                            } else {
+                                null
+                            }
+                        }.toSet()
+                        RogainePersonalCorrectionForm(
+                            cps = formatCps,
+                            added = added,
+                            removed = removedPersonal,
+                            onAdd = { cp -> onAddCp(id, selected.course, cp) },
+                            onRemove = { cp, mode -> onRemoveCp(id, cp, mode) },
+                        )
+                    }
+                }
+            }
+        } else {
+            val removedCps = EventStore.removedCps(corrections)
+            val candidates = results.mapNotNull { row ->
+                val id = row.logicalId ?: return@mapNotNull null
+                val missed = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
+                if (missed.isEmpty()) null else Triple(row, id, missed)
+            }
+            var personId by remember { mutableStateOf<Int?>(null) }
+            var addCp by remember { mutableStateOf<Int?>(null) }
+            LaunchedEffect(candidates.map { it.second }) {
+                if (personId != null && candidates.none { it.second == personId }) {
+                    personId = null
+                    addCp = null
+                }
+            }
+            val selected = candidates.find { it.second == personId }
+            val missed = selected?.third.orEmpty()
+            Text(
+                "Только участники с невзятыми КП. После выбора появляется список пропущенных пунктов — как в финишном протоколе.",
+                color = Muted,
+            )
+            if (candidates.isEmpty()) {
+                Text("Нет участников с пропущенными КП.", color = Muted)
+            } else {
+                ChoiceMenu(
+                    label = "Участник",
+                    options = candidates,
+                    current = selected,
+                    placeholder = "Выберите участника",
+                    optionLabel = { (row, id, rowMissed) ->
+                        val left = rowMissed.sumOf { item -> item.second }
+                        "$id · ${row.name} · не хватает $left"
+                    },
+                    onSelect = {
+                        personId = it.second
                         addCp = null
                     },
-                ) { Text("Добавить взятие КП") }
+                )
+                if (selected != null) {
+                    ChoiceMenu(
+                        label = "Невзятые КП",
+                        options = missed,
+                        current = missed.find { it.first == addCp },
+                        placeholder = "Выберите КП",
+                        optionLabel = { (cp, count) -> if (count > 1) "$cp (ещё $count)" else "КП $cp" },
+                        onSelect = { addCp = it.first },
+                    )
+                    Button(
+                        enabled = addCp != null,
+                        onClick = {
+                            val id = personId ?: return@Button
+                            val cp = addCp ?: return@Button
+                            onAddCp(id, selected.first.course, cp)
+                            addCp = null
+                        },
+                    ) { Text("Добавить взятие КП") }
+                }
             }
         }
         if (personal.isEmpty()) {
@@ -2541,7 +3119,7 @@ fun CorrectionsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("№ ${row.logicalId} $who · ${correctionLabel(row)}", modifier = Modifier.weight(1f))
+                    Text("№ ${row.logicalId} $who · ${correctionLabel(row, rogaine)}", modifier = Modifier.weight(1f))
                     TextButton(onClick = { onDeleteCorrection(row.id) }) { Text("Отменить") }
                 }
             }
@@ -2650,10 +3228,21 @@ fun EventSettingsScreen(
     busy: Boolean,
     onSave: (EventSettings) -> Unit,
 ) {
-    var startCp by remember(settings.startCp) { mutableStateOf(settings.startCp.toString()) }
+    val rogaine = isRogaine(settings.sportKind)
+    var title by remember(settings.title) { mutableStateOf(settings.title) }
+    var startCp by remember(settings.startCp) { mutableStateOf(settings.startCp.takeIf { it > 0 }?.toString().orEmpty()) }
     var finishCp by remember(settings.finishCp) { mutableStateOf(settings.finishCp.toString()) }
     var minutes by remember(settings.controlMinutes) { mutableStateOf(settings.controlMinutes.toString()) }
     var date by remember(settings.competitionDate) { mutableStateOf(settings.competitionDate) }
+    var startMode by remember(settings.startMode) {
+        mutableStateOf(if (settings.startMode == "time") "time" else "station")
+    }
+    var startTime by remember(settings.competitionStartTime) {
+        mutableStateOf(displayStartTime(settings.competitionStartTime))
+    }
+    var penalty by remember(settings.penaltyPerMinute) { mutableStateOf(settings.penaltyPerMinute.toString()) }
+    var dq by remember(settings.dqMinutes) { mutableStateOf(settings.dqMinutes.toString()) }
+    val timeStart = startMode == "time"
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2662,21 +3251,85 @@ fun EventSettingsScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(
-            if (settings.sportKind == "rogaine") {
-                "Старт: рогейн. Тип задаётся в «Новый старт»."
+            if (rogaine) {
+                "Вид: рогейн. Сменить вид можно только через «Новый старт»."
             } else {
-                "Старт: ориентирование. Параметры расчёта совпадают с десктопом."
+                "Вид: ориентирование. Параметры расчёта совпадают с десктопом."
             },
             color = Muted,
         )
         OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            singleLine = true,
+            label = { Text("Название старта") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (rogaine) {
+            Text("Тип старта", style = MaterialTheme.typography.labelLarge)
+            StartModeRow(
+                selected = startMode,
+                onSelect = { startMode = it },
+            )
+        }
+        OutlinedTextField(
             value = startCp,
             onValueChange = { startCp = it.filter { ch -> ch.isDigit() }.take(3) },
             singleLine = true,
-            label = { Text("КП старта") },
+            label = {
+                Text(
+                    when {
+                        !rogaine || !timeStart -> "Стартовая станция (КП) *"
+                        else -> "Стартовая станция (КП)"
+                    },
+                )
+            },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth(),
         )
+        OutlinedTextField(
+            value = date,
+            onValueChange = { date = it },
+            singleLine = true,
+            label = { Text(if (rogaine && timeStart) "Дата соревнования * (ГГГГ-ММ-ДД)" else "Дата соревнования (ГГГГ-ММ-ДД)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (rogaine) {
+            OutlinedTextField(
+                value = startTime,
+                onValueChange = { startTime = filterStartTime(it) },
+                singleLine = true,
+                label = { Text(if (timeStart) "Стартовое время * (ЧЧ:ММ:СС)" else "Стартовое время (ЧЧ:ММ:СС)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        OutlinedTextField(
+            value = minutes,
+            onValueChange = { minutes = it.filter { ch -> ch.isDigit() }.take(4) },
+            singleLine = true,
+            label = { Text(if (rogaine) "Контроль, мин" else "Контрольное время, мин") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (rogaine) {
+            OutlinedTextField(
+                value = penalty,
+                onValueChange = { penalty = it.filter { ch -> ch.isDigit() }.take(3) },
+                singleLine = true,
+                label = { Text("Штраф, очков за минуту") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = dq,
+                onValueChange = { dq = it.filter { ch -> ch.isDigit() }.take(4) },
+                singleLine = true,
+                label = { Text("DQ после, мин сверх контроля") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         OutlinedTextField(
             value = finishCp,
             onValueChange = { finishCp = it.filter { ch -> ch.isDigit() }.take(3) },
@@ -2685,29 +3338,31 @@ fun EventSettingsScreen(
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
-            value = minutes,
-            onValueChange = { minutes = it.filter { ch -> ch.isDigit() }.take(4) },
-            singleLine = true,
-            label = { Text("Контрольное время, мин") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = date,
-            onValueChange = { date = it },
-            singleLine = true,
-            label = { Text("Дата соревнования (ГГГГ-ММ-ДД)") },
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            if (rogaine) {
+                if (timeStart) {
+                    "По времени: отсчёт от даты и стартового времени. КП до стартовой станции, если она указана, не считаются."
+                } else {
+                    "По станции: время с первой отметки стартовой станции. КП до неё не считаются."
+                }
+            } else {
+                "Время считается от первой отметки старта до последней отметки финиша."
+            },
+            color = Muted,
         )
         Button(
             enabled = !busy,
             onClick = {
                 onSave(
                     settings.copy(
-                        startCp = startCp.toIntOrNull() ?: CP_START,
+                        title = title.trim(),
+                        startCp = startCp.toIntOrNull() ?: if (rogaine && timeStart) 0 else CP_START,
                         finishCp = finishCp.toIntOrNull() ?: CP_FINISH,
-                        controlMinutes = minutes.toIntOrNull() ?: 120,
+                        controlMinutes = minutes.toIntOrNull()?.coerceAtLeast(1) ?: 120,
+                        penaltyPerMinute = penalty.toIntOrNull()?.coerceAtLeast(0) ?: 1,
+                        dqMinutes = dq.toIntOrNull()?.coerceAtLeast(0) ?: 15,
+                        startMode = if (rogaine && timeStart) "time" else "station",
+                        competitionStartTime = normalizeStartTime(startTime),
                         competitionDate = date.trim(),
                     ),
                 )
@@ -2715,6 +3370,48 @@ fun EventSettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Сохранить") }
     }
+}
+
+@Composable
+private fun StartModeRow(
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSelect("station") },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected != "time", onClick = { onSelect("station") })
+            Text("Старт по станции")
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSelect("time") },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected == "time", onClick = { onSelect("time") })
+            Text("Старт по времени")
+        }
+    }
+}
+
+private fun displayStartTime(raw: String): String = raw.trim()
+
+private fun filterStartTime(raw: String): String =
+    raw.filter { it.isDigit() || it == ':' }.take(8)
+
+private fun normalizeStartTime(raw: String): String {
+    val parts = raw.trim().split(':').map { it.trim() }.filter { it.isNotEmpty() }
+    if (parts.isEmpty()) return ""
+    val hour = parts.getOrNull(0)?.toIntOrNull() ?: return ""
+    val minute = parts.getOrNull(1)?.toIntOrNull() ?: 0
+    val second = parts.getOrNull(2)?.toIntOrNull() ?: 0
+    if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return raw.trim()
+    return "%02d:%02d:%02d".format(hour, minute, second)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2913,9 +3610,109 @@ private fun formatCp(cp: Int, settings: EventSettings): String = when (cp) {
     else -> cp.toString()
 }
 
-internal fun correctionLabel(row: CorrectionEntity): String = when (row.type) {
+internal fun correctionLabel(row: CorrectionEntity, rogaine: Boolean = false): String = when (row.type) {
     "add_cp" -> "добавлен КП ${EventStore.correctionCp(row) ?: "—"}"
     "assign_course" -> "дистанция «${EventStore.correctionCourse(row)}»"
-    "remove_cp" -> "снят КП ${EventStore.correctionCp(row) ?: "—"}"
+    "remove_cp" -> {
+        val cp = EventStore.correctionCp(row) ?: "—"
+        if (!rogaine) {
+            "снят КП $cp"
+        } else {
+            val mode = if (EventStore.correctionRemoveMode(row) == ROGAINE_REMOVE_POINTS) {
+                "только очки"
+            } else {
+                "очки и перегоны"
+            }
+            "удалён КП $cp ($mode)"
+        }
+    }
     else -> row.type
+}
+
+@Composable
+private fun RogaineRemoveModeChoice(
+    mode: String,
+    onMode: (String) -> Unit,
+) {
+    Text("Действие", color = Muted, style = MaterialTheme.typography.labelSmall)
+    ChipRow(
+        options = listOf("Удалить перегоны", "Удалить только очки"),
+        current = if (mode == ROGAINE_REMOVE_POINTS) "Удалить только очки" else "Удалить перегоны",
+    ) { label ->
+        onMode(if (label == "Удалить только очки") ROGAINE_REMOVE_POINTS else ROGAINE_REMOVE_LEGS)
+    }
+}
+
+@Composable
+private fun RogainePersonalCorrectionForm(
+    cps: List<Int>,
+    added: Set<Int>,
+    removed: Set<Int>,
+    onAdd: (Int) -> Unit,
+    onRemove: (Int, String) -> Unit,
+) {
+    val addable = cps.filter { it !in added }
+    val removable = cps.filter { it !in removed }
+    var addCp by remember { mutableStateOf<Int?>(null) }
+    var removeCp by remember { mutableStateOf<Int?>(null) }
+    var removeMode by remember { mutableStateOf(ROGAINE_REMOVE_LEGS) }
+    LaunchedEffect(addable) {
+        if (addCp != null && addCp !in addable) addCp = null
+    }
+    LaunchedEffect(removable) {
+        if (removeCp != null && removeCp !in removable) removeCp = null
+    }
+    if (cps.isEmpty()) {
+        Text("Нет КП формата. Загрузите легенду КП.", color = Danger, style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    ChoiceMenu(
+        label = "Добавить КП",
+        options = addable,
+        current = addCp,
+        placeholder = if (addable.isEmpty()) "Все КП уже добавлены" else "Выберите КП",
+        enabled = addable.isNotEmpty(),
+        optionLabel = { "КП $it" },
+        onSelect = { addCp = it },
+    )
+    Button(
+        enabled = addCp != null,
+        onClick = {
+            val cp = addCp ?: return@Button
+            onAdd(cp)
+            addCp = null
+        },
+    ) { Text("Добавить") }
+    ChoiceMenu(
+        label = "Удалить КП",
+        options = removable,
+        current = removeCp,
+        placeholder = if (removable.isEmpty()) "Все КП уже сняты" else "Выберите КП",
+        enabled = removable.isNotEmpty(),
+        optionLabel = { "КП $it" },
+        onSelect = { removeCp = it },
+    )
+    RogaineRemoveModeChoice(mode = removeMode, onMode = { removeMode = it })
+    Button(
+        enabled = removeCp != null,
+        onClick = {
+            val cp = removeCp ?: return@Button
+            onRemove(cp, removeMode)
+            removeCp = null
+        },
+    ) { Text("Удалить") }
+}
+
+private fun rogaineFormatCps(
+    formatName: String,
+    courses: List<StartCourse>,
+    legendCps: List<Int>,
+    startCp: Int,
+    finishCp: Int,
+): List<Int> {
+    val fromFormat = courses.find { it.name.equals(formatName, true) }?.controls.orEmpty()
+    val source = fromFormat.ifEmpty { legendCps }
+    return source.filter { cp ->
+        cp > 0 && cp != startCp && cp != finishCp && cp != CP_CLEAR
+    }.distinct().sorted()
 }

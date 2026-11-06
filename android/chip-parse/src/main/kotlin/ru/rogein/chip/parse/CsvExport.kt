@@ -5,6 +5,18 @@ data class FinishCsvPunch(
     val clock: String,
 )
 
+data class RogaineResultCsvRow(
+    val place: Int?,
+    val id: String,
+    val name: String,
+    val format: String,
+    val pointsRaw: Int,
+    val penaltyPoints: Int,
+    val pointsFinal: Int,
+    val elapsedSeconds: Int,
+    val status: String,
+)
+
 data class FinishCsvRow(
     val chipRawId: String,
     val bibId: String,
@@ -67,6 +79,31 @@ object CsvExport {
                 }
             }
             out.appendLine(cols.joinToString(";") { csvField(it) })
+        }
+        return out.toString()
+    }
+
+    fun rogaineResults(rows: List<RogaineResultCsvRow>): String {
+        require(rows.isNotEmpty()) { "Нет результатов для экспорта" }
+        val out = StringBuilder()
+        out.appendLine(
+            listOf("место", "номер", "фио", "формат", "очки", "штраф", "итог", "время", "статус")
+                .joinToString(";") { csvField(it) },
+        )
+        for (row in rows) {
+            out.appendLine(
+                listOf(
+                    row.place?.toString().orEmpty(),
+                    row.id,
+                    row.name,
+                    row.format,
+                    row.pointsRaw.toString(),
+                    row.penaltyPoints.toString(),
+                    row.pointsFinal.toString(),
+                    formatElapsed(row.elapsedSeconds),
+                    row.status,
+                ).joinToString(";") { csvField(it) },
+            )
         }
         return out.toString()
     }

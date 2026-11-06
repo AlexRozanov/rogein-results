@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -81,6 +82,11 @@ import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.queue.StartArchiveStore
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
+import ru.rogein.chip.parse.ChipCellLog
+import ru.rogein.chip.parse.ChipMemoryLog
+import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.isRogaine
+import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
 import java.text.SimpleDateFormat
@@ -90,6 +96,7 @@ import kotlinx.coroutines.delay
 
 private val Green = Color(0xFF1B4D3E)
 private val Cream = Color(0xFFF4F1EA)
+private val Warn = Color(0xFF8A5A00)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,6 +118,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val morePage by viewModel.morePage.collectAsStateWithLifecycle()
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
+    val finishMissingPrompt by viewModel.finishMissingPrompt.collectAsStateWithLifecycle()
     val finishCsvPrompt by viewModel.finishCsvPrompt.collectAsStateWithLifecycle()
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
     val issueFillPrompt by viewModel.issueFillPrompt.collectAsStateWithLifecycle()
@@ -132,6 +140,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val testCourse by viewModel.testCourse.collectAsStateWithLifecycle()
     val chipReady by viewModel.chipReady.collectAsStateWithLifecycle()
     val chipLogicalId by viewModel.chipLogicalId.collectAsStateWithLifecycle()
+    val chipStationLabel by viewModel.chipStationLabel.collectAsStateWithLifecycle()
+    val chipMemoryLog by viewModel.chipMemoryLog.collectAsStateWithLifecycle()
     val selected = people.find { it.id == selectedId }
     val results = remember(items, people, courses, settings, corrections, exclusions) {
         viewModel.scoredResults(items, people, courses, settings, corrections, exclusions)
@@ -169,7 +179,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             TopAppBar(
                 title = {
                     Text(
-                        topTitle(section, morePage),
+                        topTitle(section, morePage, settings.sportKind),
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -265,6 +275,11 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onStationProgram = viewModel::setStationProgram,
                     onStationControlNumber = viewModel::onStationControlNumber,
                     onDeleteQueued = viewModel::deleteQueued,
+                    sportKind = settings.sportKind,
+                    chipLog = chipMemoryLog,
+                    chipStationLabel = chipStationLabel,
+                    onShareChipLog = viewModel::shareChipLog,
+                    onReadChipDump = viewModel::readChipDump,
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Protocol -> ProtocolScreen(
@@ -315,6 +330,10 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     },
                     onSaveCourse = viewModel::saveCourse,
                     onDeleteCourse = viewModel::deleteCourse,
+                    legendCps = EventStore.legendCps(settings),
+                    legends = EventStore.legends(settings),
+                    formatTypeRules = EventStore.formatTypeRules(settings),
+                    awardGroups = EventStore.awardGroups(settings),
                     items = items,
                     courseCheckOn = courseCheckOn,
                     courseCheckName = courseCheckName,
@@ -338,14 +357,19 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     liveShareText = EventStore.liveShareText(settings),
                     onSendLive = viewModel::sendLiveNow,
                     onAddCp = viewModel::addMissingCp,
+                    onRemoveCp = viewModel::addRogaineRemoveCp,
                     onAssignCourse = viewModel::assignCourse,
                     onDeleteCorrection = viewModel::deleteCorrection,
                     canPrint = printerName.isNotBlank(),
                     onPrint = viewModel::printScored,
                     onPickFinishCsv = { csvPicker.pick(CsvImportKind.Finish) },
+                    sportKind = settings.sportKind,
+                    startClockSeconds = parseDaySeconds(settings.competitionStartTime)
+                        .takeIf { isRogaine(settings.sportKind) && settings.startMode == "time" },
+                    legendCps = EventStore.legendCps(settings),
                 )
                 AppSection.More -> when (morePage) {
-                    MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage)
+                    MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage, sportKind = settings.sportKind)
                     MorePage.Printer -> PrinterScreen(
                         selectedName = printerName,
                         onSelect = viewModel::selectPrinter,
@@ -365,6 +389,11 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         corrections = corrections,
                         onAdd = viewModel::addRemovedCp,
                         onUndo = viewModel::deleteCorrection,
+                        sportKind = settings.sportKind,
+                        onAddRogaine = { cp, mode -> viewModel.addRogaineRemoveCp(null, cp, mode) },
+                        startCp = settings.startCp,
+                        finishCp = settings.finishCp,
+                        legendCps = EventStore.legendCps(settings),
                     )
                     MorePage.Exclusions -> ExclusionsScreen(
                         courses = courses,
@@ -383,6 +412,9 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         finishCp = settings.finishCp,
                         onAddCp = viewModel::addMissingCp,
                         onDeleteCorrection = viewModel::deleteCorrection,
+                        sportKind = settings.sportKind,
+                        onRemoveCp = viewModel::addRogaineRemoveCp,
+                        legendCps = EventStore.legendCps(settings),
                     )
                     MorePage.Publish -> PublishScreen(
                         settings = settings,
@@ -452,7 +484,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             onDismissRequest = viewModel::cancelIssueOverwrite,
             title = { Text("Перезаписать чип?") },
             text = {
-                Text("Чип уже готов для дистанции ${prompt.issuedCourse}.\nПерезаписать чип?")
+                val what = if (isRogaine(settings.sportKind)) "формата" else "дистанции"
+                Text("Чип уже готов для $what ${prompt.issuedCourse}.\nПерезаписать чип?")
             },
             confirmButton = {
                 TextButton(onClick = viewModel::confirmIssueOverwrite) { Text("Да") }
@@ -470,7 +503,13 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             title = { Text("№ ${prompt.id}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Чип выдан. ФИО и дистанцию можно указать сейчас или позже.")
+                    val courseTitle = if (isRogaine(settings.sportKind)) "Формат" else "Дистанция"
+                    val courseHint = if (isRogaine(settings.sportKind)) {
+                        "Чип выдан. ФИО и формат можно указать сейчас или позже."
+                    } else {
+                        "Чип выдан. ФИО и дистанцию можно указать сейчас или позже."
+                    }
+                    Text(courseHint)
                     OutlinedTextField(
                         value = fillName,
                         onValueChange = { fillName = it },
@@ -479,13 +518,13 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         modifier = Modifier.fillMaxWidth(),
                     )
                     if (courses.isNotEmpty()) {
-                        CourseChips("Дистанция", courses.map { it.name }, fillCourse) { fillCourse = it }
+                        CourseChips(courseTitle, courses.map { it.name }, fillCourse) { fillCourse = it }
                     } else {
                         OutlinedTextField(
                             value = fillCourse,
                             onValueChange = { fillCourse = it },
                             singleLine = true,
-                            label = { Text("Дистанция") },
+                            label = { Text(courseTitle) },
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
@@ -498,6 +537,25 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             },
             dismissButton = {
                 TextButton(onClick = viewModel::skipIssueFill) { Text("Позже") }
+            },
+        )
+    }
+    finishMissingPrompt?.let { prompt ->
+        val who = prompt.dump.logicalId?.let { "№ $it" } ?: "без номера"
+        AlertDialog(
+            onDismissRequest = viewModel::skipMissingFinish,
+            title = { Text("Нет отметки финиша") },
+            text = {
+                Text(
+                    "На чипе $who нет КП ${prompt.finishCp} (финиш).\n" +
+                        "Поставить время считывания ${prompt.finish.time} как финишную отметку?",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmMissingFinish) { Text("Да") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::skipMissingFinish) { Text("Нет") }
             },
         )
     }
@@ -606,6 +664,11 @@ private fun ChipSection(
     onStationProgram: (StationProgram) -> Unit,
     onStationControlNumber: (String) -> Unit,
     onDeleteQueued: (String) -> Unit,
+    sportKind: String,
+    chipLog: ChipMemoryLog?,
+    onShareChipLog: () -> Unit,
+    onReadChipDump: () -> Unit,
+    chipStationLabel: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
@@ -654,6 +717,7 @@ private fun ChipSection(
                 newCourse = newCourse,
                 extraCourse = extraCourse,
                 fillOpen = fillOpen,
+                sportKind = sportKind,
                 onQuery = viewModel::onQuery,
                 onSelect = hideKeyboardOnSelect,
                 onClearSelection = viewModel::clearSelection,
@@ -682,9 +746,15 @@ private fun ChipSection(
                 testCourse = testCourse,
                 chipReady = chipReady,
                 busy = busy,
+                sportKind = sportKind,
+                chipLog = chipLog,
+                chipStationLabel = chipStationLabel,
                 onTestCourse = viewModel::onTestCourse,
                 onCorrect = viewModel::writeCorrectCourse,
                 onWrong = viewModel::writeWrongCourse,
+                onRandomRogaine = viewModel::writeRandomRogaineCourse,
+                onReadChipDump = onReadChipDump,
+                onShareChipLog = onShareChipLog,
                 modifier = Modifier.weight(1f),
             )
         } else {
@@ -711,7 +781,7 @@ private fun ChipSection(
     }
 }
 
-private fun topTitle(section: AppSection, morePage: MorePage): String = when (section) {
+private fun topTitle(section: AppSection, morePage: MorePage, sportKind: String): String = when (section) {
     AppSection.Chip -> "Чип"
     AppSection.Protocol -> "Стартовый протокол"
     AppSection.Results -> "Результаты"
@@ -719,7 +789,7 @@ private fun topTitle(section: AppSection, morePage: MorePage): String = when (se
         MorePage.Menu -> "Ещё"
         MorePage.Starts -> "Старты"
         MorePage.Printer -> "Принтер"
-        MorePage.Removed -> "Снятые КП"
+        MorePage.Removed -> if (isRogaine(sportKind)) "Общие корректировки" else "Снятые КП"
         MorePage.Exclusions -> "Исключение перегонов"
         MorePage.Corrections -> "Персональные корректировки"
         MorePage.Publish -> "Публикация на сайт"
@@ -741,6 +811,7 @@ private fun IssuePanel(
     newCourse: String,
     extraCourse: String,
     fillOpen: Boolean,
+    sportKind: String = SPORT_ORIENT,
     onQuery: (String) -> Unit,
     onSelect: (Int) -> Unit,
     onClearSelection: () -> Unit,
@@ -794,6 +865,13 @@ private fun IssuePanel(
                 modifier = Modifier.weight(0.65f),
             )
         }
+        val rogaine = isRogaine(sportKind)
+        val courseTitle = if (rogaine) "Формат" else "Дистанция"
+        val laterHint = if (rogaine) {
+            "Формат можно указать сейчас или после выдачи."
+        } else {
+            "Дистанцию можно указать сейчас или после выдачи."
+        }
         if (!searching) {
             if (addingNew && newNumber.isNotBlank()) {
                 EditorCard(
@@ -801,7 +879,11 @@ private fun IssuePanel(
                     onClose = onClearSelection,
                 ) {
                     Text(
-                        "Приложите чип — номер запишется, участник появится в протоколе. ФИО и дистанцию можно указать сейчас или позже.",
+                        if (rogaine) {
+                            "Приложите чип — номер запишется, участник появится в протоколе. ФИО и формат можно указать сейчас или позже."
+                        } else {
+                            "Приложите чип — номер запишется, участник появится в протоколе. ФИО и дистанцию можно указать сейчас или позже."
+                        },
                         color = Color(0xFF5C5C5C),
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -814,7 +896,7 @@ private fun IssuePanel(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     if (courses.isNotEmpty()) {
-                        CourseChips("Дистанция", courses, newCourse, onNewCourse)
+                        CourseChips(courseTitle, courses, newCourse, onNewCourse)
                     }
                 }
             } else if (selected != null) {
@@ -826,20 +908,28 @@ private fun IssuePanel(
                         listOfNotNull(selected.currentCourse.takeIf { it.isNotBlank() })
                     }
                     val extras = courses.filter { name -> own.none { it.equals(name, true) } }
-                    if (own.isNotEmpty()) {
-                        CourseChips("Дистанция", own, selected.currentCourse, onCurrentCourse)
+                    val formatOptions = buildList {
+                        addAll(own)
+                        if (rogaine) {
+                            extras.forEach { name ->
+                                if (none { it.equals(name, true) }) add(name)
+                            }
+                        }
+                    }
+                    if (formatOptions.isNotEmpty()) {
+                        CourseChips(courseTitle, formatOptions, selected.currentCourse, onCurrentCourse)
                     } else if (courses.isNotEmpty()) {
                         if (selected.currentCourse.isBlank()) {
                             Text(
-                                "Дистанцию можно указать сейчас или после выдачи.",
+                                laterHint,
                                 color = Color(0xFF5C5C5C),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
-                        CourseChips("Дистанция", courses, selected.currentCourse, onCurrentCourse)
+                        CourseChips(courseTitle, courses, selected.currentCourse, onCurrentCourse)
                     } else {
                         Text(
-                            "Дистанцию можно указать сейчас или после выдачи.",
+                            laterHint,
                             color = Color(0xFF5C5C5C),
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -847,12 +937,12 @@ private fun IssuePanel(
                             value = extraCourse,
                             onValueChange = onExtraCourse,
                             singleLine = true,
-                            label = { Text("Дистанция") },
+                            label = { Text(courseTitle) },
                             modifier = Modifier.fillMaxWidth(),
                         )
                         CompactTextButton("Указать", onAddCourse, enabled = extraCourse.isNotBlank())
                     }
-                    if (extras.isNotEmpty()) {
+                    if (!rogaine && extras.isNotEmpty()) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -874,6 +964,7 @@ private fun IssuePanel(
         PersonHits(
             people = people,
             items = items,
+            emptyCourseLabel = if (rogaine) "без формата" else "без дистанции",
             selectedId = selectedId,
             emptyText = if (searching) "Никого не найдено" else "Протокол пуст",
             onSelect = onSelect,
@@ -1099,25 +1190,40 @@ private fun TestsPanel(
     testCourse: String,
     chipReady: Boolean,
     busy: Boolean,
+    sportKind: String,
+    chipLog: ChipMemoryLog?,
+    chipStationLabel: String? = null,
     onTestCourse: (String) -> Unit,
     onCorrect: () -> Unit,
     onWrong: () -> Unit,
+    onRandomRogaine: () -> Unit,
+    onReadChipDump: () -> Unit,
+    onShareChipLog: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val rogaine = isRogaine(sportKind)
     val person = people.find { it.id == chipLogicalId }
     val courseNames = courses.map { it.name }
     val currentControls = courses.find { it.name.equals(testCourse, ignoreCase = true) }?.controls.orEmpty()
         .filter { it != CP_START && it != CP_FINISH }
-    val canWrite = chipReady && person != null && testCourse.isNotBlank() && currentControls.isNotEmpty() && !busy
+    val canWriteOrient = chipReady && person != null && testCourse.isNotBlank() && currentControls.isNotEmpty() && !busy
+    val canWriteRogaine = chipReady && person != null && !busy
+    val canDump = chipReady && !busy
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when {
             !chipReady -> Text(
-                "Приложите чип. Участник определится по логическому номеру из стартового протокола.",
+                "Приложите чип. Участник определится по логическому номеру из стартового протокола. Служебный чип тоже можно дампить.",
+                color = Color(0xFF5C5C5C),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            chipStationLabel != null -> Text(
+                "Служебный чип: $chipStationLabel.",
                 color = Color(0xFF5C5C5C),
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -1131,6 +1237,24 @@ private fun TestsPanel(
                 color = Color(0xFF8B3A3A),
                 style = MaterialTheme.typography.bodyMedium,
             )
+            rogaine -> {
+                Text("${person.id} · ${person.displayName}", style = MaterialTheme.typography.titleMedium)
+                if (person.currentCourse.isNotBlank()) {
+                    Text("Формат: ${person.currentCourse}", color = Color(0xFF5C5C5C), style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    "На чип запишутся старт, случайный набор КП и финиш. Повторная запись даст другой набор.",
+                    color = Color(0xFF5C5C5C),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = onRandomRogaine,
+                    enabled = canWriteRogaine,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Случайные КП")
+                }
+            }
             else -> {
                 Text("${person.id} · ${person.displayName}", style = MaterialTheme.typography.titleMedium)
                 val names = person.courses.ifEmpty { courseNames }
@@ -1155,14 +1279,14 @@ private fun TestsPanel(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
                         onClick = onCorrect,
-                        enabled = canWrite,
+                        enabled = canWriteOrient,
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("Правильное")
                     }
                     Button(
                         onClick = onWrong,
-                        enabled = canWrite,
+                        enabled = canWriteOrient,
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8B3A3A)),
                     ) {
@@ -1171,7 +1295,80 @@ private fun TestsPanel(
                 }
             }
         }
+        Button(
+            onClick = onReadChipDump,
+            enabled = canDump,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Считать дамп")
+        }
+        ChipDumpSection(chipLog = chipLog, chipReady = chipReady, onShare = onShareChipLog)
     }
+}
+
+@Composable
+private fun ChipDumpSection(
+    chipLog: ChipMemoryLog?,
+    chipReady: Boolean,
+    onShare: () -> Unit,
+) {
+    Text("Полный лог чипа", style = MaterialTheme.typography.titleSmall)
+    Text(
+        "Полный дамп читается только по кнопке «Считать дамп». Финиш по-прежнему читает только до указателя.",
+        color = Color(0xFF5C5C5C),
+        style = MaterialTheme.typography.bodySmall,
+    )
+    if (chipLog == null) {
+        Text(
+            if (chipReady) "Чип на месте. Нажмите «Считать дамп», не убирая его."
+            else "Приложите чип, затем нажмите «Считать дамп».",
+            color = Color(0xFF5C5C5C),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        return
+    }
+    val kind = chipLog.kindLine
+    if (kind != null) {
+        Text(
+            kind,
+            color = Color(0xFF1B4D3E),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+    val hint = chipLog.hint
+    if (hint != null) {
+        Text(
+            "Внимание: $hint",
+            color = Warn,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    } else if (kind == null) {
+        Text(
+            "Подозрительных ячеек нет. Лог сохранён.",
+            color = Color(0xFF5C5C5C),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    } else {
+        Text(
+            "Лог сохранён.",
+            color = Color(0xFF5C5C5C),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Button(
+        onClick = onShare,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Поделиться логом")
+    }
+    Text(
+        chipLog.format(),
+        fontFamily = FontFamily.Monospace,
+        fontSize = 11.sp,
+        color = Color(0xFF333333),
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -1237,6 +1434,7 @@ private fun PersonHits(
     emptyText: String,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    emptyCourseLabel: String = "без дистанции",
 ) {
     val finishedById = remember(items) {
         items.mapNotNull { item -> item.logicalId?.let { id -> id to item.courseName } }
@@ -1258,6 +1456,7 @@ private fun PersonHits(
                 status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
                 selected = person.id == selectedId,
                 onClick = { onSelect(person.id) },
+                emptyCourseLabel = emptyCourseLabel,
             )
         }
     }
@@ -1351,6 +1550,13 @@ private fun QueueCard(item: QueuedChipEntity) {
                 Text(item.courseName)
             }
             Text("${item.punchCount} отметок · ${item.firstTime ?: "—"} – ${item.lastTime ?: "—"}")
+            ChipCellLog.hintFromRawHex(item.rawHex)?.let { hint ->
+                Text(
+                    "Проверьте чип: $hint. Полный лог — вкладка «Тесты».",
+                    color = Warn,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Text("UID ${item.uid}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             Text(
                 "в очереди с ${timeFmt.format(Date(item.createdAt))}",

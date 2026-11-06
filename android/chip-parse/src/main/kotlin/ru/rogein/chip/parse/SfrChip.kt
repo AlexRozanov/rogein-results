@@ -21,7 +21,11 @@ data class ChipDump(
     val blockOrder: BlockOrder,
     val pointerEnd: Int?,
     val blockCount: Int,
-)
+) {
+    fun hasPunch(cp: Int): Boolean = punches.any { it.cp == cp }
+
+    fun withPunch(punch: Punch): ChipDump = copy(punches = punches + punch)
+}
 
 enum class BlockOrder {
     /** Как в USB HID SFR basic: [КП][ЧЧ][ММ][СС]. */

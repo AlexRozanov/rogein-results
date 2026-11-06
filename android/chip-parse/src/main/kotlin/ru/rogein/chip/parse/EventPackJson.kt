@@ -36,6 +36,13 @@ data class EventPackFormatFile(
     val dqMinutes: Int?,
     val finishCp: Int?,
     val competitionStartTime: String,
+    val controls: List<Int> = emptyList(),
+    val cpTypeRules: List<EventPackCpTypeRuleFile> = emptyList(),
+)
+
+data class EventPackCpTypeRuleFile(
+    val type: String,
+    val maxCount: Int?,
 )
 
 data class EventPackAwardGroupFile(
@@ -81,27 +88,36 @@ data class EventPackMapPointFile(
 fun parseEventPackJson(text: String): EventPackFile {
     val root = JSONObject(text)
     val settingsObj = root.optJSONObject("settings") ?: JSONObject()
-    val formats = jsonObjects(root.optJSONArray("formats")).mapNotNull { obj ->
+    val formats = jsonObjects(root.optArr("formats")).mapNotNull { obj ->
         val name = obj.optString("name").trim()
         if (name.isEmpty()) return@mapNotNull null
         EventPackFormatFile(
             name = name,
-            controlMinutes = objInt(obj, "controlMinutes"),
-            penaltyPerMinute = objInt(obj, "penaltyPerMinute"),
-            dqMinutes = objInt(obj, "dqMinutes"),
-            finishCp = objInt(obj, "finishCp"),
-            competitionStartTime = obj.optString("competitionStartTime").trim(),
+            controlMinutes = objInt(obj, "controlMinutes", "control_minutes"),
+            penaltyPerMinute = objInt(obj, "penaltyPerMinute", "penalty_per_minute"),
+            dqMinutes = objInt(obj, "dqMinutes", "dq_minutes"),
+            finishCp = objInt(obj, "finishCp", "finish_cp"),
+            competitionStartTime = obj.optStr("competitionStartTime", "competition_start_time"),
+            controls = jsonInts(obj.optArr("controls", "cps")),
+            cpTypeRules = jsonObjects(obj.optArr("cpTypeRules", "cp_type_rules")).mapNotNull { rule ->
+                val type = rule.optStr("type", "cpType", "cp_type")
+                if (type.isEmpty()) return@mapNotNull null
+                EventPackCpTypeRuleFile(
+                    type = type,
+                    maxCount = objInt(rule, "maxCount", "max_count")?.takeIf { it > 0 },
+                )
+            },
         )
     }
-    val awardGroups = jsonObjects(root.optJSONArray("awardGroups")).mapNotNull { obj ->
+    val awardGroups = jsonObjects(root.optArr("awardGroups", "award_groups")).mapNotNull { obj ->
         val name = obj.optString("name").trim()
         if (name.isEmpty()) return@mapNotNull null
         EventPackAwardGroupFile(
             name = name,
-            genderMode = obj.optString("genderMode").trim().ifBlank { "any" },
-            minAge = objInt(obj, "minAge"),
-            sortOrder = obj.optInt("sortOrder", 0),
-            formatNames = jsonArray(obj.optJSONArray("formatNames")).mapNotNull { value ->
+            genderMode = obj.optStr("genderMode", "gender_mode").ifBlank { "any" },
+            minAge = objInt(obj, "minAge", "min_age"),
+            sortOrder = obj.optInt("sortOrder", obj.optInt("sort_order", 0)),
+            formatNames = jsonArray(obj.optArr("formatNames", "format_names")).mapNotNull { value ->
                 value.toString().trim().takeIf { it.isNotEmpty() }
             },
         )
@@ -124,15 +140,15 @@ fun parseEventPackJson(text: String): EventPackFile {
             team = obj.optString("team").trim(),
         )
     }
-    val legends = jsonObjects(root.optJSONArray("legends")).mapNotNull { obj ->
-        val cp = obj.optInt("cp", 0)
+    val legends = jsonObjects(root.optArr("legends")).mapNotNull { obj ->
+        val cp = objInt(obj, "cp", "cpNumber", "cp_number") ?: 0
         if (cp <= 0) return@mapNotNull null
         EventPackLegendFile(
             cp = cp,
             name = obj.optString("name").trim(),
-            type = obj.optString("type").trim(),
-            mapX = objDouble(obj, "mapX"),
-            mapY = objDouble(obj, "mapY"),
+            type = obj.optStr("type", "cpType", "cp_type"),
+            mapX = objDouble(obj, "mapX", "map_x"),
+            mapY = objDouble(obj, "mapY", "map_y"),
         )
     }
     val exclusions = jsonObjects(root.optJSONArray("exclusions")).mapNotNull { obj ->
@@ -165,14 +181,14 @@ fun parseEventPackJson(text: String): EventPackFile {
         },
         title = root.optString("title").trim(),
         settings = EventPackSettingsFile(
-            controlMinutes = settingsObj.optInt("controlMinutes", 120),
-            penaltyPerMinute = settingsObj.optInt("penaltyPerMinute", 1),
-            dqMinutes = settingsObj.optInt("dqMinutes", 15),
-            startCp = settingsObj.optInt("startCp", CP_START),
-            finishCp = settingsObj.optInt("finishCp", CP_FINISH),
-            startMode = settingsObj.optString("startMode").trim().ifBlank { "station" },
-            competitionDate = settingsObj.optString("competitionDate").trim(),
-            competitionStartTime = settingsObj.optString("competitionStartTime").trim(),
+            controlMinutes = objInt(settingsObj, "controlMinutes", "control_minutes") ?: 120,
+            penaltyPerMinute = objInt(settingsObj, "penaltyPerMinute", "penalty_per_minute") ?: 1,
+            dqMinutes = objInt(settingsObj, "dqMinutes", "dq_minutes") ?: 15,
+            startCp = objInt(settingsObj, "startCp", "start_cp") ?: CP_START,
+            finishCp = objInt(settingsObj, "finishCp", "finish_cp") ?: CP_FINISH,
+            startMode = settingsObj.optStr("startMode", "start_mode").ifBlank { "station" },
+            competitionDate = settingsObj.optStr("competitionDate", "competition_date"),
+            competitionStartTime = settingsObj.optStr("competitionStartTime", "competition_start_time"),
         ),
         formats = formats,
         awardGroups = awardGroups,
@@ -193,18 +209,50 @@ private fun jsonArray(array: JSONArray?): List<Any> {
     return (0 until array.length()).map { array.get(it) }
 }
 
-private fun objInt(obj: JSONObject, key: String): Int? {
-    if (!obj.has(key) || obj.isNull(key)) return null
-    val value = obj.opt(key)
-    return when (value) {
-        is Number -> value.toInt()
-        is String -> value.trim().toIntOrNull()
-        else -> null
+private fun jsonInts(array: JSONArray?): List<Int> =
+    jsonArray(array).mapNotNull { value ->
+        when (value) {
+            is Number -> value.toInt().takeIf { it > 0 }
+            is String -> value.trim().toIntOrNull()?.takeIf { it > 0 }
+            else -> null
+        }
     }
+
+private fun objInt(obj: JSONObject, vararg keys: String): Int? {
+    for (key in keys) {
+        if (!obj.has(key) || obj.isNull(key)) continue
+        val value = obj.opt(key)
+        val parsed = when (value) {
+            is Number -> value.toInt()
+            is String -> value.trim().toIntOrNull()
+            else -> null
+        }
+        if (parsed != null) return parsed
+    }
+    return null
 }
 
-private fun objDouble(obj: JSONObject, key: String): Double? {
-    if (!obj.has(key) || obj.isNull(key)) return null
-    val value = obj.optDouble(key)
-    return value.takeIf { it.isFinite() }
+private fun objDouble(obj: JSONObject, vararg keys: String): Double? {
+    for (key in keys) {
+        if (!obj.has(key) || obj.isNull(key)) continue
+        val value = obj.optDouble(key)
+        if (value.isFinite()) return value
+    }
+    return null
+}
+
+private fun JSONObject.optArr(vararg keys: String): JSONArray? {
+    for (key in keys) {
+        optJSONArray(key)?.let { return it }
+    }
+    return null
+}
+
+private fun JSONObject.optStr(vararg keys: String): String {
+    for (key in keys) {
+        if (!has(key) || isNull(key)) continue
+        val value = optString(key).trim()
+        if (value.isNotEmpty()) return value
+    }
+    return ""
 }

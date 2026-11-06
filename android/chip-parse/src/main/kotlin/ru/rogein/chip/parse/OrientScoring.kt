@@ -25,6 +25,10 @@ data class OrientCalc(
     val taken: Int,
     val elapsedSeconds: Int,
     val diagnostics: List<String>,
+    val pointsRaw: Int = 0,
+    val penaltyPoints: Int = 0,
+    val pointsFinal: Int = 0,
+    val penaltyMinutes: Int = 0,
 ) {
     val ok: Boolean get() = status == STATUS_OK
 }
@@ -33,6 +37,41 @@ const val STATUS_OK = "OK"
 const val STATUS_DQ = "Дисквалификация"
 const val STATUS_ERR = "Ошибка"
 const val STATUS_DNS = "Не стартовал"
+
+fun diagnosticLabel(code: String): String = when (code) {
+    "missing_course" -> "нет дистанции"
+    "course_empty" -> "дистанция без КП"
+    "course_unknown" -> "дистанция не найдена"
+    "start_cp_not_configured" -> "не задана стартовая станция"
+    "start_time_not_configured" -> "не задано общее время старта"
+    "no_marks" -> "нет отметок"
+    "start_missing" -> "нет отметки старта"
+    "finish_missing" -> "нет отметки финиша"
+    "finish_not_last" -> "финиш не последняя отметка"
+    "course_incomplete" -> "дистанция пройдена не полностью"
+    "overtime" -> "превышение контрольного времени"
+    else -> code
+}
+
+fun resultStatusLine(status: String, diagnostics: List<String> = emptyList()): String {
+    val reasons = diagnostics.map(::diagnosticLabel).distinct()
+    return when (status) {
+        STATUS_OK -> "OK"
+        STATUS_DQ -> {
+            val reason = reasons.ifEmpty { listOf("превышение лимита времени") }
+            "Дисквалификация: ${reason.joinToString(", ")}"
+        }
+        STATUS_DNS -> {
+            val reason = reasons.ifEmpty { listOf("не стартовал") }
+            "Не стартовал: ${reason.joinToString(", ")}"
+        }
+        STATUS_ERR -> {
+            val reason = reasons.ifEmpty { listOf("ошибка") }
+            "Ошибка: ${reason.joinToString(", ")}"
+        }
+        else -> if (reasons.isEmpty()) status else "$status: ${reasons.joinToString(", ")}"
+    }
+}
 
 fun courseKey(name: String): String =
     name.trim().lowercase().replace(Regex("\\s+"), " ")

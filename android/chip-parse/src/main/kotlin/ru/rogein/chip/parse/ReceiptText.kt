@@ -15,6 +15,12 @@ data class SplitReceipt(
     val startCp: Int,
     val elapsedSeconds: Int,
     val status: String,
+    val finishCp: Int = CP_FINISH,
+    val startClockSeconds: Int? = null,
+    val pointsRaw: Int = 0,
+    val penaltyMinutes: Int = 0,
+    val pointsFinal: Int = 0,
+    val rogaine: Boolean = false,
 )
 
 object ReceiptText {
@@ -26,7 +32,10 @@ object ReceiptText {
         val title = data.title.trim()
         if (title.isNotEmpty()) lines.addAll(wrap(title))
         val course = data.course.trim()
-        if (course.isNotEmpty()) lines.addAll(wrap("Дистанция $course"))
+        if (course.isNotEmpty()) {
+            val label = if (data.rogaine) "Формат" else "Дистанция"
+            lines.addAll(wrap("$label $course"))
+        }
         val who = buildString {
             if (data.bib.isNotBlank()) append("№ ${data.bib}")
             val name = data.name.trim()
@@ -37,7 +46,9 @@ object ReceiptText {
         }
         if (who.isNotEmpty()) lines.addAll(wrap(who))
         lines += ""
-        if (data.marks.isEmpty()) {
+        if (data.rogaine) {
+            appendRogaineSplits(lines, data)
+        } else if (data.marks.isEmpty()) {
             lines += "Нет отметок"
         } else {
             val t0 = data.marks.firstOrNull { it.cp == data.startCp }?.seconds
@@ -49,10 +60,43 @@ object ReceiptText {
             }
         }
         lines += ""
+        if (data.rogaine) {
+            lines += "Очки       ${data.pointsRaw}"
+            if (data.penaltyMinutes > 0) {
+                lines += "Штраф      ${data.penaltyMinutes} мин"
+                lines += "Итого      ${data.pointsFinal}"
+            }
+        }
         lines += "Результат  ${formatElapsed(data.elapsedSeconds)}"
         lines += "Отметка    ${receiptStatus(data.status)}"
         lines += ""
         return lines.joinToString("\n", postfix = "\n")
+    }
+
+    private fun appendRogaineSplits(lines: MutableList<String>, data: SplitReceipt) {
+        val marks = data.marks.map { OrientMark(it.cp, it.seconds) }
+        val rows = rogaineSplitRows(marks, data.startCp, data.finishCp, data.startClockSeconds)
+        if (rows.isEmpty()) {
+            lines += "Нет отметок"
+            return
+        }
+        for (row in rows) {
+            val time = formatDayClock(row.seconds)
+            val leg = row.legSeconds?.let(::formatDayClock)
+            val cp = row.cp?.toString().orEmpty()
+            lines += when (row.kind) {
+                RogaineSplitKind.Start -> "Старт           $time"
+                RogaineSplitKind.Finish -> {
+                    if (leg == null) "Финиш           $time" else "Финиш  $time  $leg"
+                }
+                RogaineSplitKind.Control -> {
+                    val seq = (row.seq ?: 0).toString().padStart(2)
+                    val num = (if (row.added) "$cp*" else cp).padStart(3)
+                    val split = (leg ?: "—").padStart(8)
+                    "$seq $num  $time $split"
+                }
+            }
+        }
     }
 
     fun formatReceiptDate(iso: String): String {

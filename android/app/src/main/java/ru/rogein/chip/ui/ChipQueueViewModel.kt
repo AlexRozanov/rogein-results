@@ -17,8 +17,13 @@ import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.CP_CLEAR
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
+import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipDump
+import ru.rogein.chip.parse.ChipMemoryLog
+import ru.rogein.chip.parse.CsvExport
+import ru.rogein.chip.parse.RogaineResultCsvRow
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.StationCommand
@@ -33,6 +38,8 @@ import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.formatElapsed
+import ru.rogein.chip.parse.parseDaySeconds
+import ru.rogein.chip.parse.resultStatusLine
 import ru.rogein.chip.parse.orientPunchWindow
 import ru.rogein.chip.printer.BondedPrinter
 import ru.rogein.chip.queue.ChipQueueRepository
@@ -88,6 +95,15 @@ data class FinishReplacePrompt(
     val personName: String,
 )
 
+data class FinishMissingPrompt(
+    val dump: ChipDump,
+    val rawHex: String,
+    val personName: String,
+    val courseName: String,
+    val finishCp: Int,
+    val finish: Punch,
+)
+
 data class IssueOverwritePrompt(
     val id: Int,
     val name: String,
@@ -122,6 +138,7 @@ interface ChipIo {
     fun writeLogicalId(order: BlockOrder, id: Int)
     fun issue(order: BlockOrder, id: Int, pointerEnd: Int?, blockCount: Int)
     fun writeTestCourse(order: BlockOrder, id: Int, punches: List<Punch>, pointerEnd: Int?, blockCount: Int)
+    fun readAllBlocks(): Pair<String, List<ByteArray>>
     fun writeStationProgram(
         order: BlockOrder,
         command: StationCommand,
@@ -195,6 +212,9 @@ class ChipQueueViewModel(
     private val _finishReplacePrompt = MutableStateFlow<FinishReplacePrompt?>(null)
     val finishReplacePrompt = _finishReplacePrompt.asStateFlow()
 
+    private val _finishMissingPrompt = MutableStateFlow<FinishMissingPrompt?>(null)
+    val finishMissingPrompt = _finishMissingPrompt.asStateFlow()
+
     private val _finishCsvPrompt = MutableStateFlow<FinishCsvPrompt?>(null)
     val finishCsvPrompt = _finishCsvPrompt.asStateFlow()
     private var pendingFinishCsv: FinishCsvImportPreview? = null
@@ -240,6 +260,12 @@ class ChipQueueViewModel(
 
     private val _chipLogicalId = MutableStateFlow<Int?>(null)
     val chipLogicalId = _chipLogicalId.asStateFlow()
+
+    private val _chipStationLabel = MutableStateFlow<String?>(null)
+    val chipStationLabel = _chipStationLabel.asStateFlow()
+
+    private val _chipMemoryLog = MutableStateFlow<ChipMemoryLog?>(null)
+    val chipMemoryLog = _chipMemoryLog.asStateFlow()
 
     private val _mode = MutableStateFlow(ChipMode.Issue)
     val mode = _mode.asStateFlow()
@@ -387,15 +413,13 @@ class ChipQueueViewModel(
                     _status.value = it
                     return@launch
                 }
-                repository.startList.applyEventPack(downloaded.pack, replace = true)
-                repository.event.applyPackMeta(downloaded.pack)
+                val note = repository.applyRogaineEventPack(downloaded.pack, replace = true)
                 val mapBytes = downloaded.mapBytes
                 if (mapBytes != null && mapBytes.isNotEmpty()) {
                     repository.event.saveCourseMap(mapBytes, downloaded.mapFileName)
                 }
                 val mapNote = if (mapBytes != null && mapBytes.isNotEmpty()) ", карта загружена" else ""
-                _status.value =
-                    "Пакет с сайта: ${downloaded.pack.people.size} участников, ${downloaded.pack.formats.size} форматов$mapNote."
+                _status.value = note.replace("Пакет старта:", "Пакет с сайта:") + mapNote
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось скачать пакет"
             } finally {
@@ -447,6 +471,7 @@ class ChipQueueViewModel(
                     CsvImportKind.Legends -> {
                         val rows = repository.startList.parseLegendsCsv(text)
                         repository.event.mergeLegends(rows)
+                        repository.startList.fillEmptyFormatControls(rows.map { it.cp })
                         "Легенды: ${rows.size} КП."
                     }
                 }
@@ -530,13 +555,42 @@ class ChipQueueViewModel(
 
     fun addMissingCp(logicalId: Int, courseName: String, cp: Int) {
         if (cp <= 0) {
-            _status.value = "Выберите КП дистанции"
+            _status.value = if (isRogaine(settings.value.sportKind)) "Укажите номер КП" else "Выберите КП дистанции"
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            repository.event.addMissingCp(logicalId, courseName, cp)
-            repository.requestLiveSend()
-            _status.value = "№ $logicalId: добавлен КП $cp, результат пересчитан"
+            try {
+                if (isRogaine(settings.value.sportKind)) {
+                    repository.event.addRogainePersonalCp(logicalId, cp)
+                } else {
+                    repository.event.addMissingCp(logicalId, courseName, cp)
+                }
+                repository.requestLiveSend()
+                _status.value = "№ $logicalId: добавлен КП $cp, результат пересчитан"
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось добавить КП"
+            }
+        }
+    }
+
+    fun addRogaineRemoveCp(logicalId: Int?, cp: Int, removeMode: String) {
+        if (cp <= 0) {
+            _status.value = "Укажите номер КП"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.event.addRogaineRemoveCp(logicalId, cp, removeMode)
+                repository.requestLiveSend()
+                val action = if (removeMode == ROGAINE_REMOVE_POINTS) "только очки" else "очки и перегоны"
+                _status.value = if (logicalId == null) {
+                    "Общая корректировка: КП $cp ($action), результат пересчитан"
+                } else {
+                    "№ $logicalId: удалён КП $cp ($action), результат пересчитан"
+                }
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось удалить КП"
+            }
         }
     }
 
@@ -842,6 +896,53 @@ class ChipQueueViewModel(
         writeTestCourse(correct = false)
     }
 
+    fun writeRandomRogaineCourse() {
+        val logicalId = _chipLogicalId.value
+        if (!_chipReady.value) {
+            _status.value = "Приложите чип — участник определится по номеру из протокола."
+            return
+        }
+        if (logicalId == null) {
+            _status.value = "На чипе нет номера. Сначала выдайте чип на вкладке «Выдача»."
+            return
+        }
+        val person = personFromChip()
+        if (person == null) {
+            _status.value = "№ $logicalId нет в стартовом протоколе."
+            return
+        }
+        val order = blockOrder
+        val io = chipIo
+        if (!_chipReady.value || order == null || io == null) {
+            _status.value = "Приложите чип и не убирайте его."
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                val current = settings.value
+                val pool = EventStore.legendCps(current).ifEmpty { TestCoursePlan.defaultRogainePool }
+                val cps = TestCoursePlan.randomRogaineSequence(current.startCp, current.finishCp, pool)
+                val now = LocalTime.now()
+                val punches = TestCoursePlan.punches(cps, now.hour, now.minute, now.second)
+                io.writeTestCourse(order, logicalId, punches, pointerEnd, chipBlockCount)
+                pointerEnd = 4 + punches.size
+                punchCount = punches.size
+                _chipMemoryLog.value = null
+                _sessionSummary.value = "№ ${person.id} · ${punches.size} отметок"
+                val inner = cps.filter { it != current.startCp && it != current.finishCp }
+                _status.value = "${person.name} · случайные КП: ${inner.joinToString()} (${punches.size} отметок)."
+                signalSuccess()
+            } catch (e: Exception) {
+                forgetChip()
+                _status.value = e.message ?: "Не удалось записать прохождение"
+                signalError()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
     private fun writeTestCourse(correct: Boolean) {
         val logicalId = _chipLogicalId.value
         if (!_chipReady.value) {
@@ -888,6 +989,7 @@ class ChipQueueViewModel(
                 io.writeTestCourse(order, logicalId, punches, pointerEnd, chipBlockCount)
                 pointerEnd = 4 + punches.size
                 punchCount = punches.size
+                _chipMemoryLog.value = null
                 _sessionSummary.value = "№ ${person.id} · ${punches.size} отметок"
                 val kind = if (correct) "правильное" else "ошибочное"
                 _status.value = "${person.name} · $courseName · записано $kind прохождение (${punches.size} КП)."
@@ -911,7 +1013,9 @@ class ChipQueueViewModel(
                     "Введите номер и приложите чип. Фамилия — если нужно найти в списке."
                 person != null -> {
                     val who = person.name.ifBlank { "без ФИО" }
-                    val dist = person.currentCourse.ifBlank { "без дистанции" }
+                    val dist = person.currentCourse.ifBlank {
+                        if (isRogaine(settings.value.sportKind)) "без формата" else "без дистанции"
+                    }
                     if (_chipReady.value) {
                         "Чип на месте. Запишу № $id · $who · $dist."
                     } else {
@@ -964,6 +1068,7 @@ class ChipQueueViewModel(
         _busy.value = false
         _chipReady.value = false
         _chipLogicalId.value = null
+        _chipStationLabel.value = null
         _status.value = message
         signalError()
     }
@@ -971,6 +1076,7 @@ class ChipQueueViewModel(
     fun onChipGone() {
         _chipReady.value = false
         _chipLogicalId.value = null
+        _chipStationLabel.value = null
         blockOrder = null
         pointerEnd = null
         _sessionSummary.value = null
@@ -1011,8 +1117,16 @@ class ChipQueueViewModel(
                 chipBlockCount = dump.blockCount
                 _chipReady.value = true
                 _chipLogicalId.value = dump.logicalId
-                val label = dump.logicalId?.let { "№ $it" } ?: "без номера"
-                _sessionSummary.value = "$label · $punchCount отметок"
+                _chipStationLabel.value = SfrChipParser.stationRole(blocks)?.let {
+                    SfrChipParser.stationCommandLabel(it.command, it.cp)
+                }
+                val station = _chipStationLabel.value
+                val label = when {
+                    station != null -> "служебный · $station"
+                    dump.logicalId != null -> "№ ${dump.logicalId}"
+                    else -> "без номера"
+                }
+                _sessionSummary.value = if (station != null) label else "$label · $punchCount отметок"
                 if (_courseCheckOn.value) {
                     handleCourseStationCheck(blocks, dump)
                     return@launch
@@ -1046,7 +1160,11 @@ class ChipQueueViewModel(
                 _newName.value = known.name
                 _newCourse.value = known.currentCourse
                 openIssueFill(known.id, known.name, known.currentCourse)
-                _status.value = "№ ${known.id}: заполните ФИО и дистанцию."
+                _status.value = if (isRogaine(settings.value.sportKind)) {
+                    "№ ${known.id}: заполните ФИО и формат."
+                } else {
+                    "№ ${known.id}: заполните ФИО и дистанцию."
+                }
                 return
             }
         }
@@ -1067,7 +1185,8 @@ class ChipQueueViewModel(
         _issueOverwritePrompt.value = null
         val course = pending?.issuedCourse.orEmpty()
         _status.value = if (course.isNotBlank()) {
-            "Чип не перезаписан. Готов для дистанции $course."
+            val readyFor = if (isRogaine(settings.value.sportKind)) "формата" else "дистанции"
+            "Чип не перезаписан. Готов для $readyFor $course."
         } else {
             "Чип не перезаписан."
         }
@@ -1081,13 +1200,26 @@ class ChipQueueViewModel(
             val savedName = name.trim().ifBlank { existing?.name.orEmpty() }
             val savedCourse = course.trim().ifBlank { existing?.currentCourse.orEmpty() }
             repository.startList.upsertLocal(prompt.id, savedName, savedCourse)
+            val rogaine = isRogaine(settings.value.sportKind)
             _status.value = when {
                 savedName.isBlank() && savedCourse.isBlank() ->
-                    "№ ${prompt.id} в протоколе. ФИО и дистанцию можно указать позже."
+                    if (rogaine) {
+                        "№ ${prompt.id} в протоколе. ФИО и формат можно указать позже."
+                    } else {
+                        "№ ${prompt.id} в протоколе. ФИО и дистанцию можно указать позже."
+                    }
                 savedCourse.isBlank() ->
-                    "№ ${prompt.id}: ФИО сохранено. Дистанцию можно указать позже."
+                    if (rogaine) {
+                        "№ ${prompt.id}: ФИО сохранено. Формат можно указать позже."
+                    } else {
+                        "№ ${prompt.id}: ФИО сохранено. Дистанцию можно указать позже."
+                    }
                 savedName.isBlank() ->
-                    "№ ${prompt.id}: дистанция $savedCourse. ФИО можно указать позже."
+                    if (rogaine) {
+                        "№ ${prompt.id}: формат $savedCourse. ФИО можно указать позже."
+                    } else {
+                        "№ ${prompt.id}: дистанция $savedCourse. ФИО можно указать позже."
+                    }
                 else ->
                     "№ ${prompt.id}: $savedName · $savedCourse."
             }
@@ -1097,10 +1229,15 @@ class ChipQueueViewModel(
     fun skipIssueFill() {
         val id = _issueFillPrompt.value?.id
         _issueFillPrompt.value = null
-        _status.value = if (id != null) {
-            "№ $id в протоколе. ФИО и дистанцию можно указать позже."
+        val later = if (isRogaine(settings.value.sportKind)) {
+            "ФИО и формат можно указать позже"
         } else {
-            "ФИО и дистанцию можно указать позже в протоколе."
+            "ФИО и дистанцию можно указать позже"
+        }
+        _status.value = if (id != null) {
+            "№ $id в протоколе. $later."
+        } else {
+            "$later в протоколе."
         }
     }
 
@@ -1117,7 +1254,52 @@ class ChipQueueViewModel(
         }
         val person = repository.startList.person(logicalId)
         val course = person?.currentCourse.orEmpty()
-        saveFinishDump(dump, rawBlocksToHex(blocks), person?.name.orEmpty(), course, replace = false)
+        val rawHex = rawBlocksToHex(blocks)
+        val personName = person?.name.orEmpty()
+        val finishCp = settings.value.finishCp.takeIf { it > 0 } ?: CP_FINISH
+        if (!dump.hasPunch(finishCp)) {
+            val now = LocalTime.now()
+            _finishMissingPrompt.value = FinishMissingPrompt(
+                dump = dump,
+                rawHex = rawHex,
+                personName = personName,
+                courseName = course,
+                finishCp = finishCp,
+                finish = Punch(finishCp, now.hour, now.minute, now.second),
+            )
+            _status.value = "№ $logicalId: нет отметки финиша (КП $finishCp)."
+            signalError()
+            return
+        }
+        saveFinishDump(dump, rawHex, personName, course, replace = false)
+    }
+
+    fun confirmMissingFinish() {
+        val pending = _finishMissingPrompt.value ?: return
+        _finishMissingPrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            saveFinishDump(
+                pending.dump.withPunch(pending.finish),
+                pending.rawHex,
+                pending.personName,
+                pending.courseName,
+                replace = false,
+            )
+        }
+    }
+
+    fun skipMissingFinish() {
+        val pending = _finishMissingPrompt.value ?: return
+        _finishMissingPrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            saveFinishDump(
+                pending.dump,
+                pending.rawHex,
+                pending.personName,
+                pending.courseName,
+                replace = false,
+            )
+        }
     }
 
     fun confirmFinishReplace() {
@@ -1221,10 +1403,16 @@ class ChipQueueViewModel(
             }
             is EnqueueResult.Saved -> {
                 repository.requestLiveSend()
-                _status.value = if (result.snapshotError == null) {
+                val saved = if (result.snapshotError == null) {
                     "$who · ${dump.punches.size} отметок сохранено, chip-queue.json записан."
                 } else {
                     "$who · в очереди, chip-queue.json не записан: ${result.snapshotError}"
+                }
+                val hint = ChipCellLog.hintFromRawHex(rawHex)
+                _status.value = if (hint == null) {
+                    saved
+                } else {
+                    "$saved Возможна ошибка считки: $hint. Полный лог — вкладка «Тесты»."
                 }
                 signalSuccess()
                 maybeAskPrint(dump.logicalId, course)
@@ -1271,7 +1459,11 @@ class ChipQueueViewModel(
                     issuedCourse = issued,
                     newCourse = course,
                 )
-                _status.value = "Чип уже готов для дистанции $issued."
+                _status.value = if (isRogaine(settings.value.sportKind)) {
+                    "Чип уже готов для формата $issued."
+                } else {
+                    "Чип уже готов для дистанции $issued."
+                }
                 return
             }
         }
@@ -1290,7 +1482,9 @@ class ChipQueueViewModel(
             punchCount = 0
             _sessionSummary.value = "№ $id · 0 отметок"
             val who = name.ifBlank { "№ $id" }
-            val dist = course.ifBlank { "без дистанции" }
+            val dist = course.ifBlank {
+                if (isRogaine(settings.value.sportKind)) "без формата" else "без дистанции"
+            }
             _status.value = "$who · $dist. Чип выдан."
             signalSuccess()
             if (personNeedsFill(name, course)) {
@@ -1312,7 +1506,11 @@ class ChipQueueViewModel(
             if (_mode.value == ChipMode.Issue && _chipReady.value && person != null) {
                 issueToChip(person.id, person.name, course)
             } else {
-                _status.value = "Текущая дистанция: $course. Приложите чип."
+                _status.value = if (isRogaine(settings.value.sportKind)) {
+                    "Текущий формат: $course. Приложите чип."
+                } else {
+                    "Текущая дистанция: $course. Приложите чип."
+                }
             }
         }
     }
@@ -1372,9 +1570,7 @@ class ChipQueueViewModel(
         repository.startList.sportMismatch(loaded.sport, settings.value.sportKind)?.let {
             return if (required) it else null
         }
-        repository.startList.applyEventPack(loaded, replace)
-        repository.event.applyPackMeta(loaded)
-        return "Пакет старта: ${loaded.people.size} участников, ${loaded.formats.size} форматов."
+        return repository.applyRogaineEventPack(loaded, replace)
     }
 
     private suspend fun importEventPackJson(text: String): String {
@@ -1383,9 +1579,8 @@ class ChipQueueViewModel(
         }
         val pack = repository.startList.readEventPackJson(text)
         repository.startList.sportMismatch(pack.sport, settings.value.sportKind)?.let { error(it) }
-        repository.startList.applyEventPack(pack, pendingCsvReset)
-        repository.event.applyPackMeta(pack)
-        return "Пакет JSON: ${pack.people.size} участников, ${pack.formats.size} форматов."
+        return repository.applyRogaineEventPack(pack, pendingCsvReset)
+            .replace("Пакет старта:", "Пакет JSON:")
     }
 
     private fun handleCourseStationCheck(blocks: List<ByteArray>, dump: ChipDump) {
@@ -1523,14 +1718,24 @@ class ChipQueueViewModel(
             return "Приложите чип — участник определится по номеру из протокола"
         }
         val id = _chipLogicalId.value
-            ?: return "На чипе нет номера. Сначала выдайте чип на вкладке «Выдача»."
+        if (id == null) {
+            val station = _chipStationLabel.value
+            return if (station != null) {
+                "Служебный чип: $station. «Считать дамп» покажет полный лог."
+            } else {
+                "На чипе нет номера. Сначала выдайте чип на вкладке «Выдача»."
+            }
+        }
         val person = personFromChip()
             ?: return "№ $id нет в стартовом протоколе."
+        if (isRogaine(settings.value.sportKind)) {
+            return "№ ${person.id} · ${person.name}. «Случайные КП» запишет прохождение, «Считать дамп» — полный лог."
+        }
         val course = _testCourse.value.trim().ifBlank { person.currentCourse }
         return if (course.isBlank()) {
             "№ ${person.id} · ${person.name}. Выберите дистанцию."
         } else {
-            "№ ${person.id} · ${person.name}. Нажмите «Правильное» или «Ошибочное»."
+            "№ ${person.id} · ${person.name}. «Правильное» / «Ошибочное» запишет прохождение, «Считать дамп» — полный лог."
         }
     }
 
@@ -1544,6 +1749,48 @@ class ChipQueueViewModel(
     private fun handleTestsRead() {
         applyTestCourseFromChip()
         _status.value = testsPrompt()
+    }
+
+    fun readChipDump() {
+        val io = chipIo
+        if (!_chipReady.value || io == null) {
+            _status.value = "Приложите чип и не убирайте его. Затем нажмите «Считать дамп»."
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _busy.value = true
+            try {
+                _status.value = "Читаю полный дамп…"
+                val (uid, blocks) = io.readAllBlocks()
+                val log = ChipCellLog.fromRaw(uid, blocks, blocks.size)
+                _chipMemoryLog.value = log
+                pointerEnd = log.pointerEnd
+                chipBlockCount = log.blockCount
+                val file = repository.event.saveChipLog(log.format(), log.logicalId, uid)
+                val kind = log.kindLine?.let { "$it. " }.orEmpty()
+                _status.value = if (log.hint != null) {
+                    "${kind}Внимание: ${log.hint}. Полный лог: ${file.name}."
+                } else {
+                    "${kind}Полный лог сохранён: ${file.name}."
+                }
+                signalSuccess()
+            } catch (e: Exception) {
+                forgetChip()
+                _status.value = e.message ?: "Не удалось считать дамп"
+                signalError()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun shareChipLog() {
+        val log = _chipMemoryLog.value
+        if (log == null) {
+            _status.value = "Сначала нажмите «Считать дамп», не убирая чип."
+            return
+        }
+        _csvExport.value = listOf(log.fileName() to log.format())
     }
 
     private fun handleStationRead(blocks: List<ByteArray>, declaredBlockCount: Int?) {
@@ -1741,7 +1988,35 @@ class ChipQueueViewModel(
     fun exportCsv(startId: Long? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                _csvExport.value = repository.exportCsv(startId)
+                val files = repository.exportCsv(startId).toMutableList()
+                if (isRogaine(settings.value.sportKind)) {
+                    val scored = EventStore.score(
+                        items.value,
+                        people.value,
+                        courses.value,
+                        settings.value,
+                        corrections.value,
+                        exclusions.value,
+                    )
+                    if (scored.isNotEmpty()) {
+                        files += "rogaine-results.csv" to CsvExport.rogaineResults(
+                            scored.map { row ->
+                                RogaineResultCsvRow(
+                                    place = row.place,
+                                    id = row.logicalId?.toString().orEmpty(),
+                                    name = row.name,
+                                    format = row.course,
+                                    pointsRaw = row.calc.pointsRaw,
+                                    penaltyPoints = row.calc.penaltyPoints,
+                                    pointsFinal = row.calc.pointsFinal,
+                                    elapsedSeconds = row.calc.elapsedSeconds,
+                                    status = row.calc.status,
+                                )
+                            },
+                        )
+                    }
+                }
+                _csvExport.value = files
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось экспортировать CSV"
             }
@@ -1761,8 +2036,11 @@ class ChipQueueViewModel(
         _extraCourse.value = ""
         _testCourse.value = ""
         _chipLogicalId.value = null
+        _chipStationLabel.value = null
+        _chipMemoryLog.value = null
         _sessionSummary.value = null
         _finishReplacePrompt.value = null
+        _finishMissingPrompt.value = null
         _issueOverwritePrompt.value = null
         _issueFillPrompt.value = null
         _overwritePrompt.value = false
@@ -1863,14 +2141,18 @@ class ChipQueueViewModel(
             item.logicalId == logicalId && courseKey(item.course) == courseKey(course)
         } ?: return
         val who = row.logicalId?.let { "№ $it" } ?: row.name
-        val summary = listOf(who, row.course.ifBlank { "без дистанции" }, formatElapsed(row.calc.elapsedSeconds))
+        val head = listOf(who, row.course.ifBlank { "без дистанции" }, formatElapsed(row.calc.elapsedSeconds))
             .filter { it.isNotBlank() }
             .joinToString(" · ")
+        val summary = "$head\n${resultStatusLine(row.calc.status, row.calc.diagnostics)}"
         _printPrompt.value = PrintPrompt(summary = summary, text = receiptText(row))
     }
 
     private fun receiptText(row: ScoredResult): String {
         val settings = settings.value
+        val rogaine = isRogaine(settings.sportKind)
+        val startClock = parseDaySeconds(settings.competitionStartTime)
+            .takeIf { rogaine && settings.startMode == "time" }
         return ReceiptText.format(
             SplitReceipt(
                 date = settings.competitionDate,
@@ -1882,6 +2164,12 @@ class ChipQueueViewModel(
                 startCp = settings.startCp,
                 elapsedSeconds = row.calc.elapsedSeconds,
                 status = row.calc.status,
+                finishCp = settings.finishCp,
+                startClockSeconds = startClock,
+                pointsRaw = row.calc.pointsRaw,
+                penaltyMinutes = row.calc.penaltyMinutes,
+                pointsFinal = row.calc.pointsFinal,
+                rogaine = rogaine,
             ),
         )
     }

@@ -14,6 +14,7 @@ import ru.rogein.chip.parse.EventPackLegendFile
 import ru.rogein.chip.parse.FormatCsvRow
 import ru.rogein.chip.parse.LegendCsvRow
 import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.normalizeSportKind
 import ru.rogein.chip.parse.parseEventPackJson
@@ -22,11 +23,20 @@ import ru.rogein.chip.parse.OrientCalc
 import ru.rogein.chip.parse.OrientExclusion
 import ru.rogein.chip.parse.OrientMark
 import ru.rogein.chip.parse.OrientSettings
+import ru.rogein.chip.parse.RogaineCpTypeRule
+import ru.rogein.chip.parse.RogaineFormatOverride
+import ru.rogein.chip.parse.RogaineSettings
 import ru.rogein.chip.parse.STATUS_OK
+import ru.rogein.chip.parse.applyRogaineFormat
 import ru.rogein.chip.parse.assignPlaces
+import ru.rogein.chip.parse.assignRogainePlaces
 import ru.rogein.chip.parse.calculateOrientResult
+import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
+import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
+import ru.rogein.chip.parse.calculateRogaineResult
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.orientCourseLegs
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
@@ -57,12 +67,28 @@ data class EventSettings(
     val livePending: Boolean = false,
     val sportKind: String = SPORT_ORIENT,
     val metersPerPixel: Double? = null,
+    val formatSettingsJson: String = "",
+    val legendsJson: String = "",
+    val awardGroupsJson: String = "",
 )
 
 data class EventPackDownload(
     val pack: EventPackFile,
     val mapBytes: ByteArray?,
     val mapFileName: String,
+)
+
+data class AwardGroupView(
+    val name: String,
+    val genderMode: String,
+    val minAge: Int?,
+    val formatNames: List<String>,
+)
+
+data class LegendView(
+    val cp: Int,
+    val name: String,
+    val type: String,
 )
 
 data class ScoredResult(
@@ -74,6 +100,7 @@ data class ScoredResult(
     val punches: List<OrientMark>,
     val calc: OrientCalc,
     val place: Int?,
+    val chipHint: String? = null,
 )
 
 class EventStore(
@@ -108,6 +135,21 @@ class EventStore(
         eventDao.upsertSetting(SettingEntity("meters_per_pixel", next.metersPerPixel?.toString().orEmpty()))
     }
 
+    fun saveChipLog(text: String, logicalId: Int?, uid: String): File {
+        val dir = File(filesDir, "chip-logs").apply { mkdirs() }
+        val stamp = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+        val who = logicalId?.toString()
+            ?: uid.replace(":", "").ifBlank { "chip" }
+        val file = File(dir, "chip-log-$who-$stamp.txt")
+        file.writeText(text)
+        val files = dir.listFiles()?.sortedBy { it.lastModified() }.orEmpty()
+        if (files.size > 30) {
+            files.take(files.size - 30).forEach { it.delete() }
+        }
+        return file
+    }
+
     suspend fun addRemovedCp(cp: Int) {
         val exists = eventDao.listCorrections().any {
             it.type == "remove_cp" && it.logicalId == null && payloadInt(it.payloadJson, "cp_number") == cp
@@ -130,6 +172,42 @@ class EventStore(
                 logicalId = logicalId,
                 courseName = courseName,
                 payloadJson = JSONObject().put("cp_number", cp).toString(),
+            ),
+        )
+    }
+
+    suspend fun addRogainePersonalCp(logicalId: Int, cp: Int) {
+        if (cp <= 0) error("Укажите номер КП")
+        val exists = eventDao.listCorrections().any {
+            it.type == "add_cp" && it.logicalId == logicalId && payloadInt(it.payloadJson, "cp_number") == cp
+        }
+        if (exists) error("Для № $logicalId корректировка добавления КП $cp уже есть")
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = "add_cp",
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject().put("cp_number", cp).toString(),
+            ),
+        )
+    }
+
+    suspend fun addRogaineRemoveCp(logicalId: Int?, cp: Int, removeMode: String) {
+        if (cp <= 0) error("Укажите номер КП")
+        val mode = if (removeMode == ROGAINE_REMOVE_POINTS) ROGAINE_REMOVE_POINTS else ROGAINE_REMOVE_LEGS
+        val exists = eventDao.listCorrections().any {
+            it.type == "remove_cp" && it.logicalId == logicalId && payloadInt(it.payloadJson, "cp_number") == cp
+        }
+        if (exists) {
+            val who = logicalId?.let { "для № $it" } ?: "для всех"
+            error("Корректировка удаления КП $cp $who уже есть")
+        }
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = "remove_cp",
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject().put("cp_number", cp).put("remove_mode", mode).toString(),
             ),
         )
     }
@@ -408,21 +486,47 @@ class EventStore(
             val rules = exclusions.map {
                 OrientExclusion(courseKey(it.courseName), it.fromCp, it.toCp, it.maxLegSeconds)
             }
+            val rogaine = isRogaine(settings.sportKind)
+            val formatOverrides = parseFormatOverrides(settings.formatSettingsJson)
+            val globalRogaine = RogaineSettings(
+                startCp = settings.startCp,
+                finishCp = settings.finishCp,
+                controlMinutes = settings.controlMinutes,
+                penaltyPerMinute = settings.penaltyPerMinute,
+                dqMinutes = settings.dqMinutes,
+                startMode = settings.startMode,
+                competitionStartTime = settings.competitionStartTime,
+            )
             val raw = items.map { item ->
                 val person = item.logicalId?.let { id -> people.find { it.id == id } }
                 val assigned = assignedCourse(item.logicalId, corrections)
                 val course = assigned.ifBlank { item.courseName.ifBlank { person?.currentCourse.orEmpty() } }
                 val punches = parsePunches(item.punchesJson)
                 val adds = addCpCounts(item.logicalId, course, corrections)
-                val calc = calculateOrientResult(
-                    punches,
-                    orientSettings,
-                    course,
-                    courseMap,
-                    removed,
-                    rules,
-                    adds,
-                )
+                val calc = if (rogaine) {
+                    val override = formatOverrides[courseKey(course)]
+                    calculateRogaineResult(
+                        punches,
+                        applyRogaineFormat(globalRogaine, override),
+                        rogaineRemovedPointCps(item.logicalId, corrections),
+                        rogaineAddedCps(item.logicalId, corrections),
+                        rules,
+                        courseKey(course).takeIf { it.isNotEmpty() },
+                        rogaineRemoveLegsCps(item.logicalId, corrections),
+                        legendTypeByCp(settings),
+                        override?.cpTypeRules.orEmpty(),
+                    )
+                } else {
+                    calculateOrientResult(
+                        punches,
+                        orientSettings,
+                        course,
+                        courseMap,
+                        removed,
+                        rules,
+                        adds,
+                    )
+                }
                 ScoredResult(
                     queueId = item.id,
                     logicalId = item.logicalId,
@@ -432,12 +536,13 @@ class EventStore(
                     punches = punches,
                     calc = calc,
                     place = null,
+                    chipHint = ChipCellLog.hintFromRawHex(item.rawHex),
                 )
             }
             val byCourse = raw.groupBy { courseKey(it.course) }
             val placed = ArrayList<ScoredResult>(raw.size)
             for (group in byCourse.values) {
-                val places = assignPlaces(group.map { it.calc })
+                val places = if (rogaine) assignRogainePlaces(group.map { it.calc }) else assignPlaces(group.map { it.calc })
                 group.forEachIndexed { i, row -> placed += row.copy(place = places[i]) }
             }
             return placed.sortedWith(
@@ -457,7 +562,38 @@ class EventStore(
 
         fun correctionCp(row: CorrectionEntity): Int? = payloadInt(row.payloadJson, "cp_number")
 
+        fun correctionRemoveMode(row: CorrectionEntity): String =
+            payloadString(row.payloadJson, "remove_mode").ifBlank { ROGAINE_REMOVE_LEGS }
+
         fun correctionCourse(row: CorrectionEntity): String = payloadString(row.payloadJson, "course")
+
+        fun rogaineAddedCps(logicalId: Int?, corrections: List<CorrectionEntity>): Set<Int> {
+            if (logicalId == null) return emptySet()
+            return corrections.mapNotNull { row ->
+                if (row.type == "add_cp" && row.logicalId == logicalId) correctionCp(row) else null
+            }.toSet()
+        }
+
+        fun rogaineRemovedPointCps(logicalId: Int?, corrections: List<CorrectionEntity>): Set<Int> =
+            corrections.mapNotNull { row ->
+                if (row.type == "remove_cp" && (row.logicalId == null || row.logicalId == logicalId)) {
+                    correctionCp(row)
+                } else {
+                    null
+                }
+            }.toSet()
+
+        fun rogaineRemoveLegsCps(logicalId: Int?, corrections: List<CorrectionEntity>): Set<Int> =
+            corrections.mapNotNull { row ->
+                if (row.type == "remove_cp" &&
+                    (row.logicalId == null || row.logicalId == logicalId) &&
+                    correctionRemoveMode(row) == ROGAINE_REMOVE_LEGS
+                ) {
+                    correctionCp(row)
+                } else {
+                    null
+                }
+            }.toSet()
 
         private fun assignedCourse(logicalId: Int?, corrections: List<CorrectionEntity>): String {
             if (logicalId == null) return ""
@@ -525,7 +661,104 @@ class EventStore(
                 livePending = map["live_pending"] == "1",
                 sportKind = normalizeSportKind(map["sport_kind"]),
                 metersPerPixel = map["meters_per_pixel"]?.toDoubleOrNull(),
+                formatSettingsJson = map["format_settings"].orEmpty(),
+                legendsJson = map["cp_legends"].orEmpty(),
+                awardGroupsJson = map["award_groups"].orEmpty(),
             )
+        }
+
+        fun legends(settings: EventSettings): List<LegendView> {
+            return try {
+                val array = JSONArray(settings.legendsJson.ifBlank { "[]" })
+                (0 until array.length()).mapNotNull { index ->
+                    val item = array.optJSONObject(index) ?: return@mapNotNull null
+                    val cp = item.optInt("cp", 0).takeIf { it > 0 }
+                        ?: item.optInt("cpNumber", 0).takeIf { it > 0 }
+                        ?: return@mapNotNull null
+                    LegendView(
+                        cp = cp,
+                        name = item.optString("name").trim(),
+                        type = item.optString("type").ifBlank { item.optString("cpType") }.trim(),
+                    )
+                }.distinctBy { it.cp }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        fun legendCps(settings: EventSettings): List<Int> = legends(settings).map { it.cp }
+
+        fun legendTypeByCp(settings: EventSettings): Map<Int, String> =
+            legends(settings).associate { it.cp to it.type }
+
+        fun awardGroups(settings: EventSettings): List<AwardGroupView> {
+            return try {
+                val array = JSONArray(settings.awardGroupsJson.ifBlank { "[]" })
+                (0 until array.length()).mapNotNull { index ->
+                    val item = array.optJSONObject(index) ?: return@mapNotNull null
+                    val name = item.optString("name").trim()
+                    if (name.isEmpty()) return@mapNotNull null
+                    val formats = item.optJSONArray("formatNames") ?: item.optJSONArray("format_names")
+                    AwardGroupView(
+                        name = name,
+                        genderMode = item.optString("genderMode").ifBlank { item.optString("gender_mode") },
+                        minAge = item.optInt("minAge").takeIf { item.has("minAge") && !item.isNull("minAge") && it > 0 }
+                            ?: item.optInt("min_age").takeIf { item.has("min_age") && !item.isNull("min_age") && it > 0 },
+                        formatNames = if (formats == null) {
+                            emptyList()
+                        } else {
+                            (0 until formats.length()).mapNotNull { i ->
+                                formats.optString(i).trim().takeIf { it.isNotEmpty() }
+                            }
+                        },
+                    )
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        fun formatTypeRules(settings: EventSettings): Map<String, List<RogaineCpTypeRule>> =
+            parseFormatOverrides(settings.formatSettingsJson).mapValues { it.value.cpTypeRules }
+
+        fun parseFormatOverrides(json: String): Map<String, RogaineFormatOverride> {
+            if (json.isBlank()) return emptyMap()
+            return try {
+                val array = JSONArray(json)
+                (0 until array.length()).mapNotNull { index ->
+                    val obj = array.optJSONObject(index) ?: return@mapNotNull null
+                    val name = obj.optString("name").trim()
+                    if (name.isEmpty()) return@mapNotNull null
+                    courseKey(name) to RogaineFormatOverride(
+                        controlMinutes = obj.optIntOrNull("controlMinutes"),
+                        penaltyPerMinute = obj.optIntOrNull("penaltyPerMinute"),
+                        dqMinutes = obj.optIntOrNull("dqMinutes"),
+                        finishCp = obj.optIntOrNull("finishCp"),
+                        competitionStartTime = obj.optString("competitionStartTime").trim(),
+                        cpTypeRules = parseCpTypeRules(obj.optJSONArray("cpTypeRules") ?: obj.optJSONArray("cp_type_rules")),
+                    )
+                }.toMap()
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
+
+        private fun JSONObject.optIntOrNull(key: String): Int? {
+            if (!has(key) || isNull(key)) return null
+            return optInt(key).takeIf { opt(key) != null }
+        }
+
+        private fun parseCpTypeRules(array: JSONArray?): List<RogaineCpTypeRule> {
+            if (array == null) return emptyList()
+            return (0 until array.length()).mapNotNull { index ->
+                val obj = array.optJSONObject(index) ?: return@mapNotNull null
+                val type = obj.optString("type").ifBlank { obj.optString("cpType") }.trim()
+                if (type.isEmpty()) return@mapNotNull null
+                RogaineCpTypeRule(
+                    type = type,
+                    maxCount = (obj.optIntOrNull("maxCount") ?: obj.optIntOrNull("max_count"))?.takeIf { it > 0 },
+                )
+            }
         }
 
         fun liveReady(settings: EventSettings): Boolean =
@@ -592,7 +825,19 @@ class EventStore(
                         .put("penaltyPerMinute", row.penaltyPerMinute ?: JSONObject.NULL)
                         .put("dqMinutes", row.dqMinutes ?: JSONObject.NULL)
                         .put("finishCp", row.finishCp ?: JSONObject.NULL)
-                        .put("competitionStartTime", row.competitionStartTime),
+                        .put("competitionStartTime", row.competitionStartTime)
+                        .put(
+                            "cpTypeRules",
+                            JSONArray().apply {
+                                row.cpTypeRules.forEach { rule ->
+                                    put(
+                                        JSONObject()
+                                            .put("type", rule.type)
+                                            .put("maxCount", rule.maxCount ?: JSONObject.NULL),
+                                    )
+                                }
+                            },
+                        ),
                 )
             }
             return root.toString()
@@ -676,9 +921,9 @@ class EventStore(
                             .put("participant_source_id", sourceId)
                             .put("award_group_source_id", groupId)
                             .put("place", row.place ?: JSONObject.NULL)
-                            .put("points_raw", row.calc.taken)
-                            .put("penalty_points", 0)
-                            .put("points_final", 0)
+                            .put("points_raw", if (isRogaine(settings.sportKind)) row.calc.pointsRaw else row.calc.taken)
+                            .put("penalty_points", row.calc.penaltyPoints)
+                            .put("points_final", row.calc.pointsFinal)
                             .put("elapsed_seconds", row.calc.elapsedSeconds)
                             .put("status", row.calc.status)
                             .put("diagnostics", JSONArray(row.calc.diagnostics)),

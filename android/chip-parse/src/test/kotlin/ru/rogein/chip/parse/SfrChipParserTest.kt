@@ -121,6 +121,24 @@ class SfrChipParserTest {
     }
 
     @Test
+    fun appendsMissingFinishPunch() {
+        val dump = ChipDump(
+            uid = "uid",
+            logicalId = 8,
+            clearedAt = null,
+            punches = listOf(Punch(CP_START, 10, 0, 0), Punch(31, 10, 5, 0)),
+            blockOrder = BlockOrder.Hid,
+            pointerEnd = 6,
+            blockCount = 64,
+        )
+        assertFalse(dump.hasPunch(CP_FINISH))
+        val withFinish = dump.withPunch(Punch(CP_FINISH, 12, 7, 15))
+        assertTrue(withFinish.hasPunch(CP_FINISH))
+        assertEquals("12:07:15", withFinish.punches.last().time)
+        assertEquals(2, dump.punches.size)
+    }
+
+    @Test
     fun detectsStationProgrammerInHidAndNfcToolsOrder() {
         val roles = listOf(
             StationCommand.Start to CP_START,
