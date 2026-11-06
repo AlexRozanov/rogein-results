@@ -1,3 +1,4 @@
+mod map_image;
 mod models;
 mod publish;
 
@@ -32,6 +33,7 @@ use crate::models::{
     AwardGroupPublic, EventDetail, EventListItem, EventListPage, EventRow, ParticipantPublic,
     ResultPublic, UpcomingListItem,
 };
+use crate::map_image::{prepare_web_map, scale_meters_per_pixel, sync_pack_map_geometry};
 use crate::publish::{publish_event, publish_live_event, publish_map, PublishPayload};
 
 #[derive(Clone)]
@@ -311,10 +313,13 @@ async fn put_live_event(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-    Json(payload): Json<PublishPayload>,
+    Json(mut payload): Json<PublishPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_token(&state, &headers)?;
     let slug = normalize_slug(&slug)?;
+    align_payload_to_pack_map(&state.pool, &slug, &mut payload)
+        .await
+        .map_err(internal)?;
     let revision = publish_live_event(&state.pool, &slug, payload)
         .await
         .map_err(|e| {
@@ -547,6 +552,8 @@ struct EventPackLiveRow {
     pack_json: serde_json::Value,
     map_file_name: Option<String>,
     map_mime: Option<String>,
+    map_width: Option<i32>,
+    map_height: Option<i32>,
     updated_at: DateTime<Utc>,
 }
 
@@ -554,6 +561,8 @@ struct EventPackLiveRow {
 struct EventPackMapRow {
     map_file_name: Option<String>,
     map_mime: Option<String>,
+    map_width: Option<i32>,
+    map_height: Option<i32>,
     pack_json: serde_json::Value,
 }
 
@@ -573,6 +582,21 @@ fn pack_json_i32(value: &serde_json::Value, keys: &[&str]) -> Option<i32> {
     })
 }
 
+fn pack_positive_i32(value: &serde_json::Value, keys: &[&str]) -> Option<i32> {
+    keys.iter().find_map(|key| value.get(*key)).and_then(|v| {
+        let n = v
+            .as_i64()
+            .map(|n| n as f64)
+            .or_else(|| v.as_f64())
+            .or_else(|| v.as_str()?.trim().parse().ok())?;
+        if n.is_finite() && n > 0.0 {
+            Some(n.round() as i32)
+        } else {
+            None
+        }
+    })
+}
+
 fn pack_competition_date(pack: &serde_json::Value) -> Option<NaiveDate> {
     let settings = pack.get("settings")?;
     let raw = pack_json_text(settings, &["competitionDate", "competition_date"])?;
@@ -587,45 +611,87 @@ fn json_array_empty(value: &serde_json::Value) -> bool {
     }
 }
 
+fn pack_point_xy(item: &serde_json::Value) -> Option<(f64, f64)> {
+    let x = item
+        .get("mapX")
+        .or_else(|| item.get("map_x"))
+        .and_then(|v| v.as_f64())?;
+    let y = item
+        .get("mapY")
+        .or_else(|| item.get("map_y"))
+        .and_then(|v| v.as_f64())?;
+    (x.is_finite() && y.is_finite()).then_some((x, y))
+}
+
 fn pack_map_points_public(pack: &serde_json::Value) -> serde_json::Value {
-    let Some(items) = pack
+    let from_points = pack
         .get("mapPoints")
         .or_else(|| pack.get("map_points"))
         .and_then(|v| v.as_array())
-    else {
-        return serde_json::json!([]);
-    };
-    let points: Vec<serde_json::Value> = items
-        .iter()
-        .filter_map(|item| {
-            let kind = item.get("kind")?.as_str()?.to_string();
-            let x = item
-                .get("mapX")
-                .or_else(|| item.get("map_x"))
-                .and_then(|v| v.as_f64())?;
-            let y = item
-                .get("mapY")
-                .or_else(|| item.get("map_y"))
-                .and_then(|v| v.as_f64())?;
-            let cp = item
-                .get("cp")
-                .or_else(|| item.get("cp_number"))
-                .and_then(|v| v.as_i64());
-            let name = item
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(serde_json::json!({
-                "kind": kind,
-                "cp_number": cp,
-                "name": name,
-                "map_x": x,
-                "map_y": y,
-            }))
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let (x, y) = pack_point_xy(item)?;
+                    let kind = item
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("cp")
+                        .trim();
+                    let kind = if kind.is_empty() { "cp" } else { kind };
+                    let cp = item
+                        .get("cp")
+                        .or_else(|| item.get("cp_number"))
+                        .and_then(|v| v.as_i64());
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(serde_json::json!({
+                        "kind": kind,
+                        "cp_number": cp,
+                        "name": name,
+                        "map_x": x,
+                        "map_y": y,
+                    }))
+                })
+                .collect::<Vec<_>>()
         })
-        .collect();
-    serde_json::Value::Array(points)
+        .unwrap_or_default();
+    if !from_points.is_empty() {
+        return serde_json::Value::Array(from_points);
+    }
+    let from_legends = pack
+        .get("legends")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let (x, y) = pack_point_xy(item)?;
+                    let cp = item
+                        .get("cp")
+                        .or_else(|| item.get("cp_number"))
+                        .and_then(|v| v.as_i64())
+                        .filter(|n| *n > 0)?;
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(serde_json::json!({
+                        "kind": "cp",
+                        "cp_number": cp,
+                        "name": name,
+                        "map_x": x,
+                        "map_y": y,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::Value::Array(from_legends)
 }
 
 fn apply_pack_map(
@@ -634,7 +700,10 @@ fn apply_pack_map(
     map_file_name: Option<&str>,
     map_mime: Option<&str>,
     pack: &serde_json::Value,
+    file_width: Option<i32>,
+    file_height: Option<i32>,
 ) {
+    let had_url = detail.map_url.is_some();
     if detail.map_url.is_none() {
         if let Some(name) = map_file_name.map(str::trim).filter(|s| !s.is_empty()) {
             detail.map_url = Some(format!("/media/packs/{}/{}", slug, safe_pack_map_name(name)));
@@ -652,12 +721,37 @@ fn apply_pack_map(
             detail.map_points = points;
         }
     }
-    if detail.meters_per_pixel.is_none() {
-        detail.meters_per_pixel = pack
-            .get("metersPerPixel")
-            .or_else(|| pack.get("meters_per_pixel"))
-            .and_then(|v| v.as_f64())
-            .filter(|v| v.is_finite() && *v > 0.0);
+    let json_width = pack_positive_i32(pack, &["mapWidth", "map_width"]);
+    let json_height = pack_positive_i32(pack, &["mapHeight", "map_height"]);
+    let json_mpp = pack
+        .get("metersPerPixel")
+        .or_else(|| pack.get("meters_per_pixel"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let file_width = file_width.filter(|v| *v > 0);
+    let file_height = file_height.filter(|v| *v > 0);
+    let using_pack_image = !had_url && detail.map_url.is_some();
+    if using_pack_image {
+        let target_width = file_width.or(json_width).or(detail.map_width);
+        let target_height = file_height.or(json_height).or(detail.map_height);
+        let from_width = detail.map_width.or(json_width);
+        let from_mpp = detail.meters_per_pixel.or(json_mpp);
+        detail.meters_per_pixel = match (from_mpp, from_width, target_width) {
+            (Some(mpp), Some(from), Some(to)) => Some(scale_meters_per_pixel(mpp, from, to)),
+            (mpp, _, _) => mpp,
+        };
+        detail.map_width = target_width;
+        detail.map_height = target_height;
+    } else {
+        if detail.meters_per_pixel.is_none() {
+            detail.meters_per_pixel = json_mpp;
+        }
+        if detail.map_width.is_none() {
+            detail.map_width = file_width.or(json_width);
+        }
+        if detail.map_height.is_none() {
+            detail.map_height = file_height.or(json_height);
+        }
     }
 }
 
@@ -666,12 +760,16 @@ async fn fill_live_map_from_pack(
     slug: &str,
     detail: &mut EventDetail,
 ) -> Result<(), sqlx::Error> {
-    if detail.map_url.is_some() && !json_array_empty(&detail.map_points) && detail.meters_per_pixel.is_some()
+    if detail.map_url.is_some()
+        && !json_array_empty(&detail.map_points)
+        && detail.meters_per_pixel.is_some()
+        && detail.map_width.is_some()
+        && detail.map_height.is_some()
     {
         return Ok(());
     }
     let row = sqlx::query_as::<_, EventPackMapRow>(
-        "SELECT map_file_name, map_mime, pack_json FROM event_packs WHERE slug = $1",
+        "SELECT map_file_name, map_mime, map_width, map_height, pack_json FROM event_packs WHERE slug = $1",
     )
     .bind(slug)
     .fetch_optional(pool)
@@ -685,6 +783,8 @@ async fn fill_live_map_from_pack(
         row.map_file_name.as_deref(),
         row.map_mime.as_deref(),
         &row.pack_json,
+        row.map_width,
+        row.map_height,
     );
     Ok(())
 }
@@ -694,7 +794,7 @@ async fn load_pack_live_placeholder(
     slug: &str,
 ) -> Result<Option<EventDetail>, sqlx::Error> {
     let row = sqlx::query_as::<_, EventPackLiveRow>(
-        "SELECT title, sport_kind, pack_json, map_file_name, map_mime, updated_at FROM event_packs WHERE slug = $1",
+        "SELECT title, sport_kind, pack_json, map_file_name, map_mime, map_width, map_height, updated_at FROM event_packs WHERE slug = $1",
     )
     .bind(slug)
     .fetch_optional(pool)
@@ -753,6 +853,8 @@ async fn load_pack_live_placeholder(
         row.map_file_name.as_deref(),
         row.map_mime.as_deref(),
         pack,
+        row.map_width,
+        row.map_height,
     );
     Ok(Some(detail))
 }
@@ -876,7 +978,21 @@ async fn put_event_pack(
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_string();
+    let size: Option<(Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT map_width, map_height FROM event_packs WHERE slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let mut pack = payload;
+    if let Some((Some(width), Some(height))) = size {
+        if width > 0 && height > 0 {
+            sync_pack_map_geometry(&mut pack, width, height);
+        }
+    }
     sqlx::query(
         r#"
         INSERT INTO event_packs (slug, sport_kind, title, pack_json, updated_at)
@@ -890,7 +1006,7 @@ async fn put_event_pack(
     )
     .bind(&slug)
     .bind(title)
-    .bind(&payload)
+    .bind(&pack)
     .execute(&state.pool)
     .await
     .map_err(internal)?;
@@ -934,12 +1050,12 @@ async fn put_event_pack_map(
     if !exists {
         return Err((StatusCode::NOT_FOUND, "Pack not found".into()));
     }
-    let file_name = safe_pack_map_name(header_text(&headers, "x-map-file-name").unwrap_or("map.bin"));
+    let file_name = header_text(&headers, "x-map-file-name").unwrap_or("map.bin");
     let mime = header_text(&headers, "content-type")
         .map(|v| v.split(';').next().unwrap_or(v).trim())
-        .filter(|v| !v.is_empty())
-        .unwrap_or("application/octet-stream")
-        .to_string();
+        .filter(|v| !v.is_empty());
+    let prepared = prepare_web_map(&body, file_name, mime);
+    let file_name = safe_pack_map_name(&prepared.file_name);
     let dir = pack_map_dir(&state.media_dir, &slug);
     fs::create_dir_all(&dir).map_err(|e| {
         (
@@ -947,8 +1063,35 @@ async fn put_event_pack_map(
             format!("create pack map dir: {e}"),
         )
     })?;
-    let path = dir.join(&file_name);
-    fs::write(&path, &body).map_err(|e| {
+    let current: Option<(Option<String>, serde_json::Value)> = sqlx::query_as(
+        "SELECT map_file_name, pack_json FROM event_packs WHERE slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let Some((old_name, mut pack_json)) = current else {
+        return Err((StatusCode::NOT_FOUND, "Pack not found".into()));
+    };
+    if prepared.width > 0 && prepared.height > 0 {
+        let source_width = pack_positive_i32(&pack_json, &["mapWidth", "map_width"]);
+        scale_live_event_map_geometry(
+            &state.pool,
+            &slug,
+            prepared.width,
+            prepared.height,
+            source_width,
+        )
+        .await
+        .map_err(internal)?;
+        sync_pack_map_geometry(&mut pack_json, prepared.width, prepared.height);
+    }
+    if let Some(old_name) = old_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if old_name != file_name {
+            let _ = fs::remove_file(dir.join(safe_pack_map_name(old_name)));
+        }
+    }
+    fs::write(dir.join(&file_name), &prepared.bytes).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("write pack map: {e}"),
@@ -957,17 +1100,69 @@ async fn put_event_pack_map(
     sqlx::query(
         r#"
         UPDATE event_packs
-        SET map_file_name = $2, map_mime = $3, updated_at = now()
+        SET map_file_name = $2,
+            map_mime = $3,
+            map_width = $4,
+            map_height = $5,
+            pack_json = $6,
+            updated_at = now()
         WHERE slug = $1
         "#,
     )
     .bind(&slug)
     .bind(&file_name)
-    .bind(&mime)
+    .bind(&prepared.mime)
+    .bind((prepared.width > 0).then_some(prepared.width))
+    .bind((prepared.height > 0).then_some(prepared.height))
+    .bind(&pack_json)
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "slug": slug,
+        "map_width": prepared.width,
+        "map_height": prepared.height
+    })))
+}
+
+async fn scale_live_event_map_geometry(
+    pool: &PgPool,
+    slug: &str,
+    published_width: i32,
+    published_height: i32,
+    source_width: Option<i32>,
+) -> Result<(), sqlx::Error> {
+    if published_width <= 0 || published_height <= 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        UPDATE events
+        SET meters_per_pixel = CASE
+                WHEN meters_per_pixel IS NOT NULL
+                     AND COALESCE(NULLIF(map_width, 0), $4) IS NOT NULL
+                     AND COALESCE(NULLIF(map_width, 0), $4) > 0
+                THEN meters_per_pixel * (
+                    COALESCE(NULLIF(map_width, 0), $4)::double precision
+                    / $2::double precision
+                )
+                ELSE meters_per_pixel
+            END,
+            map_width = $2,
+            map_height = $3
+        WHERE slug = $1
+          AND status = 'live'
+          AND COALESCE(NULLIF(map_width, 0), $4) > 0
+        "#,
+    )
+    .bind(slug)
+    .bind(published_width)
+    .bind(published_height)
+    .bind(source_width)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn get_event_pack_map(
@@ -1011,6 +1206,33 @@ async fn get_event_pack_map(
         ],
         bytes,
     ))
+}
+
+async fn align_payload_to_pack_map(
+    pool: &PgPool,
+    slug: &str,
+    payload: &mut PublishPayload,
+) -> Result<(), sqlx::Error> {
+    let size: Option<(Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT map_width, map_height FROM event_packs WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    let Some((Some(width), Some(height))) = size else {
+        return Ok(());
+    };
+    if width <= 0 || height <= 0 {
+        return Ok(());
+    }
+    if let Some(from_width) = payload.map_width.filter(|v| *v > 0) {
+        if let Some(mpp) = payload.meters_per_pixel {
+            payload.meters_per_pixel = Some(scale_meters_per_pixel(mpp, from_width, width));
+        }
+    }
+    payload.map_width = Some(width);
+    payload.map_height = Some(height);
+    Ok(())
 }
 
 fn pack_map_dir(media_dir: &FsPath, slug: &str) -> PathBuf {

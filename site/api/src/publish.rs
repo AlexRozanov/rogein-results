@@ -5,6 +5,7 @@ use anyhow::{bail, Context};
 use base64::Engine;
 use sqlx::{PgPool, Postgres, Transaction};
 
+use crate::map_image::{prepare_web_map, scale_meters_per_pixel};
 use crate::models::{PublishAwardGroup, PublishMapPoint, PublishParticipant, PublishResult};
 
 #[derive(Debug, serde::Deserialize)]
@@ -19,6 +20,10 @@ pub struct PublishPayload {
     pub map_points: Vec<PublishMapPoint>,
     #[serde(default)]
     pub meters_per_pixel: Option<f64>,
+    #[serde(default)]
+    pub map_width: Option<i32>,
+    #[serde(default)]
+    pub map_height: Option<i32>,
     #[serde(default = "default_sport_kind")]
     pub sport_kind: String,
     #[serde(default)]
@@ -127,6 +132,14 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
                     sport_kind = $4,
                     start_cp = $5,
                     finish_cp = $6,
+                    map_points = CASE
+                        WHEN jsonb_typeof($7::jsonb) = 'array' AND jsonb_array_length($7::jsonb) > 0
+                        THEN $7::jsonb
+                        ELSE map_points
+                    END,
+                    meters_per_pixel = COALESCE($8, meters_per_pixel),
+                    map_width = COALESCE($9, map_width),
+                    map_height = COALESCE($10, map_height),
                     status = 'live',
                     published_at = now(),
                     revision = revision + 1
@@ -139,6 +152,10 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
             .bind(normalize_sport_kind(&payload.sport_kind))
             .bind(payload.start_cp)
             .bind(payload.finish_cp)
+            .bind(serde_json::to_value(&payload.map_points)?)
+            .bind(payload.meters_per_pixel)
+            .bind(payload.map_width.filter(|v| *v > 0))
+            .bind(payload.map_height.filter(|v| *v > 0))
             .execute(&mut *tx)
             .await?;
             id
@@ -148,9 +165,9 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
                 r#"
                 INSERT INTO events (
                     slug, title, competition_date, status, map_points, meters_per_pixel,
-                    sport_kind, start_cp, finish_cp, revision
+                    sport_kind, start_cp, finish_cp, revision, map_width, map_height
                 )
-                VALUES ($1, $2, $3, 'live', '[]'::jsonb, NULL, $4, $5, $6, 1)
+                VALUES ($1, $2, $3, 'live', $7, $8, $4, $5, $6, 1, $9, $10)
                 RETURNING id
                 "#,
             )
@@ -160,6 +177,10 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
             .bind(normalize_sport_kind(&payload.sport_kind))
             .bind(payload.start_cp)
             .bind(payload.finish_cp)
+            .bind(serde_json::to_value(&payload.map_points)?)
+            .bind(payload.meters_per_pixel)
+            .bind(payload.map_width.filter(|v| *v > 0))
+            .bind(payload.map_height.filter(|v| *v > 0))
             .fetch_one(&mut *tx)
             .await?
         }
@@ -394,26 +415,57 @@ async fn save_map_bytes(
     if bytes.is_empty() {
         bail!("map payload is empty");
     }
-    let file_name = sanitize_file_name(file_name);
+    let prepared = prepare_web_map(bytes, file_name, mime_type);
+    let out_width = if prepared.width > 0 {
+        prepared.width
+    } else {
+        width.filter(|v| *v > 0).unwrap_or(0)
+    };
+    let out_height = if prepared.height > 0 {
+        prepared.height
+    } else {
+        height.filter(|v| *v > 0).unwrap_or(0)
+    };
+    let current = sqlx::query_as::<_, (Option<String>, Option<i32>, Option<f64>)>(
+        "SELECT map_file_name, map_width, meters_per_pixel FROM events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let from_width = current
+        .1
+        .filter(|v| *v > 0)
+        .or_else(|| (prepared.source_width > 0).then_some(prepared.source_width))
+        .or(width.filter(|v| *v > 0));
+    let meters_per_pixel = match (current.2, from_width, out_width) {
+        (Some(mpp), Some(from), to) if to > 0 => Some(scale_meters_per_pixel(mpp, from, to)),
+        (mpp, _, _) => mpp,
+    };
     let dir = media_dir.join("events").join(slug);
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(&file_name);
-    std::fs::write(&path, bytes)?;
-    let mime = mime_type
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("application/octet-stream");
+    let file_name = sanitize_file_name(&prepared.file_name);
+    if let Some(old_name) = current.0.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if old_name != file_name {
+            let _ = std::fs::remove_file(dir.join(old_name));
+        }
+    }
+    std::fs::write(dir.join(&file_name), &prepared.bytes)?;
     sqlx::query(
         r#"
         UPDATE events
-        SET map_file_name = $1, map_mime = $2, map_width = $3, map_height = $4
-        WHERE id = $5
+        SET map_file_name = $1,
+            map_mime = $2,
+            map_width = $3,
+            map_height = $4,
+            meters_per_pixel = COALESCE($5, meters_per_pixel)
+        WHERE id = $6
         "#,
     )
     .bind(&file_name)
-    .bind(mime)
-    .bind(width)
-    .bind(height)
+    .bind(&prepared.mime)
+    .bind((out_width > 0).then_some(out_width))
+    .bind((out_height > 0).then_some(out_height))
+    .bind(meters_per_pixel)
     .bind(event_id)
     .execute(&mut **tx)
     .await?;
