@@ -653,20 +653,18 @@ onBeforeUnmount(() => {
           Сравнение {{ block.viewRows.length }} участников · места на перегонах среди выбранных
         </p>
       </div>
-      <div class="card table-wrap">
+      <div class="card table-wrap" :class="{ 'rogaine-results': !isOrient }">
         <table
           class="results-table"
-          :class="{ compact: isOrient, 'with-splits': isOrient && splitsOn(block.comparing) }"
+          :class="{ compact: isOrient, 'is-rogaine': !isOrient, 'with-splits': isOrient && splitsOn(block.comparing) }"
         >
           <thead>
             <tr>
               <th>Место</th>
               <th v-if="!isOrient">Номер</th>
               <th class="col-name">Имя</th>
-              <th v-if="!isOrient">Пол</th>
-              <th v-if="!isOrient">Возраст</th>
-              <th v-if="!isOrient">Очки</th>
-              <th v-if="!isOrient">Штраф</th>
+              <th v-if="!isOrient" class="col-aux">Очки</th>
+              <th v-if="!isOrient" class="col-aux">Штраф</th>
               <th v-if="!isOrient">Итог</th>
               <th>Время</th>
               <th v-if="isOrient">Отставание</th>
@@ -682,7 +680,7 @@ onBeforeUnmount(() => {
           </thead>
           <tbody>
             <tr v-if="!block.viewRows.length">
-              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 10">
+              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 8">
                 {{ emptyGroupText }}
               </td>
             </tr>
@@ -704,10 +702,8 @@ onBeforeUnmount(() => {
                   {{ row.name }}
                 </router-link>
               </td>
-              <td v-if="!isOrient">{{ row.gender || "—" }}</td>
-              <td v-if="!isOrient">{{ row.age ?? "—" }}</td>
-              <td v-if="!isOrient">{{ row.points_raw }}</td>
-              <td v-if="!isOrient">{{ row.penalty_points }}</td>
+              <td v-if="!isOrient" class="col-aux">{{ row.points_raw }}</td>
+              <td v-if="!isOrient" class="col-aux">{{ row.penalty_points }}</td>
               <td v-if="!isOrient">{{ row.points_final }}</td>
               <td class="col-time">{{ isOrient ? resultCell(row) : fmtHms(row.elapsed_seconds) }}</td>
               <td v-if="isOrient" class="col-gap">{{ gapCell(row, block.viewLeader) }}</td>
@@ -729,6 +725,30 @@ onBeforeUnmount(() => {
             </tr>
           </tbody>
         </table>
+        <ul v-if="!isOrient" class="rogaine-cards">
+          <li v-if="!block.viewRows.length" class="rogaine-card-empty">{{ emptyGroupText }}</li>
+          <li
+            v-for="row in block.viewRows"
+            :key="`m-${row.participant_source_id}`"
+            class="rogaine-card"
+          >
+            <span class="rogaine-card-place">{{ row.place ?? "—" }}</span>
+            <div class="rogaine-card-main">
+              <router-link
+                class="bib"
+                :to="personHref(event.slug, row.participant_source_id, block.group.id)"
+              >
+                <span class="rogaine-card-bib">{{ row.bib }}</span>
+                {{ row.name }}
+              </router-link>
+              <p class="rogaine-card-meta">
+                {{ fmtHms(row.elapsed_seconds) }}
+                <span v-if="row.status && row.status !== 'OK'"> · {{ row.status }}</span>
+              </p>
+            </div>
+            <span class="rogaine-card-score">{{ row.points_final }}</span>
+          </li>
+        </ul>
       </div>
     </section>
     </template>

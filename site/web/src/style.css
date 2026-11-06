@@ -439,7 +439,8 @@ th, td {
 
 th { color: #64748b; font-weight: 600; }
 
-.results-table.compact {
+.results-table.compact,
+.results-table.is-rogaine {
   min-width: 0;
 }
 
@@ -661,6 +662,69 @@ th { color: #64748b; font-weight: 600; }
 }
 
 .split-cum {
+  color: var(--slate);
+}
+
+.rogaine-cards {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rogaine-card {
+  display: grid;
+  grid-template-columns: 2.2rem minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  align-items: start;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rogaine-card:last-child {
+  border-bottom: 0;
+}
+
+.rogaine-card-place,
+.rogaine-card-score,
+.rogaine-card-bib {
+  font-variant-numeric: tabular-nums;
+}
+
+.rogaine-card-place,
+.rogaine-card-score {
+  font-weight: 700;
+}
+
+.rogaine-card-place {
+  text-align: right;
+  padding-top: 2px;
+}
+
+.rogaine-card-main {
+  min-width: 0;
+}
+
+.rogaine-card-main a {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.rogaine-card-bib {
+  color: var(--slate);
+  font-weight: 650;
+  margin-right: 0.35em;
+}
+
+.rogaine-card-meta {
+  margin: 2px 0 0;
+  color: var(--slate);
+  font-size: 0.88em;
+  font-variant-numeric: tabular-nums;
+}
+
+.rogaine-card-empty {
+  padding: 12px 4px;
   color: var(--slate);
 }
 
@@ -1117,7 +1181,21 @@ th { color: #64748b; font-weight: 600; }
   stroke-width: 1;
 }
 
+@media (max-width: 719px) {
+  .results-table.is-rogaine .col-aux {
+    display: none;
+  }
+}
+
 @media (max-width: 639px) {
+  .rogaine-results .results-table {
+    display: none;
+  }
+
+  .rogaine-cards {
+    display: block;
+  }
+
   .header-contacts {
     display: none;
   }
