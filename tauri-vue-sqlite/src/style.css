@@ -1217,7 +1217,7 @@ h3 {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: minmax(380px, 28vw) 1fr;
   gap: 10px;
 }
 
@@ -1304,10 +1304,23 @@ h3 {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding-right: 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.course-map-cp-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.course-map-cp-list::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 6px;
 }
 
 .course-map-gps-list,
@@ -1330,8 +1343,7 @@ h3 {
 }
 
 .course-map-cp-item {
-  display: grid;
-  grid-template-columns: 10px 42px 1fr auto auto;
+  display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
@@ -1359,17 +1371,21 @@ h3 {
 }
 
 .course-map-cp-dot {
+  flex: 0 0 10px;
   width: 10px;
   height: 10px;
   border-radius: 50%;
 }
 
 .course-map-cp-num {
+  flex: 0 0 42px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
 .course-map-cp-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1378,18 +1394,23 @@ h3 {
 }
 
 .course-map-cp-mark {
+  flex: 0 0 auto;
   color: #94a3b8;
   font-size: 12px;
 }
 
 .course-map-cp-clear {
+  justify-self: end;
+  width: 32px;
+  height: 32px;
   border: none;
   background: transparent;
   color: #f87171;
   cursor: pointer;
-  padding: 0 4px;
-  font-size: 14px;
-  line-height: 1;
+  padding: 0;
+  font-size: 20px;
+  line-height: 32px;
+  flex-shrink: 0;
 }
 
 .course-map-viewport {

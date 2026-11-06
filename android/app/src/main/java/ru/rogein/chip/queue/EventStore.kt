@@ -4,7 +4,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import ru.rogein.chip.parse.AwardCategory
 import ru.rogein.chip.parse.AwardGroupCsvRow
+import ru.rogein.chip.parse.AwardPerson
 import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.EventPackAwardGroupFile
@@ -36,8 +38,10 @@ import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.calculateRogaineResult
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.filterCourseCps
-import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.orientCourseLegs
+import ru.rogein.chip.parse.personAwardAge
+import ru.rogein.chip.parse.personAwardCategories
+import ru.rogein.chip.parse.storedBirthDate
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
@@ -101,6 +105,13 @@ data class ScoredResult(
     val calc: OrientCalc,
     val place: Int?,
     val chipHint: String? = null,
+    val teamId: Int = 0,
+)
+
+data class ResultGroup(
+    val key: String,
+    val name: String,
+    val rows: List<ScoredResult>,
 )
 
 class EventStore(
@@ -424,10 +435,10 @@ class EventStore(
     ): String {
         val slug = settings.slug.trim()
         val title = settings.title.trim()
-        val scored = score(items, people, courses, settings, corrections, exclusions)
+            val scored = score(items, people, courses, settings, corrections, exclusions)
         if (scored.isEmpty()) error("Нет считанных результатов")
         val removed = removedCps(corrections)
-        val payload = buildPublishJson(settings, title, courses, scored, removed)
+        val payload = buildPublishJson(settings, title, people, courses, scored, removed)
         val url = "${normalizeBase(settings.apiBaseUrl)}/api/live/$slug"
         val (code, body) = request("PUT", url, payload, settings.publishToken)
         if (code == 409) error("этот старт уже в архиве сайта")
@@ -464,7 +475,7 @@ class EventStore(
         val scored = score(items, people, courses, settings, corrections, exclusions)
         if (scored.isEmpty()) error("Нет считанных результатов")
         val removed = removedCps(corrections)
-        val payload = buildPublishJson(settings, title, courses, scored, removed)
+        val payload = buildPublishJson(settings, title, people, courses, scored, removed)
         val url = "${normalizeBase(settings.apiBaseUrl)}/api/events/$slug"
         val (code, body) = request("PUT", url, payload, settings.publishToken)
         if (code !in 200..299) error("публикация $code: ${body.take(200)}")
@@ -537,6 +548,7 @@ class EventStore(
                     calc = calc,
                     place = null,
                     chipHint = ChipCellLog.hintFromRawHex(item.rawHex),
+                    teamId = if (rogaine) person?.teamId ?: 0 else 0,
                 )
             }
             val byCourse = raw.groupBy { courseKey(it.course) }
@@ -545,8 +557,15 @@ class EventStore(
                 val places = if (rogaine) assignRogainePlaces(group.map { it.calc }) else assignPlaces(group.map { it.calc })
                 group.forEachIndexed { i, row -> placed += row.copy(place = places[i]) }
             }
+            val teamBestPlace = placed
+                .filter { it.teamId > 0 }
+                .groupBy { it.teamId to courseKey(it.course) }
+                .mapValues { (_, rows) -> rows.mapNotNull { it.place }.minOrNull() ?: Int.MAX_VALUE }
             return placed.sortedWith(
                 compareBy<ScoredResult> { courseKey(it.course) }
+                    .thenBy { teamBestPlace[it.teamId to courseKey(it.course)] ?: it.place ?: Int.MAX_VALUE }
+                    .thenBy { if (it.teamId > 0) 0 else 1 }
+                    .thenBy { it.teamId }
                     .thenBy { it.place ?: Int.MAX_VALUE }
                     .thenBy { it.logicalId ?: Int.MAX_VALUE },
             )
@@ -690,6 +709,28 @@ class EventStore(
 
         fun legendTypeByCp(settings: EventSettings): Map<Int, String> =
             legends(settings).associate { it.cp to it.type }
+
+        fun displayResultGroups(
+            results: List<ScoredResult>,
+            people: List<StartPerson>,
+            sportKind: String,
+            competitionDate: String,
+            awardGroups: List<AwardGroupView>,
+            emptyFormatLabel: String,
+        ): List<ResultGroup> {
+            return resultBuckets(
+                scored = results,
+                people = people,
+                courses = emptyList(),
+                sportKind = sportKind,
+                competitionDate = competitionDate,
+                awardGroups = awardGroups,
+                removed = emptySet(),
+                includeEmptyAwardGroups = false,
+                includeUnmatched = true,
+                emptyFormatLabel = emptyFormatLabel,
+            ).map { ResultGroup(it.key, it.name, it.rows) }
+        }
 
         fun awardGroups(settings: EventSettings): List<AwardGroupView> {
             return try {
@@ -891,9 +932,171 @@ class EventStore(
             }
         }
 
+        private data class ResultBucket(
+            val id: Int,
+            val key: String,
+            val name: String,
+            val genderMode: String,
+            val minAge: Int?,
+            val sortOrder: Int,
+            val controls: List<Int>,
+            val rows: List<ScoredResult>,
+        )
+
+        private fun resultBuckets(
+            scored: List<ScoredResult>,
+            people: List<StartPerson>,
+            courses: List<StartCourse>,
+            sportKind: String,
+            competitionDate: String,
+            awardGroups: List<AwardGroupView>,
+            removed: Set<Int>,
+            includeEmptyAwardGroups: Boolean,
+            includeUnmatched: Boolean,
+            emptyFormatLabel: String = "без дистанции",
+        ): List<ResultBucket> {
+            val award = awardGroups
+            if (isRogaine(sportKind) && award.isNotEmpty()) {
+                val categories = award.map { it.toAwardCategory() }
+                val membership = scored.associate { row ->
+                    row.queueId to matchingAwardGroupNames(row, people, categories, competitionDate)
+                }
+                val buckets = ArrayList<ResultBucket>(award.size + 1)
+                award.forEachIndexed { index, group ->
+                    val rows = scored.filter { group.name in membership[it.queueId].orEmpty() }
+                    if (rows.isEmpty() && !includeEmptyAwardGroups) return@forEachIndexed
+                    buckets += ResultBucket(
+                        id = index + 1,
+                        key = "award-${index + 1}",
+                        name = group.name,
+                        genderMode = group.genderMode.ifBlank { "any" },
+                        minAge = group.minAge,
+                        sortOrder = index,
+                        controls = emptyList(),
+                        rows = rankRogaineGroup(rows),
+                    )
+                }
+                if (includeUnmatched) {
+                    val unmatched = scored.filter { membership[it.queueId].orEmpty().isEmpty() }
+                    if (unmatched.isNotEmpty()) {
+                        buckets += ResultBucket(
+                            id = award.size + 1,
+                            key = "ungrouped",
+                            name = "без группы",
+                            genderMode = "any",
+                            minAge = null,
+                            sortOrder = award.size,
+                            controls = emptyList(),
+                            rows = rankRogaineGroup(unmatched),
+                        )
+                    }
+                }
+                return buckets
+            }
+            val byCourse = scored.groupBy { courseKey(it.course) }
+            val buckets = ArrayList<ResultBucket>()
+            val publishedKeys = HashSet<String>()
+            courses.forEachIndexed { index, course ->
+                val key = courseKey(course.name)
+                publishedKeys += key
+                val rows = byCourse[key].orEmpty()
+                if (rows.isEmpty()) return@forEachIndexed
+                buckets += ResultBucket(
+                    id = index + 1,
+                    key = key,
+                    name = course.name,
+                    genderMode = "any",
+                    minAge = null,
+                    sortOrder = index,
+                    controls = filterCourseCps(course.controls, removed),
+                    rows = rows,
+                )
+            }
+            byCourse.entries
+                .filter { it.key !in publishedKeys && it.value.isNotEmpty() }
+                .forEachIndexed { extraIndex, (_, rows) ->
+                    val sortOrder = courses.size + extraIndex
+                    buckets += ResultBucket(
+                        id = sortOrder + 1,
+                        key = "extra-$sortOrder",
+                        name = rows.firstOrNull()?.course?.ifBlank { emptyFormatLabel } ?: emptyFormatLabel,
+                        genderMode = "any",
+                        minAge = null,
+                        sortOrder = sortOrder,
+                        controls = emptyList(),
+                        rows = rows,
+                    )
+                }
+            if (courses.isEmpty() && buckets.isEmpty()) {
+                scored.groupBy { courseKey(it.course) }.forEach { (key, rows) ->
+                    buckets += ResultBucket(
+                        id = buckets.size + 1,
+                        key = key.ifBlank { "empty" },
+                        name = rows.first().course.ifBlank { emptyFormatLabel },
+                        genderMode = "any",
+                        minAge = null,
+                        sortOrder = buckets.size,
+                        controls = emptyList(),
+                        rows = rows,
+                    )
+                }
+            }
+            return buckets
+        }
+
+        private fun matchingAwardGroupNames(
+            row: ScoredResult,
+            people: List<StartPerson>,
+            groups: List<AwardCategory>,
+            competitionDate: String,
+        ): List<String> {
+            val person = row.logicalId?.let { id -> people.find { it.id == id } }
+            val teammates = if ((person?.teamId ?: row.teamId) > 0) {
+                val teamId = person?.teamId ?: row.teamId
+                people.filter { it.teamId == teamId && it.id != person?.id }
+                    .map { AwardPerson(it.gender, it.birthDate) }
+            } else {
+                emptyList()
+            }
+            return personAwardCategories(
+                format = row.course,
+                gender = person?.gender.orEmpty(),
+                birthDate = person?.birthDate.orEmpty(),
+                competitionDate = competitionDate,
+                groups = groups,
+                teammates = teammates,
+            )
+        }
+
+        private fun rankRogaineGroup(rows: List<ScoredResult>): List<ScoredResult> {
+            if (rows.isEmpty()) return rows
+            val places = assignRogainePlaces(rows.map { it.calc })
+            val placed = rows.mapIndexed { index, row -> row.copy(place = places[index]) }
+            val teamBestPlace = placed
+                .filter { it.teamId > 0 }
+                .groupBy { it.teamId }
+                .mapValues { (_, teamRows) -> teamRows.mapNotNull { it.place }.minOrNull() ?: Int.MAX_VALUE }
+            return placed.sortedWith(
+                compareBy<ScoredResult> { teamBestPlace[it.teamId] ?: it.place ?: Int.MAX_VALUE }
+                    .thenBy { if (it.teamId > 0) 0 else 1 }
+                    .thenBy { it.teamId }
+                    .thenBy { it.place ?: Int.MAX_VALUE }
+                    .thenBy { it.logicalId ?: Int.MAX_VALUE },
+            )
+        }
+
+        private fun AwardGroupView.toAwardCategory(): AwardCategory =
+            AwardCategory(
+                name = name,
+                genderMode = genderMode,
+                minAge = minAge,
+                formatNames = formatNames,
+            )
+
         private fun buildPublishJson(
             settings: EventSettings,
             title: String,
+            people: List<StartPerson>,
             courses: List<StartCourse>,
             scored: List<ScoredResult>,
             removed: Set<Int>,
@@ -902,24 +1105,70 @@ class EventStore(
             val results = JSONArray()
             val participants = JSONArray()
             val usedSourceIds = HashSet<Long>()
-            val byCourse = scored.groupBy { courseKey(it.course) }
-            fun addGroup(groupId: Int, name: String, sortOrder: Int, controls: List<Int>, rows: List<ScoredResult>) {
-                if (rows.isEmpty()) return
+            val sourceByQueue = HashMap<String, Long>()
+            val buckets = resultBuckets(
+                scored = scored,
+                people = people,
+                courses = courses,
+                sportKind = settings.sportKind,
+                competitionDate = settings.competitionDate,
+                awardGroups = awardGroups(settings),
+                removed = removed,
+                includeEmptyAwardGroups = isRogaine(settings.sportKind),
+                includeUnmatched = false,
+            )
+            fun participantSource(row: ScoredResult): Long {
+                sourceByQueue[row.queueId]?.let { return it }
+                val sourceId = uniqueParticipantSourceId(row, usedSourceIds)
+                sourceByQueue[row.queueId] = sourceId
+                val person = row.logicalId?.let { id -> people.find { it.id == id } }
+                val birth = storedBirthDate(person?.birthDate.orEmpty())
+                    .takeIf { it.matches(Regex("""^\d{4}-\d{2}-\d{2}$""")) }
+                val marks = JSONArray()
+                row.punches.forEachIndexed { seq, punch ->
+                    val h = punch.seconds / 3600
+                    val m = (punch.seconds % 3600) / 60
+                    val s = punch.seconds % 60
+                    marks.put(
+                        JSONObject()
+                            .put("seq", seq + 1)
+                            .put("cp_number", punch.cp)
+                            .put("mark_time", "%sT%02d:%02d:%02d".format(Locale.US, settings.competitionDate, h, m, s)),
+                    )
+                }
+                participants.put(
+                    JSONObject()
+                        .put("source_id", sourceId)
+                        .put("bib", row.logicalId?.toString() ?: "")
+                        .put("chip_physical", row.uid)
+                        .put("chip_logical", row.logicalId?.toString() ?: JSONObject.NULL)
+                        .put("name", row.name)
+                        .put("gender", person?.gender?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                        .put("birth_date", birth ?: JSONObject.NULL)
+                        .put("age", personAwardAge(person?.birthDate.orEmpty(), settings.competitionDate) ?: JSONObject.NULL)
+                        .put("team_id", if (row.teamId > 0) row.teamId else JSONObject.NULL)
+                        .put("format_name", row.course)
+                        .put("marks", marks)
+                        .put("path", JSONArray())
+                        .put("added_cps", JSONObject()),
+                )
+                return sourceId
+            }
+            for (bucket in buckets) {
                 groups.put(
                     JSONObject()
-                        .put("source_id", groupId)
-                        .put("name", name)
-                        .put("gender_mode", "any")
-                        .put("min_age", JSONObject.NULL)
-                        .put("sort_order", sortOrder)
-                        .put("course_cps", JSONArray(controls)),
+                        .put("source_id", bucket.id)
+                        .put("name", bucket.name)
+                        .put("gender_mode", bucket.genderMode.ifBlank { "any" })
+                        .put("min_age", bucket.minAge ?: JSONObject.NULL)
+                        .put("sort_order", bucket.sortOrder)
+                        .put("course_cps", JSONArray(bucket.controls)),
                 )
-                for (row in rows) {
-                    val sourceId = uniqueParticipantSourceId(row, usedSourceIds)
+                for (row in bucket.rows) {
                     results.put(
                         JSONObject()
-                            .put("participant_source_id", sourceId)
-                            .put("award_group_source_id", groupId)
+                            .put("participant_source_id", participantSource(row))
+                            .put("award_group_source_id", bucket.id)
                             .put("place", row.place ?: JSONObject.NULL)
                             .put("points_raw", if (isRogaine(settings.sportKind)) row.calc.pointsRaw else row.calc.taken)
                             .put("penalty_points", row.calc.penaltyPoints)
@@ -928,56 +1177,8 @@ class EventStore(
                             .put("status", row.calc.status)
                             .put("diagnostics", JSONArray(row.calc.diagnostics)),
                     )
-                    val marks = JSONArray()
-                    row.punches.forEachIndexed { seq, punch ->
-                        val h = punch.seconds / 3600
-                        val m = (punch.seconds % 3600) / 60
-                        val s = punch.seconds % 60
-                        marks.put(
-                            JSONObject()
-                                .put("seq", seq + 1)
-                                .put("cp_number", punch.cp)
-                                .put("mark_time", "%sT%02d:%02d:%02d".format(Locale.US, settings.competitionDate, h, m, s)),
-                        )
-                    }
-                    participants.put(
-                        JSONObject()
-                            .put("source_id", sourceId)
-                            .put("bib", row.logicalId?.toString() ?: "")
-                            .put("chip_physical", row.uid)
-                            .put("chip_logical", row.logicalId?.toString() ?: JSONObject.NULL)
-                            .put("name", row.name)
-                            .put("format_name", row.course)
-                            .put("marks", marks)
-                            .put("path", JSONArray())
-                            .put("added_cps", JSONObject()),
-                    )
                 }
             }
-            val publishedKeys = HashSet<String>()
-            courses.forEachIndexed { index, course ->
-                val key = courseKey(course.name)
-                publishedKeys += key
-                addGroup(
-                    groupId = index + 1,
-                    name = course.name,
-                    sortOrder = index,
-                    controls = filterCourseCps(course.controls, removed),
-                    rows = byCourse[key].orEmpty(),
-                )
-            }
-            byCourse.entries
-                .filter { it.key !in publishedKeys }
-                .forEachIndexed { extraIndex, (_, rows) ->
-                    val sortOrder = courses.size + extraIndex
-                    addGroup(
-                        groupId = sortOrder + 1,
-                        name = rows.firstOrNull()?.course?.ifBlank { "без дистанции" } ?: "без дистанции",
-                        sortOrder = sortOrder,
-                        controls = emptyList(),
-                        rows = rows,
-                    )
-                }
             if (results.length() == 0) error("Нет результатов для публикации")
             return JSONObject()
                 .put("title", title)

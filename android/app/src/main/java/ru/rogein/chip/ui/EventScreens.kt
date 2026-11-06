@@ -39,6 +39,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
@@ -48,6 +49,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,6 +65,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -72,6 +76,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -114,6 +119,7 @@ import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import ru.rogein.chip.parse.StationCheckMark
 import ru.rogein.chip.parse.StationCheckReport
 import ru.rogein.chip.parse.CP_CLEAR
@@ -139,9 +145,15 @@ import ru.rogein.chip.parse.protocolRunStatus
 import ru.rogein.chip.parse.ProtocolRunStatus
 import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
+import ru.rogein.chip.parse.AwardCategory
+import ru.rogein.chip.parse.AwardPerson
+import ru.rogein.chip.parse.BirthDateParts
+import ru.rogein.chip.parse.formatBirthDateDot
+import ru.rogein.chip.parse.parseBirthDateParts
 import ru.rogein.chip.parse.RogaineCpTypeRule
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.isRogaine
+import ru.rogein.chip.parse.personAwardCategories
 import ru.rogein.chip.parse.punchLegSeconds
 import ru.rogein.chip.queue.AwardGroupView
 import ru.rogein.chip.queue.CorrectionEntity
@@ -199,6 +211,7 @@ internal fun PersonProtocolLine(
     emptyCourseLabel: String = "без дистанции",
 ) {
     val courseMark = person.currentCourse.ifBlank { emptyCourseLabel }
+    val teamMark = person.teamLabel
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -208,7 +221,10 @@ internal fun PersonProtocolLine(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            text = "${person.id}  ${person.displayName}  $courseMark",
+            text = buildString {
+                append("${person.id}  ${person.displayName}  $courseMark")
+                if (teamMark.isNotEmpty()) append("  $teamMark")
+            },
             style = if (selected) {
                 MaterialTheme.typography.titleMedium
             } else {
@@ -542,6 +558,8 @@ fun ProtocolScreen(
     newNumber: String,
     newName: String,
     newCourse: String,
+    newGender: String = "",
+    newBirth: String = "",
     onQuery: (String) -> Unit,
     onSelect: (Int) -> Unit,
     onNew: () -> Unit,
@@ -549,6 +567,8 @@ fun ProtocolScreen(
     onNewNumber: (String) -> Unit,
     onNewName: (String) -> Unit,
     onNewCourse: (String) -> Unit,
+    onNewGender: (String) -> Unit = {},
+    onNewBirth: (String) -> Unit = {},
     onSavePerson: () -> Unit,
     onDeletePerson: (Int) -> Unit,
     onUsbProtocol: (Boolean) -> Unit,
@@ -567,6 +587,7 @@ fun ProtocolScreen(
     legends: List<LegendView> = emptyList(),
     formatTypeRules: Map<String, List<RogaineCpTypeRule>> = emptyMap(),
     awardGroups: List<AwardGroupView> = emptyList(),
+    competitionDate: String = "",
     courseCheckOn: Boolean,
     courseCheckName: String,
     courseCheckReport: StationCheckReport?,
@@ -581,6 +602,7 @@ fun ProtocolScreen(
     var confirmDelete by remember { mutableStateOf<StartPerson?>(null) }
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
+    val editorOpen = pane == ProtocolPane.People && !searching && (addingNew || selected != null)
     val personNumberFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(addingNew, pane) {
@@ -610,10 +632,19 @@ fun ProtocolScreen(
         val q = query.trim().lowercase().replace('ё', 'е')
         val nameHit = q.isEmpty() ||
             person.name.lowercase().replace('ё', 'е').contains(q) ||
-            person.id.toString().contains(q)
+            person.id.toString().contains(q) ||
+            (person.teamId > 0 && (person.teamLabel.lowercase().contains(q) || person.teamId.toString() == q))
         if (!nameHit) return@filter false
         val status = personProtocolStatus(person, finishedById[person.id].orEmpty())
         statusFilter.isEmpty() || status in statusFilter
+    }.let { rows ->
+        if (!isRogaine(sportKind)) rows
+        else rows.sortedWith(
+            compareBy<StartPerson> { courseKey(it.currentCourse) }
+                .thenBy { if (it.teamId > 0) 0 else 1 }
+                .thenBy { it.teamId }
+                .thenBy { it.id },
+        )
     }
     val rogaine = isRogaine(sportKind)
     val unknownCourses = people.map { it.currentCourse }.filter { name ->
@@ -636,6 +667,35 @@ fun ProtocolScreen(
         if (!rogaine && unknownCourses.isNotEmpty()) add("нет КП: ${unknownCourses.joinToString()}")
     }.joinToString(" · ")
     Column(modifier = modifier.fillMaxSize()) {
+        if (editorOpen) {
+            ProtocolPersonEditor(
+                addingNew = addingNew,
+                selected = selected,
+                people = people,
+                courses = courses,
+                newNumber = newNumber,
+                newName = newName,
+                newCourse = newCourse,
+                newGender = newGender,
+                newBirth = newBirth,
+                competitionDate = competitionDate,
+                awardGroups = awardGroups,
+                rogaine = rogaine,
+                onNewNumber = onNewNumber,
+                onNewName = onNewName,
+                onNewCourse = onNewCourse,
+                onNewGender = onNewGender,
+                onNewBirth = onNewBirth,
+                onSavePerson = onSavePerson,
+                onClose = onClearSelection,
+                onDelete = if (selected != null && !addingNew) {
+                    { confirmDelete = selected }
+                } else {
+                    null
+                },
+                numberFocus = personNumberFocus,
+            )
+        } else {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -861,56 +921,6 @@ fun ProtocolScreen(
                     modifier = Modifier.weight(1f),
                 )
                 Button(onClick = onNew) { Text("Добавить") }
-                if (!searching && (selected != null || addingNew)) {
-                    TextButton(onClick = onClearSelection) { Text("Свернуть") }
-                }
-            }
-        }
-        if (pane == ProtocolPane.People && !searching && (addingNew || selected != null)) {
-            EditorCard(
-                title = if (addingNew) {
-                    "Новый участник"
-                } else {
-                    "№ ${selected?.id} · ${selected?.displayName.orEmpty()}"
-                },
-                primaryLabel = if (addingNew) "Сохранить" else "Обновить",
-                onPrimary = onSavePerson,
-                onClose = onClearSelection,
-                onDelete = if (selected != null && !addingNew) {
-                    { confirmDelete = selected }
-                } else {
-                    null
-                },
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = newNumber,
-                        onValueChange = onNewNumber,
-                        enabled = addingNew,
-                        singleLine = true,
-                        label = { Text("Номер") },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Next,
-                        ),
-                        modifier = Modifier
-                            .weight(0.35f)
-                            .focusRequester(personNumberFocus),
-                    )
-                    OutlinedTextField(
-                        value = newName,
-                        onValueChange = onNewName,
-                        singleLine = true,
-                        label = { Text("ФИО") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
-                        modifier = Modifier.weight(0.65f),
-                    )
-                }
-                CourseChoice(if (rogaine) "Формат" else "Дистанция", courses.map { it.name }, newCourse, onNewCourse)
             }
         }
         if (pane == ProtocolPane.People) {
@@ -997,6 +1007,7 @@ fun ProtocolScreen(
                     .fillMaxWidth()
                     .weight(1f),
             )
+        }
         }
         }
     }
@@ -1091,6 +1102,162 @@ private fun askCourseLoad(
 }
 
 private enum class ProtocolPane { People, Courses, Cps, Groups, Check }
+
+@Composable
+private fun ProtocolPersonEditor(
+    addingNew: Boolean,
+    selected: StartPerson?,
+    people: List<StartPerson>,
+    courses: List<StartCourse>,
+    newNumber: String,
+    newName: String,
+    newCourse: String,
+    newGender: String,
+    newBirth: String,
+    competitionDate: String,
+    awardGroups: List<AwardGroupView>,
+    rogaine: Boolean,
+    onNewNumber: (String) -> Unit,
+    onNewName: (String) -> Unit,
+    onNewCourse: (String) -> Unit,
+    onNewGender: (String) -> Unit,
+    onNewBirth: (String) -> Unit,
+    onSavePerson: () -> Unit,
+    onClose: () -> Unit,
+    onDelete: (() -> Unit)?,
+    numberFocus: FocusRequester,
+) {
+    val editorScroll = rememberScrollState()
+    val editorScope = rememberCoroutineScope()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CardWhite)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (addingNew) {
+                    "Новый участник"
+                } else {
+                    "№ ${selected?.id} · ${selected?.displayName.orEmpty()}"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            CompactTextButton("Закрыть", onClose)
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(editorScroll),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = newNumber,
+                    onValueChange = onNewNumber,
+                    enabled = addingNew,
+                    singleLine = true,
+                    label = { Text("Номер") },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Next,
+                    ),
+                    modifier = Modifier
+                        .weight(0.35f)
+                        .focusRequester(numberFocus),
+                )
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = onNewName,
+                    singleLine = true,
+                    label = { Text("ФИО") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onSavePerson() }),
+                    modifier = Modifier.weight(0.65f),
+                )
+            }
+            CourseChoice(
+                if (rogaine) "Формат" else "Дистанция",
+                courses.map { it.name },
+                newCourse,
+                onNewCourse,
+            )
+            if (rogaine) {
+                val teamId = selected?.teamId ?: 0
+                if (!addingNew && teamId > 0) {
+                    val mates = people
+                        .filter { it.teamId == teamId && it.id != selected?.id }
+                        .sortedBy { it.id }
+                        .joinToString(" · ") { "${it.id} ${it.displayName}" }
+                    Text(
+                        if (mates.isEmpty()) "Команда Т$teamId" else "Команда Т$teamId · $mates",
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                RogainePersonFields(
+                    gender = newGender,
+                    birthDate = newBirth,
+                    onGender = onNewGender,
+                    onBirthDate = onNewBirth,
+                    onBirthFocus = { focused ->
+                        if (focused) {
+                            editorScope.launch {
+                                delay(80)
+                                editorScroll.animateScrollTo(editorScroll.maxValue)
+                            }
+                        }
+                    },
+                )
+                val teammates = if (!addingNew && teamId > 0) {
+                    people.filter { it.teamId == teamId && it.id != selected?.id }
+                        .map { AwardPerson(it.gender, it.birthDate) }
+                } else {
+                    emptyList()
+                }
+                val awardLine = personAwardCategories(
+                    format = newCourse.ifBlank { selected?.currentCourse.orEmpty() },
+                    gender = newGender,
+                    birthDate = newBirth,
+                    competitionDate = competitionDate,
+                    groups = awardGroups.map { it.toAwardCategory() },
+                    teammates = teammates,
+                ).joinToString(", ")
+                if (awardLine.isNotEmpty()) {
+                    Text(
+                        "Награждение: $awardLine",
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = onSavePerson) {
+                Text(if (addingNew) "Сохранить" else "Обновить")
+            }
+            if (onDelete != null) {
+                CompactTextButton("Удалить", onDelete, Danger)
+            }
+        }
+    }
+}
 
 @Composable
 private fun CourseStationCheckPanel(
@@ -1478,6 +1645,102 @@ private fun LegendsPanel(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RogainePersonFields(
+    gender: String,
+    birthDate: String,
+    onGender: (String) -> Unit,
+    onBirthDate: (String) -> Unit,
+    onBirthFocus: (Boolean) -> Unit = {},
+) {
+    var pickerOpen by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Пол", color = Muted, style = MaterialTheme.typography.bodySmall)
+        FilterChip(
+            selected = gender == "male",
+            onClick = { onGender(if (gender == "male") "" else "male") },
+            label = { Text("М") },
+        )
+        FilterChip(
+            selected = gender == "female",
+            onClick = { onGender(if (gender == "female") "" else "female") },
+            label = { Text("Ж") },
+        )
+    }
+    OutlinedTextField(
+        value = birthDate,
+        onValueChange = onBirthDate,
+        singleLine = true,
+        label = { Text("Дата рождения") },
+        placeholder = { Text("дд.мм.гггг") },
+        trailingIcon = {
+            IconButton(onClick = { pickerOpen = true }) {
+                Icon(Icons.Filled.DateRange, contentDescription = "Календарь")
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { onBirthFocus(it.isFocused) },
+    )
+    if (pickerOpen) {
+        val initial = parseBirthDateParts(birthDate)?.let { parts ->
+            java.time.LocalDate.of(parts.year, parts.month, parts.day)
+                .atStartOfDay(java.time.ZoneOffset.UTC)
+                .toInstant()
+                .toEpochMilli()
+        }
+        val year = java.time.LocalDate.now().year
+        val state = rememberDatePickerState(
+            initialSelectedDateMillis = initial,
+            yearRange = IntRange(1920, year),
+        )
+        DatePickerDialog(
+            onDismissRequest = { pickerOpen = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val millis = state.selectedDateMillis
+                        if (millis != null) {
+                            val date = java.time.Instant.ofEpochMilli(millis)
+                                .atZone(java.time.ZoneOffset.UTC)
+                                .toLocalDate()
+                            onBirthDate(
+                                formatBirthDateDot(
+                                    BirthDateParts(
+                                        date.year,
+                                        date.monthValue,
+                                        date.dayOfMonth,
+                                    ),
+                                ),
+                            )
+                        }
+                        pickerOpen = false
+                    },
+                ) { Text("ОК") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pickerOpen = false }) { Text("Отмена") }
+            },
+        ) {
+            DatePicker(state = state)
+        }
+    }
+}
+
+private fun AwardGroupView.toAwardCategory(): AwardCategory =
+    AwardCategory(
+        name = name,
+        genderMode = genderMode,
+        minAge = minAge,
+        formatNames = formatNames,
+    )
 
 private fun awardGenderLabel(mode: String): String =
     when (mode.trim().lowercase()) {
@@ -1959,6 +2222,9 @@ fun ResultsScreen(
     sportKind: String = SPORT_ORIENT,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
+    people: List<StartPerson> = emptyList(),
+    awardGroups: List<AwardGroupView> = emptyList(),
+    competitionDate: String = "",
 ) {
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
@@ -1969,11 +2235,21 @@ fun ResultsScreen(
         else results.filter { row ->
             row.name.lowercase().replace('ё', 'е').contains(q) ||
                 row.logicalId?.toString()?.contains(q) == true ||
-                row.course.lowercase().replace('ё', 'е').contains(q)
+                row.course.lowercase().replace('ё', 'е').contains(q) ||
+                (row.teamId > 0 && ("т${row.teamId}".contains(q) || row.teamId.toString() == q))
         }
     }
     val rogaine = isRogaine(sportKind)
-    val groups = remember(filtered) { filtered.groupBy { courseKey(it.course) }.toList() }
+    val groups = remember(filtered, people, sportKind, awardGroups, competitionDate) {
+        EventStore.displayResultGroups(
+            results = filtered,
+            people = people,
+            sportKind = sportKind,
+            competitionDate = competitionDate,
+            awardGroups = awardGroups,
+            emptyFormatLabel = if (rogaine) "без формата" else "без дистанции",
+        )
+    }
     val removedCps = remember(corrections) { EventStore.removedCps(corrections) }
     LaunchedEffect(q) {
         if (q.isNotBlank()) collapsed = emptySet()
@@ -2041,21 +2317,23 @@ fun ResultsScreen(
                     )
                 }
             }
-            groups.forEach { (groupKey, rows) ->
-                val label = rows.first().course.ifBlank { if (rogaine) "без формата" else "без дистанции" }
+            groups.forEach { group ->
+                val groupKey = group.key
+                val rows = group.rows
                 val open = groupKey !in collapsed
                 item(key = "course-$groupKey") {
                     CourseGroupHeader(
-                        name = label,
+                        name = group.name,
                         count = rows.size,
                         expanded = open,
+                        groupNoun = if (rogaine && awardGroups.isNotEmpty()) "группу" else "дистанцию",
                         onToggle = {
                             collapsed = if (groupKey in collapsed) collapsed - groupKey else collapsed + groupKey
                         },
                     )
                 }
                 if (open) {
-                    items(rows, key = { it.queueId }) { row ->
+                    items(rows, key = { "${groupKey}:${it.queueId}" }) { row ->
                         val live = results.find { it.queueId == row.queueId } ?: row
                         ResultProtocolRow(
                             row = live,
@@ -2091,6 +2369,7 @@ private fun CourseGroupHeader(
     count: Int,
     expanded: Boolean,
     onToggle: () -> Unit,
+    groupNoun: String = "дистанцию",
 ) {
     Column(
         modifier = Modifier
@@ -2105,7 +2384,7 @@ private fun CourseGroupHeader(
         ) {
             Icon(
                 imageVector = if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = if (expanded) "Свернуть дистанцию" else "Развернуть дистанцию",
+                contentDescription = if (expanded) "Свернуть $groupNoun" else "Развернуть $groupNoun",
                 tint = Muted,
             )
             Text(
@@ -2175,7 +2454,10 @@ private fun ResultProtocolRow(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                row.name,
+                buildString {
+                    append(row.name)
+                    if (rogaine && row.teamId > 0) append("  Т${row.teamId}")
+                },
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 8.dp),

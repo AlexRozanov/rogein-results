@@ -36,7 +36,11 @@ import ru.rogein.chip.parse.ReceiptText
 import ru.rogein.chip.parse.SplitReceipt
 import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.courseKey
+import ru.rogein.chip.parse.displayBirthDate
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.personGenderChoice
+import ru.rogein.chip.parse.storedBirthDate
+import ru.rogein.chip.parse.storedPersonGender
 import ru.rogein.chip.parse.formatElapsed
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.parse.resultStatusLine
@@ -288,6 +292,12 @@ class ChipQueueViewModel(
     private val _newCourse = MutableStateFlow("")
     val newCourse = _newCourse.asStateFlow()
 
+    private val _newGender = MutableStateFlow("")
+    val newGender = _newGender.asStateFlow()
+
+    private val _newBirth = MutableStateFlow("")
+    val newBirth = _newBirth.asStateFlow()
+
     private val _extraCourse = MutableStateFlow("")
     val extraCourse = _extraCourse.asStateFlow()
 
@@ -349,7 +359,12 @@ class ChipQueueViewModel(
     }
 
     fun setSection(next: AppSection) {
+        val prev = _section.value
         _section.value = next
+        if (next == AppSection.Protocol || prev == AppSection.Protocol) {
+            _selectedId.value = null
+            _addingNew.value = false
+        }
         if (next != AppSection.Protocol) {
             _courseCheckOn.value = false
         }
@@ -499,7 +514,13 @@ class ChipQueueViewModel(
             val existing = repository.startList.person(id)
             val savedName = name.ifBlank { existing?.name.orEmpty() }
             val savedCourse = course.ifBlank { existing?.currentCourse.orEmpty() }
-            repository.startList.upsertLocal(id, savedName, savedCourse)
+            repository.startList.upsertLocal(
+                id,
+                savedName,
+                savedCourse,
+                gender = storedPersonGender(_newGender.value),
+                birthDate = storedBirthDate(_newBirth.value),
+            )
             _addingNew.value = false
             _selectedId.value = null
             _status.value = when {
@@ -794,6 +815,8 @@ class ChipQueueViewModel(
         _newNumber.value = person?.id?.toString().orEmpty()
         _newName.value = person?.name.orEmpty()
         _newCourse.value = person?.currentCourse.orEmpty()
+        _newGender.value = personGenderChoice(person?.gender.orEmpty())
+        _newBirth.value = displayBirthDate(person?.birthDate.orEmpty())
         _testCourse.value = person?.currentCourse
             ?.takeIf { it.isNotBlank() }
             ?: person?.courses?.firstOrNull().orEmpty()
@@ -810,11 +833,17 @@ class ChipQueueViewModel(
     }
 
     fun startNewPerson() {
+        val q = _query.value
         _addingNew.value = true
         _selectedId.value = null
-        _newNumber.value = _query.value.filter { it.isDigit() }.take(5)
-        _newName.value = if (_query.value.any { it.isLetter() }) _query.value else ""
+        _newNumber.value = q.filter { it.isDigit() }.take(5)
+        _newName.value = if (q.any { it.isLetter() }) q else ""
         _newCourse.value = courses.value.firstOrNull()?.name.orEmpty()
+        _newGender.value = ""
+        _newBirth.value = ""
+        if (_section.value != AppSection.Chip) {
+            _query.value = ""
+        }
         promptStatus()
     }
 
@@ -823,8 +852,6 @@ class ChipQueueViewModel(
         _newNumber.value = digits
         if (_section.value == AppSection.Chip && _mode.value == ChipMode.Issue) {
             syncIssueNumber(digits)
-        } else if (_addingNew.value && _mode.value == ChipMode.Issue) {
-            promptStatus()
         }
     }
 
@@ -836,6 +863,8 @@ class ChipQueueViewModel(
             if (digits.isEmpty()) {
                 _newName.value = ""
                 _newCourse.value = ""
+                _newGender.value = ""
+                _newBirth.value = ""
             }
             promptStatus()
             return
@@ -846,17 +875,29 @@ class ChipQueueViewModel(
             _addingNew.value = false
             _newName.value = person.name
             _newCourse.value = person.currentCourse
+            _newGender.value = personGenderChoice(person.gender)
+            _newBirth.value = displayBirthDate(person.birthDate)
         } else {
             _selectedId.value = null
             _addingNew.value = true
             _newName.value = ""
             _newCourse.value = ""
+            _newGender.value = ""
+            _newBirth.value = ""
         }
         promptStatus()
     }
 
     fun onNewName(value: String) {
         _newName.value = value
+    }
+
+    fun onNewGender(value: String) {
+        _newGender.value = value
+    }
+
+    fun onNewBirth(value: String) {
+        _newBirth.value = value
     }
 
     fun onNewCourse(value: String) {
@@ -1005,6 +1046,7 @@ class ChipQueueViewModel(
     }
 
     private fun promptStatus() {
+        if (_section.value != AppSection.Chip) return
         val id = _newNumber.value.toIntOrNull()
         val person = protocolPerson(id)
         _status.value = when (_mode.value) {
@@ -1477,6 +1519,8 @@ class ChipQueueViewModel(
             _newNumber.value = ""
             _newName.value = ""
             _newCourse.value = ""
+            _newGender.value = ""
+            _newBirth.value = ""
             _extraCourse.value = ""
             pointerEnd = 5
             punchCount = 0

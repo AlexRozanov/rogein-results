@@ -136,6 +136,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val newNumber by viewModel.newNumber.collectAsStateWithLifecycle()
     val newName by viewModel.newName.collectAsStateWithLifecycle()
     val newCourse by viewModel.newCourse.collectAsStateWithLifecycle()
+    val newGender by viewModel.newGender.collectAsStateWithLifecycle()
+    val newBirth by viewModel.newBirth.collectAsStateWithLifecycle()
     val extraCourse by viewModel.extraCourse.collectAsStateWithLifecycle()
     val testCourse by viewModel.testCourse.collectAsStateWithLifecycle()
     val chipReady by viewModel.chipReady.collectAsStateWithLifecycle()
@@ -169,8 +171,11 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
         viewModel.consumeCsvExport()
     }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val protocolPersonEditor = section == AppSection.Protocol &&
+        query.isBlank() &&
+        (addingNew || selected != null)
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
-    val showStatus = !imeVisible && shouldShowStatus(status, section)
+    val showStatus = !imeVisible && !protocolPersonEditor && shouldShowStatus(status, section)
 
     Box {
     Scaffold(
@@ -207,7 +212,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             )
         },
         bottomBar = {
-            if (!imeVisible) {
+            if (!imeVisible && !protocolPersonEditor) {
                 NavigationBar(containerColor = Color.White) {
                     NavigationBarItem(
                         selected = section == AppSection.Chip,
@@ -291,6 +296,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     newNumber = newNumber,
                     newName = newName,
                     newCourse = newCourse,
+                    newGender = newGender,
+                    newBirth = newBirth,
                     onQuery = viewModel::onQuery,
                     onSelect = hideKeyboardOnSelect,
                     onNew = viewModel::startNewPerson,
@@ -298,6 +305,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onNewNumber = viewModel::onNewNumber,
                     onNewName = viewModel::onNewName,
                     onNewCourse = viewModel::onNewCourse,
+                    onNewGender = viewModel::onNewGender,
+                    onNewBirth = viewModel::onNewBirth,
                     onSavePerson = viewModel::saveManualPerson,
                     onDeletePerson = viewModel::deletePerson,
                     onUsbProtocol = viewModel::loadUsbProtocol,
@@ -334,6 +343,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     legends = EventStore.legends(settings),
                     formatTypeRules = EventStore.formatTypeRules(settings),
                     awardGroups = EventStore.awardGroups(settings),
+                    competitionDate = settings.competitionDate,
                     items = items,
                     courseCheckOn = courseCheckOn,
                     courseCheckName = courseCheckName,
@@ -367,6 +377,9 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     startClockSeconds = parseDaySeconds(settings.competitionStartTime)
                         .takeIf { isRogaine(settings.sportKind) && settings.startMode == "time" },
                     legendCps = EventStore.legendCps(settings),
+                    people = people,
+                    awardGroups = EventStore.awardGroups(settings),
+                    competitionDate = settings.competitionDate,
                 )
                 AppSection.More -> when (morePage) {
                     MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage, sportKind = settings.sportKind)
@@ -1476,15 +1489,20 @@ private fun rememberHideKeyboardOnSelect(onSelect: (Int) -> Unit): (Int) -> Unit
 private fun shouldShowStatus(status: String, section: AppSection): Boolean {
     val text = status.trim()
     if (text.isEmpty()) return false
-    if (section != AppSection.Chip && isIdleChipPrompt(text)) return false
+    if (section != AppSection.Chip && isChipOperationPrompt(text)) return false
     return true
 }
 
-private fun isIdleChipPrompt(text: String): Boolean {
-    return text.startsWith("Приложите") ||
-        text.startsWith("Выберите участника") ||
-        text.startsWith("Укажите дистанцию") ||
-        text.startsWith("Чип на месте")
+private fun isChipOperationPrompt(text: String): Boolean {
+    val t = text.trim()
+    val lower = t.lowercase()
+    return lower.startsWith("приложите") ||
+        lower.startsWith("введите номер и приложите") ||
+        lower.startsWith("выберите участника") ||
+        lower.startsWith("укажите дистанцию") ||
+        lower.startsWith("чип на месте") ||
+        lower.contains("приложите чип") ||
+        lower.contains("отметьтесь")
 }
 
 private fun compactStatus(text: String): String {

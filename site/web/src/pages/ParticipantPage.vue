@@ -52,6 +52,7 @@ type EventDetail = {
   map_width?: number | null;
   map_height?: number | null;
   meters_per_pixel?: number | null;
+  map_points?: unknown;
   sport_kind?: string;
   start_cp?: number | null;
   finish_cp?: number | null;
@@ -104,7 +105,11 @@ const awardGroupName = computed(() => {
 });
 
 const isOrient = computed(() => event.value?.sport_kind === "orient");
-const pathPoints = computed<PathPoint[]>(() => normalizePath(person.value?.path));
+const pathPoints = computed<PathPoint[]>(() => {
+  const stored = normalizePath(person.value?.path);
+  if (stored.length) return stored;
+  return pathFromMarks(person.value?.marks, event.value?.map_points);
+});
 const selectedStatus = computed(() => selectedResult.value?.status || "OK");
 const isDsq = computed(() => {
   const status = selectedStatus.value;
@@ -267,6 +272,51 @@ function pathDistanceM(path: PathPoint[], ev: EventDetail | null) {
 function distanceKm(meters: number | null | undefined) {
   if (meters == null || !Number.isFinite(meters) || meters <= 0) return null;
   return meters / 1000;
+}
+
+function mapPointCoords(raw: unknown): Array<{ x: number; y: number; cp: number | null; kind: string | null }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ x: number; y: number; cp: number | null; kind: string | null }> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const x = Number(row.map_x ?? row.mapX);
+    const y = Number(row.map_y ?? row.mapY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const cpRaw = row.cp_number ?? row.cp;
+    const cp = cpRaw == null || cpRaw === "" ? NaN : Number(cpRaw);
+    out.push({
+      x,
+      y,
+      cp: Number.isFinite(cp) ? cp : null,
+      kind: typeof row.kind === "string" ? row.kind : null,
+    });
+  }
+  return out;
+}
+
+function pathFromMarks(marks: Mark[] | undefined, mapPoints: unknown): PathPoint[] {
+  if (!marks?.length) return [];
+  const byCp = new Map<number, { x: number; y: number; kind: string | null }>();
+  for (const point of mapPointCoords(mapPoints)) {
+    if (point.cp == null) continue;
+    byCp.set(point.cp, { x: point.x, y: point.y, kind: point.kind });
+  }
+  if (!byCp.size) return [];
+  const out: PathPoint[] = [];
+  for (const mark of marks) {
+    const point = byCp.get(mark.cp_number);
+    if (!point) continue;
+    const last = out[out.length - 1];
+    if (last && Math.abs(last.x - point.x) < 1e-9 && Math.abs(last.y - point.y) < 1e-9) continue;
+    out.push({
+      x: point.x,
+      y: point.y,
+      cp_number: mark.cp_number,
+      kind: point.kind,
+    });
+  }
+  return out;
 }
 
 function normalizePath(raw: unknown): PathPoint[] {

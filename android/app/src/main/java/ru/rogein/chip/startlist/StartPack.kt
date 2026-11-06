@@ -23,8 +23,10 @@ data class StartPerson(
     val issuedCourse: String = "",
     val gender: String = "",
     val birthDate: String = "",
+    val teamId: Int = 0,
 ) {
     val displayName: String get() = name.ifBlank { "без ФИО" }
+    val teamLabel: String get() = if (teamId > 0) "Т$teamId" else ""
 }
 
 fun parseStartPack(json: String): StartPack {

@@ -8476,6 +8476,8 @@ pub struct EventPackPerson {
     pub gender: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub birth_date: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<i64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub team: String,
 }
@@ -8586,6 +8588,7 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
                 .birth_date_iso
                 .or(row.birth_date_raw)
                 .unwrap_or_default(),
+            team_id: row.team_id.filter(|id| *id > 0),
             team: row.teammates,
         });
     }
@@ -8718,6 +8721,7 @@ fn event_pack_revision(pack: &EventPack) -> i64 {
         person.format.hash(&mut hasher);
         person.gender.hash(&mut hasher);
         person.birth_date.hash(&mut hasher);
+        person.team_id.hash(&mut hasher);
         person.team.hash(&mut hasher);
     }
     for legend in &pack.legends {
@@ -10964,7 +10968,7 @@ mod tests {
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot,
         import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
-        build_start_pack, set_format_cp_type_rules, upsert_award_group, EventPack,
+        build_start_pack, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
         FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, resolve_orient_leg_to,
@@ -11881,6 +11885,37 @@ mod tests {
         assert!(json.contains("\"awardGroups\""));
         assert!(json.contains("\"legends\""));
         assert!(json.contains("\"controls\""));
+    }
+
+    #[test]
+    fn rogaine_event_pack_includes_team_id() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата_рождения\n8;Иванов;4ч;мужской;1990-01-01\n9;Петрова;4ч;женский;1992-02-02\n",
+            true,
+        )
+        .unwrap();
+        let entry_ids: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM start_protocol ORDER BY id")
+                .unwrap();
+            let ids = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<i64>, _>>()
+                .unwrap();
+            ids
+        };
+        let team_id = merge_start_protocol_team(&conn, entry_ids).unwrap();
+        let pack = build_event_pack(&conn, "Командный рогейн").unwrap();
+        assert_eq!(pack.people.len(), 2);
+        assert!(pack.people.iter().all(|person| person.team_id == Some(team_id)));
+        assert!(pack.people.iter().any(|person| person.team.contains("Петрова") || person.team.contains("Иванов")));
+        let json = serde_json::to_string(&pack).unwrap();
+        assert!(json.contains("\"teamId\""));
     }
 
     #[test]

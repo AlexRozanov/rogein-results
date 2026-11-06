@@ -125,6 +125,7 @@ class StartListStore(
                     currentCourse = person.format,
                     gender = person.gender,
                     birthDate = person.birthDate,
+                    teamId = person.teamId,
                 )
             },
         )
@@ -204,6 +205,7 @@ class StartListStore(
                     issuedCourse = local?.issuedCourse.orEmpty(),
                     gender = person.gender.ifBlank { local?.gender.orEmpty() },
                     birthDate = person.birthDate.ifBlank { local?.birthDate.orEmpty() },
+                    teamId = person.teamId,
                 ),
             )
         }
@@ -271,6 +273,7 @@ class StartListStore(
                     issuedCourse = existing?.issuedCourse.orEmpty(),
                     gender = existing?.gender.orEmpty(),
                     birthDate = existing?.birthDate.orEmpty(),
+                    teamId = existing?.teamId ?: 0,
                 ),
             )
             imported += 1
@@ -322,6 +325,7 @@ class StartListStore(
                     issuedCourse = existing?.issuedCourse.orEmpty(),
                     gender = row.gender.ifBlank { existing?.gender.orEmpty() },
                     birthDate = row.birth.ifBlank { existing?.birthDate.orEmpty() },
+                    teamId = existing?.teamId ?: 0,
                 ),
             )
             imported += 1
@@ -415,7 +419,14 @@ class StartListStore(
         dao.deleteCourse(name.trim())
     }
 
-    suspend fun upsertLocal(id: Int, name: String, course: String, extraCourses: List<String> = emptyList()) {
+    suspend fun upsertLocal(
+        id: Int,
+        name: String,
+        course: String,
+        extraCourses: List<String> = emptyList(),
+        gender: String? = null,
+        birthDate: String? = null,
+    ) {
         val existing = dao.person(id)
         val union = linkedSetOf<String>()
         if (existing != null) union.addAll(parseNames(existing.coursesJson))
@@ -431,8 +442,9 @@ class StartListStore(
                 localCourseTouchedAt = System.currentTimeMillis(),
                 issuedAt = existing?.issuedAt ?: 0L,
                 issuedCourse = existing?.issuedCourse.orEmpty(),
-                gender = existing?.gender.orEmpty(),
-                birthDate = existing?.birthDate.orEmpty(),
+                gender = gender ?: existing?.gender.orEmpty(),
+                birthDate = birthDate ?: existing?.birthDate.orEmpty(),
+                teamId = existing?.teamId ?: 0,
             ),
         )
     }
@@ -584,6 +596,7 @@ private fun StartPersonEntity.toPerson(): StartPerson {
         issuedCourse = issuedCourse.ifBlank { if (issuedAt > 0L) currentCourse else "" },
         gender = gender,
         birthDate = birthDate,
+        teamId = teamId,
     )
 }
 

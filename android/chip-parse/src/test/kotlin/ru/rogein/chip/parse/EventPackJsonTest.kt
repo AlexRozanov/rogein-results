@@ -25,6 +25,7 @@ class EventPackJsonTest {
         assertEquals("4ч", pack.people[0].format)
         assertEquals("мужской", pack.people[0].gender)
         assertEquals("1990-01-01", pack.people[0].birthDate)
+        assertEquals(0, pack.people[0].teamId)
         assertEquals(31, pack.legends[0].cp)
         assertEquals(0.4, pack.legends[0].mapX)
         assertEquals(31, pack.exclusions[0].fromCp)
@@ -79,6 +80,23 @@ class EventPackJsonTest {
         assertEquals(listOf("2ч"), pack.awardGroups[0].formatNames)
         assertEquals(31, pack.legends[0].cp)
         assertEquals(0.2, pack.legends[0].mapX)
+    }
+
+    @Test
+    fun eventPackReadsTeamId() {
+        val json = """
+            {
+              "sport": "rogaine",
+              "people": [
+                {"id": 8, "name": "Иванов", "format": "4ч", "teamId": 3, "team": "9 Петрова"},
+                {"id": 9, "name": "Петрова", "format": "4ч", "team_id": 3, "team": "8 Иванов"}
+              ]
+            }
+        """.trimIndent()
+        val pack = parseEventPackJson(json)
+        assertEquals(3, pack.people[0].teamId)
+        assertEquals(3, pack.people[1].teamId)
+        assertEquals("9 Петрова", pack.people[0].team)
     }
 
     @Test

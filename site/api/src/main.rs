@@ -285,7 +285,7 @@ async fn get_live_event(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
-    let event = match load_event_detail(&state.pool, &slug, Some("live"))
+    let mut event = match load_event_detail(&state.pool, &slug, Some("live"))
         .await
         .map_err(internal)?
     {
@@ -295,6 +295,9 @@ async fn get_live_event(
             .map_err(internal)?
             .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?,
     };
+    fill_live_map_from_pack(&state.pool, &slug, &mut event)
+        .await
+        .map_err(internal)?;
     Ok((
         [(
             header::CACHE_CONTROL,
@@ -542,7 +545,16 @@ struct EventPackLiveRow {
     title: String,
     sport_kind: String,
     pack_json: serde_json::Value,
+    map_file_name: Option<String>,
+    map_mime: Option<String>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct EventPackMapRow {
+    map_file_name: Option<String>,
+    map_mime: Option<String>,
+    pack_json: serde_json::Value,
 }
 
 fn pack_json_text<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -567,12 +579,122 @@ fn pack_competition_date(pack: &serde_json::Value) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()
 }
 
+fn json_array_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn pack_map_points_public(pack: &serde_json::Value) -> serde_json::Value {
+    let Some(items) = pack
+        .get("mapPoints")
+        .or_else(|| pack.get("map_points"))
+        .and_then(|v| v.as_array())
+    else {
+        return serde_json::json!([]);
+    };
+    let points: Vec<serde_json::Value> = items
+        .iter()
+        .filter_map(|item| {
+            let kind = item.get("kind")?.as_str()?.to_string();
+            let x = item
+                .get("mapX")
+                .or_else(|| item.get("map_x"))
+                .and_then(|v| v.as_f64())?;
+            let y = item
+                .get("mapY")
+                .or_else(|| item.get("map_y"))
+                .and_then(|v| v.as_f64())?;
+            let cp = item
+                .get("cp")
+                .or_else(|| item.get("cp_number"))
+                .and_then(|v| v.as_i64());
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(serde_json::json!({
+                "kind": kind,
+                "cp_number": cp,
+                "name": name,
+                "map_x": x,
+                "map_y": y,
+            }))
+        })
+        .collect();
+    serde_json::Value::Array(points)
+}
+
+fn apply_pack_map(
+    detail: &mut EventDetail,
+    slug: &str,
+    map_file_name: Option<&str>,
+    map_mime: Option<&str>,
+    pack: &serde_json::Value,
+) {
+    if detail.map_url.is_none() {
+        if let Some(name) = map_file_name.map(str::trim).filter(|s| !s.is_empty()) {
+            detail.map_url = Some(format!("/media/packs/{}/{}", slug, safe_pack_map_name(name)));
+            if detail.map_mime.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                detail.map_mime = map_mime
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+            }
+        }
+    }
+    if json_array_empty(&detail.map_points) {
+        let points = pack_map_points_public(pack);
+        if !json_array_empty(&points) {
+            detail.map_points = points;
+        }
+    }
+    if detail.meters_per_pixel.is_none() {
+        detail.meters_per_pixel = pack
+            .get("metersPerPixel")
+            .or_else(|| pack.get("meters_per_pixel"))
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite() && *v > 0.0);
+    }
+}
+
+async fn fill_live_map_from_pack(
+    pool: &PgPool,
+    slug: &str,
+    detail: &mut EventDetail,
+) -> Result<(), sqlx::Error> {
+    if detail.map_url.is_some() && !json_array_empty(&detail.map_points) && detail.meters_per_pixel.is_some()
+    {
+        return Ok(());
+    }
+    let row = sqlx::query_as::<_, EventPackMapRow>(
+        "SELECT map_file_name, map_mime, pack_json FROM event_packs WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    apply_pack_map(
+        detail,
+        slug,
+        row.map_file_name.as_deref(),
+        row.map_mime.as_deref(),
+        &row.pack_json,
+    );
+    Ok(())
+}
+
 async fn load_pack_live_placeholder(
     pool: &PgPool,
     slug: &str,
 ) -> Result<Option<EventDetail>, sqlx::Error> {
     let row = sqlx::query_as::<_, EventPackLiveRow>(
-        "SELECT title, sport_kind, pack_json, updated_at FROM event_packs WHERE slug = $1",
+        "SELECT title, sport_kind, pack_json, map_file_name, map_mime, updated_at FROM event_packs WHERE slug = $1",
     )
     .bind(slug)
     .fetch_optional(pool)
@@ -606,7 +728,7 @@ async fn load_pack_live_placeholder(
             }
         })
         .unwrap_or_else(|| "rogaine".into());
-    Ok(Some(EventDetail {
+    let mut detail = EventDetail {
         slug: slug.to_string(),
         title,
         competition_date: pack_competition_date(pack),
@@ -624,7 +746,15 @@ async fn load_pack_live_placeholder(
         revision: 0,
         award_groups: vec![],
         results: vec![],
-    }))
+    };
+    apply_pack_map(
+        &mut detail,
+        slug,
+        row.map_file_name.as_deref(),
+        row.map_mime.as_deref(),
+        pack,
+    );
+    Ok(Some(detail))
 }
 
 async fn load_event_detail(

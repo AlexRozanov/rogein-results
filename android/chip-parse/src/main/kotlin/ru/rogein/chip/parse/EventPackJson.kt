@@ -59,6 +59,7 @@ data class EventPackPersonFile(
     val format: String,
     val gender: String,
     val birthDate: String,
+    val teamId: Int,
     val team: String,
 )
 
@@ -137,6 +138,7 @@ fun parseEventPackJson(text: String): EventPackFile {
             format = format,
             gender = obj.optString("gender").trim(),
             birthDate = obj.optString("birthDate").trim().ifBlank { obj.optString("birth").trim() },
+            teamId = objInt(obj, "teamId", "team_id")?.takeIf { it > 0 } ?: 0,
             team = obj.optString("team").trim(),
         )
     }
