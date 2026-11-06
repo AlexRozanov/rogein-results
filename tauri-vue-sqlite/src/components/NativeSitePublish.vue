@@ -20,6 +20,8 @@ type SitePublishResult = {
   participant_count: number;
   result_count: number;
   has_map: boolean;
+  award_group_count?: number;
+  legend_count?: number;
 };
 
 const props = defineProps<{
@@ -160,18 +162,39 @@ async function uploadToSite() {
   );
 }
 
+function packOnSiteStatus(result: SitePublishResult, verb: string) {
+  const groups = result.award_group_count ?? 0;
+  const legends = result.legend_count ?? 0;
+  const map = result.has_map ? "карта есть" : "карты нет";
+  return `${verb} «${result.slug}»: участников ${result.participant_count}, форматов ${result.result_count}, групп ${groups}, КП ${legends}, ${map}.`;
+}
+
 async function uploadEventPack() {
   localBusy.value = true;
   try {
     const result = await invoke<SitePublishResult>("upload_event_pack_to_site", payload());
     emit(
       "status",
-      `Пакет старта «${result.slug}» на сайте: участников ${result.participant_count}, форматов ${result.result_count}${
-        result.has_map ? ", карта отправлена" : ""
-      }. Телефон может скачать его без USB-отладки.`,
+      `${packOnSiteStatus(result, "Пакет старта на сайте")} Телефон: Протокол → Загрузить → Пакет с сайта.`,
     );
   } catch (error) {
     emit("status", `Ошибка отправки пакета: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
+async function verifyEventPack() {
+  localBusy.value = true;
+  try {
+    const result = await invoke<SitePublishResult>("verify_event_pack_on_site", {
+      apiBaseUrl: apiBaseUrl.value.trim(),
+      publishToken: publishToken.value.trim(),
+      slug: slug.value.trim(),
+    });
+    emit("status", packOnSiteStatus(result, "На сайте лежит пакет"));
+  } catch (error) {
+    emit("status", String(error));
   } finally {
     localBusy.value = false;
   }
@@ -260,10 +283,19 @@ defineExpose({ refresh });
         >
           Отправить пакет на телефон (сайт)
         </button>
+        <button
+          v-if="!props.isOrient"
+          type="button"
+          :disabled="isBusy"
+          @click="verifyEventPack"
+        >
+          Проверить пакет на сайте
+        </button>
       </div>
       <p v-if="!props.isOrient" class="subtitle">
         Пакет — протокол, форматы, группы, легенды и карта для телефона.
         На сайте он не публикуется в календарь. Телефон скачивает его по slug и токену.
+        «Проверить пакет на сайте» читает уже загруженный пакет: участники, форматы, группы, КП и карта.
       </p>
     </template>
   </CollapsiblePanel>

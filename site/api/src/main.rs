@@ -26,7 +26,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use crate::models::{
     AwardGroupPublic, EventDetail, EventListItem, EventListPage, EventRow, ParticipantPublic,
@@ -285,10 +285,16 @@ async fn get_live_event(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
-    let event = load_event_detail(&state.pool, &slug, Some("live"))
+    let event = match load_event_detail(&state.pool, &slug, Some("live"))
         .await
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?;
+    {
+        Some(event) => event,
+        None => load_pack_live_placeholder(&state.pool, &slug)
+            .await
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?,
+    };
     Ok((
         [(
             header::CACHE_CONTROL,
@@ -529,6 +535,96 @@ async fn load_participant(
     .bind(status)
     .fetch_optional(pool)
     .await
+}
+
+#[derive(sqlx::FromRow)]
+struct EventPackLiveRow {
+    title: String,
+    sport_kind: String,
+    pack_json: serde_json::Value,
+    updated_at: DateTime<Utc>,
+}
+
+fn pack_json_text<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn pack_json_i32(value: &serde_json::Value, keys: &[&str]) -> Option<i32> {
+    keys.iter().find_map(|key| value.get(*key)).and_then(|v| {
+        v.as_i64()
+            .map(|n| n as i32)
+            .or_else(|| v.as_str()?.trim().parse().ok())
+    })
+}
+
+fn pack_competition_date(pack: &serde_json::Value) -> Option<NaiveDate> {
+    let settings = pack.get("settings")?;
+    let raw = pack_json_text(settings, &["competitionDate", "competition_date"])?;
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()
+}
+
+async fn load_pack_live_placeholder(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<EventDetail>, sqlx::Error> {
+    let row = sqlx::query_as::<_, EventPackLiveRow>(
+        "SELECT title, sport_kind, pack_json, updated_at FROM event_packs WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let pack = &row.pack_json;
+    let settings = pack.get("settings").unwrap_or(pack);
+    let title = pack_json_text(pack, &["title"])
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let title = row.title.trim();
+            if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            }
+        })
+        .unwrap_or_else(|| slug.to_string());
+    let sport_kind = pack_json_text(pack, &["sport"])
+        .map(str::to_ascii_lowercase)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let kind = row.sport_kind.trim();
+            if kind.is_empty() {
+                None
+            } else {
+                Some(kind.to_ascii_lowercase())
+            }
+        })
+        .unwrap_or_else(|| "rogaine".into());
+    Ok(Some(EventDetail {
+        slug: slug.to_string(),
+        title,
+        competition_date: pack_competition_date(pack),
+        sport_kind,
+        status: "pending".into(),
+        published_at: row.updated_at,
+        map_url: None,
+        map_mime: None,
+        map_width: None,
+        map_height: None,
+        meters_per_pixel: None,
+        map_points: serde_json::json!([]),
+        start_cp: pack_json_i32(settings, &["startCp", "start_cp"]),
+        finish_cp: pack_json_i32(settings, &["finishCp", "finish_cp"]),
+        revision: 0,
+        award_groups: vec![],
+        results: vec![],
+    }))
 }
 
 async fn load_event_detail(

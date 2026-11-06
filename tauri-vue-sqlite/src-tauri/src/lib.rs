@@ -286,6 +286,15 @@ fn upload_event_pack_to_site(
 }
 
 #[tauri::command]
+fn verify_event_pack_on_site(
+    api_base_url: String,
+    publish_token: String,
+    slug: String,
+) -> Result<SitePublishResult, String> {
+    site_publish::verify_event_pack_on_site(&api_base_url, &publish_token, &slug)
+}
+
+#[tauri::command]
 fn publish_current_start(
     state: State<'_, AppState>,
     api_base_url: String,
@@ -2004,6 +2013,7 @@ pub fn run() {
             publish_archive_orient_csv,
             publish_current_start,
             upload_event_pack_to_site,
+            verify_event_pack_on_site,
             recalculate_results,
             get_settings,
             set_settings,

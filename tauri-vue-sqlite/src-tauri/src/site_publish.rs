@@ -53,6 +53,10 @@ pub struct SitePublishResult {
     pub participant_count: usize,
     pub result_count: usize,
     pub has_map: bool,
+    #[serde(default)]
+    pub award_group_count: usize,
+    #[serde(default)]
+    pub legend_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +331,8 @@ pub fn publish_current_start(
         participant_count: result.participant_count,
         result_count: result.result_count,
         has_map,
+        award_group_count: 0,
+        legend_count: 0,
     })
 }
 
@@ -391,9 +397,94 @@ pub fn upload_event_pack_to_site(
     Ok(SitePublishResult {
         slug,
         participant_count: pack.people.len(),
-        result_count: pack.formats.len() as usize,
+        result_count: pack.formats.len(),
         has_map,
+        award_group_count: pack.award_groups.len(),
+        legend_count: pack.legends.len(),
     })
+}
+
+pub fn verify_event_pack_on_site(
+    api_base_url: &str,
+    publish_token: &str,
+    slug: &str,
+) -> Result<SitePublishResult, String> {
+    let slug = normalize_slug(slug)?;
+    let token = publish_token.trim();
+    if token.is_empty() {
+        return Err("Укажите токен публикации.".into());
+    }
+    let base = normalize_base_url(api_base_url)?;
+    let url = format!("{base}/api/packs/{slug}");
+    let response = match agent()
+        .get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err("На сайте нет пакета для этого slug. Отправьте пакет ещё раз.".into());
+        }
+        Err(e) => return Err(map_http_error("проверки пакета на сайте", e, 0)),
+    };
+    let status = response.status();
+    if status == 404 {
+        return Err("На сайте нет пакета для этого slug. Отправьте пакет ещё раз.".into());
+    }
+    if !(200..300).contains(&status) {
+        let body = response.into_string().unwrap_or_default();
+        let body = body.trim();
+        return Err(if body.is_empty() {
+            format!("Ошибка проверки пакета на сайте: сервер ответил {status}")
+        } else {
+            format!("Ошибка проверки пакета на сайте: сервер ответил {status}: {body}")
+        });
+    }
+    let body = response
+        .into_string()
+        .map_err(|e| format!("Не удалось прочитать пакет с сайта: {e}"))?;
+    let pack: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Пакет на сайте есть, но JSON не читается: {e}"))?;
+    Ok(SitePublishResult {
+        slug: slug.clone(),
+        participant_count: json_array_len(&pack, &["people"]),
+        result_count: json_array_len(&pack, &["formats"]),
+        has_map: pack_map_exists(&base, token, &slug)?,
+        award_group_count: json_array_len(&pack, &["awardGroups", "award_groups"]),
+        legend_count: json_array_len(&pack, &["legends"]),
+    })
+}
+
+fn json_array_len(value: &serde_json::Value, keys: &[&str]) -> usize {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|v| v.as_array())
+        .map(|items| items.len())
+        .unwrap_or(0)
+}
+
+fn pack_map_exists(base: &str, token: &str, slug: &str) -> Result<bool, String> {
+    let url = format!("{base}/api/packs/{slug}/map");
+    match agent()
+        .get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(response) => {
+            let status = response.status();
+            if (200..300).contains(&status) {
+                Ok(true)
+            } else if status == 404 {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "Не удалось проверить карту пакета: сервер ответил {status}"
+                ))
+            }
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(e) => Err(map_http_error("проверки карты пакета", e, 0)),
+    }
 }
 
 pub fn send_event_payload(
@@ -422,6 +513,8 @@ pub fn send_event_payload(
         participant_count: payload.participants.len(),
         result_count: payload.results.len(),
         has_map: false,
+        award_group_count: payload.award_groups.len(),
+        legend_count: 0,
     })
 }
 

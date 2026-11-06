@@ -72,6 +72,16 @@ let navResizeObserver: ResizeObserver | null = null;
 let liveSource: EventSource | null = null;
 let livePoll: number | null = null;
 
+const awaitingResults = computed(
+  () => isLive.value && !!event.value && event.value.results.length === 0,
+);
+const awaitingResultsText = computed(() => {
+  const title = event.value?.title.trim() || "старта";
+  const date = formatRuDate(event.value?.competition_date);
+  return date
+    ? `Результаты «${title}» появятся на этой странице ${date}.`
+    : `Результаты «${title}» появятся на этой странице.`;
+});
 const isOrient = computed(() => event.value?.sport_kind === "orient");
 const groupNavLabel = computed(() => (isOrient.value ? "Дистанции" : "Наградные группы"));
 const groupNavAllLabel = computed(() => (isOrient.value ? "Все дистанции" : "Все группы"));
@@ -351,6 +361,22 @@ async function afterRender() {
   activeGroupId.value = event.value?.award_groups[0]?.id ?? null;
 }
 
+function formatRuDate(raw: string | null | undefined) {
+  if (!raw) return "";
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw.trim());
+  if (!match) return raw.trim();
+  return `${match[3]}.${match[2]}.${match[1]}`;
+}
+
+function errorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const text = raw.replace(/^Error:\s*/i, "").trim();
+  if (/live event not found/i.test(text)) {
+    return "Такого online-старта нет.";
+  }
+  return text || "Не удалось загрузить результаты.";
+}
+
 function eventApiUrl() {
   const slug = String(route.params.slug ?? "");
   return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
@@ -394,7 +420,7 @@ async function load(silent = false) {
     error.value = "";
   } catch (e) {
     if (!silent || !event.value) {
-      error.value = String(e);
+      error.value = errorMessage(e);
       if (!silent) event.value = null;
     }
   } finally {
@@ -484,17 +510,18 @@ onBeforeUnmount(() => {
     </p>
     <h1>
       {{ event.title }}
-      <span v-if="isLive" class="live-badge">онлайн</span>
+      <span v-if="isLive && !awaitingResults" class="live-badge">онлайн</span>
     </h1>
     <p class="muted event-date">
       {{ event.competition_date || "дата не указана" }}
       · {{ sportKindLabel(event.sport_kind) }}
-      <template v-if="isLive && updatedLabel">
+      <template v-if="isLive && !awaitingResults && updatedLabel">
         · обновлено {{ updatedLabel }}{{ liveConnected ? "" : " · ожидание связи" }}
       </template>
     </p>
+    <p v-if="awaitingResults" class="muted awaiting-results">{{ awaitingResultsText }}</p>
 
-    <label v-if="isOrient" class="splits-toggle" :class="{ 'is-on': showSplits }">
+    <label v-if="isOrient && !awaitingResults" class="splits-toggle" :class="{ 'is-on': showSplits }">
       <input v-model="showSplits" type="checkbox" />
       <span class="splits-toggle-text">
         <strong>Сплиты</strong>
@@ -502,6 +529,7 @@ onBeforeUnmount(() => {
       </span>
     </label>
 
+    <template v-if="!awaitingResults">
     <nav
       v-if="event.award_groups.length"
       ref="navRef"
@@ -703,5 +731,6 @@ onBeforeUnmount(() => {
         </table>
       </div>
     </section>
+    </template>
   </template>
 </template>
