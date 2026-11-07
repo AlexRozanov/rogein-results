@@ -139,6 +139,74 @@ pub fn sort_results_keeping_teams(rows: &mut [ResultPublic]) {
             .then_with(|| a.elapsed_seconds.cmp(&b.elapsed_seconds))
             .then_with(|| bib_sort_key(&a.bib).cmp(&bib_sort_key(&b.bib)))
     });
+    compact_team_places(rows);
+}
+
+/// Команда — одна зачётная единица, поэтому после пары не должно быть дырки 1, 2, 4.
+fn compact_team_places(rows: &mut [ResultPublic]) {
+    use std::collections::{BTreeMap, HashMap};
+    let mut start = 0;
+    while start < rows.len() {
+        let group_id = rows[start].award_group_id;
+        let mut end = start + 1;
+        while end < rows.len() && rows[end].award_group_id == group_id {
+            end += 1;
+        }
+        let group = &mut rows[start..end];
+        let mut units: HashMap<String, (Vec<usize>, i32)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for (idx, row) in group.iter().enumerate() {
+            if !result_ok(&row.status) {
+                continue;
+            }
+            let key = match row.team_id.filter(|id| *id > 0) {
+                Some(team_id) => format!("t{team_id}"),
+                None => format!("p{}", row.participant_id),
+            };
+            let rank = row.place.unwrap_or(i32::MAX);
+            if let Some((indices, best)) = units.get_mut(&key) {
+                indices.push(idx);
+                if rank < *best {
+                    *best = rank;
+                }
+            } else {
+                units.insert(key.clone(), (vec![idx], rank));
+                order.push(key);
+            }
+        }
+        let mut by_rank: BTreeMap<i32, i32> = BTreeMap::new();
+        for key in &order {
+            if let Some((_, rank)) = units.get(key) {
+                *by_rank.entry(*rank).or_insert(0) += 1;
+            }
+        }
+        let mut place = 1;
+        let mut rank_to_place: HashMap<i32, i32> = HashMap::new();
+        for (rank, count) in by_rank {
+            rank_to_place.insert(rank, place);
+            place += count;
+        }
+        for row in group.iter_mut() {
+            if !result_ok(&row.status) {
+                row.place = None;
+            }
+        }
+        for key in &order {
+            let Some((indices, rank)) = units.get(key) else {
+                continue;
+            };
+            let next_place = rank_to_place.get(rank).copied();
+            for idx in indices {
+                group[*idx].place = next_place;
+            }
+        }
+        start = end;
+    }
+}
+
+fn result_ok(status: &str) -> bool {
+    let status = status.trim();
+    status.is_empty() || status.eq_ignore_ascii_case("OK")
 }
 
 fn team_rank_place(row: &ResultPublic, best: &std::collections::HashMap<(i64, i64), i32>) -> i32 {

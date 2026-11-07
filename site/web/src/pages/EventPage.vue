@@ -402,7 +402,8 @@ function bibNum(bib: string) {
 }
 
 function sortRogaineRows(rows: ResultRow[], orient: boolean) {
-  if (orient || rows.length < 2) return rows;
+  if (orient) return rows;
+  if (rows.length < 2) return compactTeamPlaces(rows);
   const teamBest = new Map<number, number>();
   for (const row of rows) {
     const teamId = teamIdOf(row);
@@ -411,7 +412,7 @@ function sortRogaineRows(rows: ResultRow[], orient: boolean) {
     const prev = teamBest.get(teamId);
     if (prev == null || place < prev) teamBest.set(teamId, place);
   }
-  return [...rows].sort((a, b) => {
+  const sorted = [...rows].sort((a, b) => {
     const ta = teamIdOf(a);
     const tb = teamIdOf(b);
     const pa = (ta ? teamBest.get(ta) : null) ?? a.place ?? Number.MAX_SAFE_INTEGER;
@@ -425,6 +426,43 @@ function sortRogaineRows(rows: ResultRow[], orient: boolean) {
     if (b.points_final !== a.points_final) return b.points_final - a.points_final;
     if (a.elapsed_seconds !== b.elapsed_seconds) return a.elapsed_seconds - b.elapsed_seconds;
     return bibNum(a.bib) - bibNum(b.bib);
+  });
+  return compactTeamPlaces(sorted);
+}
+
+function compactTeamPlaces(rows: ResultRow[]): ResultRow[] {
+  const units = new Map<string, { indices: number[]; rank: number }>();
+  const order: string[] = [];
+  rows.forEach((row, index) => {
+    if (!isOk(row.status)) return;
+    const key = teamIdOf(row) > 0 ? `t${teamIdOf(row)}` : `p${sourceKey(row.participant_source_id)}`;
+    const rank = row.place ?? Number.MAX_SAFE_INTEGER;
+    const unit = units.get(key);
+    if (!unit) {
+      units.set(key, { indices: [index], rank });
+      order.push(key);
+      return;
+    }
+    unit.indices.push(index);
+    if (rank < unit.rank) unit.rank = rank;
+  });
+  const counts = new Map<number, number>();
+  for (const key of order) {
+    const rank = units.get(key)?.rank ?? Number.MAX_SAFE_INTEGER;
+    counts.set(rank, (counts.get(rank) ?? 0) + 1);
+  }
+  const ranks = [...counts.keys()].sort((a, b) => a - b);
+  const rankToPlace = new Map<number, number>();
+  let place = 1;
+  for (const rank of ranks) {
+    rankToPlace.set(rank, place);
+    place += counts.get(rank) ?? 1;
+  }
+  return rows.map((row) => {
+    if (!isOk(row.status)) return { ...row, place: null };
+    const key = teamIdOf(row) > 0 ? `t${teamIdOf(row)}` : `p${sourceKey(row.participant_source_id)}`;
+    const unit = units.get(key);
+    return { ...row, place: unit ? rankToPlace.get(unit.rank) ?? row.place : row.place };
   });
 }
 
