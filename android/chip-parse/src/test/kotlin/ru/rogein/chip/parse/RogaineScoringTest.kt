@@ -178,4 +178,20 @@ class RogaineScoringTest {
         assertEquals(1, places[1])
         assertEquals(2, places[2])
     }
+
+    @Test
+    fun teamCountsAsSinglePlaceInProtocol() {
+        val first = OrientCalc(STATUS_OK, 2, 900, emptyList(), 12, 0, 12)
+        val teamBest = OrientCalc(STATUS_OK, 2, 1000, emptyList(), 10, 0, 10)
+        val teamOther = OrientCalc(STATUS_OK, 2, 1100, emptyList(), 8, 0, 8)
+        val third = OrientCalc(STATUS_OK, 1, 950, emptyList(), 9, 0, 9)
+        val places = assignRogaineTeamPlaces(
+            listOf(first, teamBest, teamOther, third),
+            listOf(0, 1, 1, 0),
+        )
+        assertEquals(1, places[0])
+        assertEquals(2, places[1])
+        assertEquals(2, places[2])
+        assertEquals(3, places[3])
+    }
 }

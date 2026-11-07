@@ -40,6 +40,18 @@ type ResultRow = {
 
 type TeamPos = "none" | "start" | "mid" | "end" | "only";
 
+const OVERALL_GROUP_ID = 0;
+const OVERALL_GROUP_NAME = "Общий протокол";
+
+type ResultBlock = {
+  group: AwardGroup;
+  rows: ResultRow[];
+  leaderElapsed: number | null;
+  splitCols: SplitCol[];
+  splitCells: Array<Array<SplitCell | null>>;
+  showFormat?: boolean;
+};
+
 type EventDetail = {
   slug: string;
   title: string;
@@ -90,11 +102,11 @@ const groupNavAllLabel = computed(() => (isOrient.value ? "Все дистанц
 const emptyGroupText = computed(() =>
   isOrient.value ? "На этой дистанции пока нет результатов" : "В этой группе пока нет результатов",
 );
-const groupedResults = computed(() => {
+const groupedResults = computed((): ResultBlock[] => {
   if (!event.value) return [];
   const startCp = event.value.start_cp ?? 241;
   const finishCp = event.value.finish_cp ?? 240;
-  return event.value.award_groups.map((group) => {
+  const blocks = event.value.award_groups.map((group) => {
     const rows = sortRogaineRows(
       event.value!.results.filter((row) => row.award_group_id === group.id),
       isOrient.value,
@@ -108,8 +120,33 @@ const groupedResults = computed(() => {
     const splitCells: Array<Array<SplitCell | null>> = cols.length
       ? buildSplitCells(rows, cols, startCp)
       : rows.map(() => []);
-    return { group, rows, leaderElapsed, splitCols: cols, splitCells };
+    return { group, rows, leaderElapsed, splitCols: cols, splitCells, showFormat: false };
   });
+  if (!isOrient.value) {
+    const rows = rankOverallRows(uniqueOverallRows(event.value.results));
+    blocks.push({
+      group: {
+        id: OVERALL_GROUP_ID,
+        source_id: OVERALL_GROUP_ID,
+        name: OVERALL_GROUP_NAME,
+      },
+      rows,
+      leaderElapsed: null,
+      splitCols: [],
+      splitCells: rows.map(() => []),
+      showFormat: true,
+    });
+  }
+  return blocks;
+});
+
+const navGroups = computed(() => {
+  const groups = event.value?.award_groups ?? [];
+  if (isOrient.value || !event.value) return groups;
+  return [
+    ...groups,
+    { id: OVERALL_GROUP_ID, source_id: OVERALL_GROUP_ID, name: OVERALL_GROUP_NAME },
+  ];
 });
 
 const displayedResults = computed(() => {
@@ -355,15 +392,15 @@ async function afterRender() {
   observeNav();
   setupObserver();
   const hash = window.location.hash.replace(/^#/, "");
-  const match = /^group-(\d+)$/.exec(hash);
+  const match = /^group-(-?\d+)$/.exec(hash);
   if (match) {
     const id = Number(match[1]);
-    if (event.value?.award_groups.some((group) => group.id === id)) {
+    if (navGroups.value.some((group) => group.id === id)) {
       scrollToGroup(id);
       return;
     }
   }
-  activeGroupId.value = event.value?.award_groups[0]?.id ?? null;
+  activeGroupId.value = navGroups.value[0]?.id ?? null;
 }
 
 function formatRuDate(raw: string | null | undefined) {
@@ -428,6 +465,86 @@ function sortRogaineRows(rows: ResultRow[], orient: boolean) {
     return bibNum(a.bib) - bibNum(b.bib);
   });
   return compactTeamPlaces(sorted);
+}
+
+function uniqueOverallRows(rows: ResultRow[]): ResultRow[] {
+  const seen = new Set<string>();
+  const out: ResultRow[] = [];
+  for (const row of rows) {
+    const key = sourceKey(row.participant_source_id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
+function rankOverallRows(rows: ResultRow[]): ResultRow[] {
+  const teamBest = new Map<number, { points: number; time: number }>();
+  for (const row of rows) {
+    const teamId = teamIdOf(row);
+    if (!teamId || !isOk(row.status)) continue;
+    const prev = teamBest.get(teamId);
+    if (
+      !prev ||
+      row.points_final > prev.points ||
+      (row.points_final === prev.points && row.elapsed_seconds < prev.time)
+    ) {
+      teamBest.set(teamId, { points: row.points_final, time: row.elapsed_seconds });
+    }
+  }
+  const sorted = [...rows].sort((a, b) => {
+    const okA = isOk(a.status) ? 0 : 1;
+    const okB = isOk(b.status) ? 0 : 1;
+    if (okA !== okB) return okA - okB;
+    const ta = teamIdOf(a);
+    const tb = teamIdOf(b);
+    const sa = ta && teamBest.has(ta) ? teamBest.get(ta)! : { points: a.points_final, time: a.elapsed_seconds };
+    const sb = tb && teamBest.has(tb) ? teamBest.get(tb)! : { points: b.points_final, time: b.elapsed_seconds };
+    if (sa.points !== sb.points) return sb.points - sa.points;
+    if (sa.time !== sb.time) return sa.time - sb.time;
+    if ((ta ? 0 : 1) !== (tb ? 0 : 1)) return (ta ? 0 : 1) - (tb ? 0 : 1);
+    if (ta !== tb) return ta - tb;
+    if (a.points_final !== b.points_final) return b.points_final - a.points_final;
+    if (a.elapsed_seconds !== b.elapsed_seconds) return a.elapsed_seconds - b.elapsed_seconds;
+    return bibNum(a.bib) - bibNum(b.bib);
+  });
+  const units = new Map<string, { points: number; time: number }>();
+  const order: string[] = [];
+  for (const row of sorted) {
+    if (!isOk(row.status)) continue;
+    const key = teamIdOf(row) > 0 ? `t${teamIdOf(row)}` : `p${sourceKey(row.participant_source_id)}`;
+    const unit = units.get(key);
+    if (!unit) {
+      units.set(key, { points: row.points_final, time: row.elapsed_seconds });
+      order.push(key);
+    } else if (
+      row.points_final > unit.points ||
+      (row.points_final === unit.points && row.elapsed_seconds < unit.time)
+    ) {
+      unit.points = row.points_final;
+      unit.time = row.elapsed_seconds;
+    }
+  }
+  let place = 1;
+  let seen = 0;
+  let prev: { points: number; time: number } | null = null;
+  const placeOf = new Map<string, number>();
+  for (const key of order) {
+    const unit = units.get(key);
+    if (!unit) continue;
+    seen += 1;
+    if (!prev || prev.points !== unit.points || prev.time !== unit.time) {
+      place = seen;
+      prev = unit;
+    }
+    placeOf.set(key, place);
+  }
+  return sorted.map((row) => {
+    if (!isOk(row.status)) return { ...row, place: null };
+    const key = teamIdOf(row) > 0 ? `t${teamIdOf(row)}` : `p${sourceKey(row.participant_source_id)}`;
+    return { ...row, place: placeOf.get(key) ?? null };
+  });
 }
 
 function compactTeamPlaces(rows: ResultRow[]): ResultRow[] {
@@ -633,7 +750,7 @@ onBeforeUnmount(() => {
 
     <template v-if="!awaitingResults">
     <nav
-      v-if="event.award_groups.length"
+      v-if="navGroups.length"
       ref="navRef"
       class="group-nav"
       :class="{ 'is-open': navOpen }"
@@ -661,7 +778,7 @@ onBeforeUnmount(() => {
       </button>
       <div v-show="navOpen" id="group-nav-panel" class="group-nav-panel">
         <a
-          v-for="group in event.award_groups"
+          v-for="group in navGroups"
           :id="`nav-${group.id}`"
           :key="group.id"
           class="group-nav-item"
@@ -766,6 +883,7 @@ onBeforeUnmount(() => {
               <th v-if="!isOrient" class="team-brace-col" title="Команда"></th>
               <th v-if="!isOrient">Номер</th>
               <th class="col-name">Имя</th>
+              <th v-if="block.showFormat">Формат</th>
               <th v-if="!isOrient" class="col-aux">Очки</th>
               <th v-if="!isOrient" class="col-aux">Штраф</th>
               <th v-if="!isOrient">Итог</th>
@@ -783,7 +901,7 @@ onBeforeUnmount(() => {
           </thead>
           <tbody>
             <tr v-if="!block.viewRows.length">
-              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 9">
+              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : block.showFormat ? 10 : 9">
                 {{ emptyGroupText }}
               </td>
             </tr>
@@ -805,22 +923,20 @@ onBeforeUnmount(() => {
               <td v-if="!isOrient">
                 <router-link
                   class="bib"
-                  :to="personHref(event.slug, row.participant_source_id, block.group.id)"
+                  :to="personHref(event.slug, row.participant_source_id, row.award_group_id || block.group.id)"
                 >
                   {{ row.bib }}
                 </router-link>
               </td>
               <td class="col-name">
-                <span class="result-name">
-                  <router-link
-                    class="bib"
-                    :to="personHref(event.slug, row.participant_source_id, block.group.id)"
-                  >
-                    {{ row.name }}
-                  </router-link>
-                  <span v-if="!isOrient && teamIdOf(row)" class="team-badge">Т{{ teamIdOf(row) }}</span>
-                </span>
+                <router-link
+                  class="bib"
+                  :to="personHref(event.slug, row.participant_source_id, row.award_group_id || block.group.id)"
+                >
+                  {{ row.name }}
+                </router-link>
               </td>
+              <td v-if="block.showFormat">{{ row.format_name || "—" }}</td>
               <td v-if="!isOrient" class="col-aux">{{ row.points_raw }}</td>
               <td v-if="!isOrient" class="col-aux">{{ row.penalty_points }}</td>
               <td v-if="!isOrient">{{ row.points_final }}</td>
@@ -859,13 +975,13 @@ onBeforeUnmount(() => {
             <div class="rogaine-card-main">
               <router-link
                 class="bib"
-                :to="personHref(event.slug, row.participant_source_id, block.group.id)"
+                :to="personHref(event.slug, row.participant_source_id, row.award_group_id || block.group.id)"
               >
                 <span class="rogaine-card-bib">{{ row.bib }}</span>
                 {{ row.name }}
-                <span v-if="teamIdOf(row)" class="team-badge">Т{{ teamIdOf(row) }}</span>
               </router-link>
               <p class="rogaine-card-meta">
+                <template v-if="block.showFormat">{{ row.format_name || "—" }} · </template>
                 {{ fmtHms(row.elapsed_seconds) }}
                 <span v-if="row.status && row.status !== 'OK'"> · {{ row.status }}</span>
               </p>

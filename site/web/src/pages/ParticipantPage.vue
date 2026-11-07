@@ -592,7 +592,6 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
         <template v-else>
           <span>№ {{ person.bib }}</span>
           <span>{{ awardGroupName }}</span>
-          <span v-if="teamId">Команда Т{{ teamId }}</span>
         </template>
       </p>
       <p v-if="!isOrient && teammates.length" class="person-sub">

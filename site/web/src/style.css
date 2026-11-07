@@ -504,25 +504,6 @@ th { color: #64748b; font-weight: 600; }
   border-bottom: 2px solid #94a3b8;
 }
 
-.result-name {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 8px;
-}
-
-.team-badge {
-  display: inline-block;
-  padding: 0 6px;
-  border: 1px solid #94a3b8;
-  border-radius: 4px;
-  font-size: 0.78em;
-  font-weight: 700;
-  line-height: 1.45;
-  color: #475569;
-  background: #f8fafc;
-}
-
 .results-table tr.row-team-block-start td {
   border-top: 2px solid #cbd5e1;
 }
@@ -807,11 +788,6 @@ th { color: #64748b; font-weight: 600; }
 
 .rogaine-card.is-team-cont {
   padding-top: 6px;
-}
-
-.rogaine-card .team-badge {
-  margin-left: 6px;
-  vertical-align: middle;
 }
 
 .group-nav {
