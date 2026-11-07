@@ -137,6 +137,8 @@ import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.addableCourseCps
 import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.classifyActualPunches
+import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.canChangeFinishNumber
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.courseProgress
 import ru.rogein.chip.parse.filterCourseCps
@@ -2357,6 +2359,8 @@ fun ResultsScreen(
     canPrint: Boolean = false,
     onPrint: (ScoredResult) -> Unit = {},
     onPickFinishCsv: () -> Unit = {},
+    onDeleteFinish: (String) -> Unit = {},
+    onReassignFinish: (String, Int) -> Unit = { _, _ -> },
     sportKind: String = SPORT_ORIENT,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
@@ -2367,6 +2371,9 @@ fun ResultsScreen(
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
     var expandedId by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<ScoredResult?>(null) }
+    var reassignRow by remember { mutableStateOf<ScoredResult?>(null) }
+    var reassignText by remember { mutableStateOf("") }
     val q = query.trim().lowercase().replace('ё', 'е')
     val filtered = remember(results, q) {
         if (q.isEmpty()) results
@@ -2489,6 +2496,17 @@ fun ResultsScreen(
                             onRemoveCp = onRemoveCp,
                             onAssignCourse = onAssignCourse,
                             onDeleteCorrection = onDeleteCorrection,
+                            onDeleteFinish = { confirmDelete = live },
+                            canChangeNumber = canChangeFinishNumber(
+                                live.logicalId,
+                                live.uid,
+                                results.count { it.logicalId != null && it.logicalId == live.logicalId },
+                                people.find { it.id == live.logicalId }?.issuedUid,
+                            ),
+                            onChangeNumber = {
+                                reassignRow = live
+                                reassignText = ""
+                            },
                             canPrint = canPrint,
                             onPrint = onPrint,
                             rogaine = rogaine,
@@ -2500,6 +2518,80 @@ fun ResultsScreen(
                 }
             }
         }
+    }
+    confirmDelete?.let { row ->
+        val who = buildString {
+            val num = row.logicalId?.let { "№ $it" }
+            val name = row.name.trim()
+            when {
+                name.isNotEmpty() && num != null -> append("$num $name")
+                name.isNotEmpty() -> append(name)
+                num != null -> append(num)
+                else -> append("участник без номера")
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить из финиша?") },
+            text = {
+                Text(
+                    buildString {
+                        append("$who будет убран из финишного протокола.")
+                        if (liveUrl != null || livePending) {
+                            append(" Запись также пропадёт из online на сайте.")
+                        }
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val id = row.queueId
+                        confirmDelete = null
+                        expandedId = null
+                        onDeleteFinish(id)
+                    },
+                ) { Text("Удалить", color = Danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = null }) { Text("Отмена") }
+            },
+        )
+    }
+    reassignRow?.let { row ->
+        AlertDialog(
+            onDismissRequest = { reassignRow = null },
+            title = { Text("Сменить номер") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Сейчас № ${row.logicalId ?: "—"}. Новый номер должен быть свободным в финише и из диапазона 1…$MAX_LOGICAL_ID.",
+                    )
+                    OutlinedTextField(
+                        value = reassignText,
+                        onValueChange = { reassignText = it.filter { ch -> ch.isDigit() }.take(5) },
+                        singleLine = true,
+                        label = { Text("Новый номер") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val next = reassignText.toIntOrNull()
+                        val id = row.queueId
+                        reassignRow = null
+                        if (next != null) onReassignFinish(id, next)
+                    },
+                    enabled = reassignText.toIntOrNull() != null,
+                ) { Text("Сменить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { reassignRow = null }) { Text("Отмена") }
+            },
+        )
     }
 }
 
@@ -2561,6 +2653,9 @@ private fun ResultProtocolRow(
     onPrint: (ScoredResult) -> Unit = {},
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    onDeleteFinish: () -> Unit = {},
+    canChangeNumber: Boolean = false,
+    onChangeNumber: () -> Unit = {},
     rogaine: Boolean = false,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
@@ -2642,7 +2737,15 @@ private fun ResultProtocolRow(
                     .padding(start = 6.dp),
                 textAlign = TextAlign.End,
             )
-            if (row.chipHint != null) {
+            if (row.numberConflict) {
+                Text(
+                    "2×",
+                    color = Warn,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            } else if (row.chipHint != null) {
                 Text(
                     "!",
                     color = Warn,
@@ -2665,6 +2768,9 @@ private fun ResultProtocolRow(
                 onRemoveCp = onRemoveCp,
                 onAssignCourse = onAssignCourse,
                 onDeleteCorrection = onDeleteCorrection,
+                onDeleteFinish = onDeleteFinish,
+                canChangeNumber = canChangeNumber,
+                onChangeNumber = onChangeNumber,
                 canPrint = canPrint,
                 onPrint = onPrint,
                 rogaine = rogaine,
@@ -2689,6 +2795,9 @@ private fun ResultRowDetails(
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
+    onDeleteFinish: () -> Unit = {},
+    canChangeNumber: Boolean = false,
+    onChangeNumber: () -> Unit = {},
     canPrint: Boolean,
     onPrint: (ScoredResult) -> Unit,
     rogaine: Boolean = false,
@@ -2729,13 +2838,32 @@ private fun ResultRowDetails(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (row.numberConflict) {
+            Text(
+                "Один логический номер на разных чипах. Смените номер у одной из записей, иначе правки КП затронут обоих.",
+                color = Warn,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton(onClick = { marksOpen = true }) { Text("Отметки") }
             if (id != null && courses.isNotEmpty()) {
-                TextButton(onClick = { courseChangeOpen = true }) { Text(if (rogaine) "Сменить формат" else "Сменить дистанцию") }
+                TextButton(onClick = { courseChangeOpen = true }) {
+                    Text(if (rogaine) "Сменить формат" else "Сменить дистанцию")
+                }
             }
         }
-        if (id != null) {
+        if (canChangeNumber) {
+            CompactTextButton("Сменить номер", onChangeNumber, Warn)
+        }
+        CompactTextButton("Удалить из финиша", onDeleteFinish, Danger)
+        if (id == null) {
+            Text("Нет номера в протоколе — персональные корректировки недоступны.", color = Muted)
+        } else if (!row.numberConflict) {
             if (rogaine) {
                 val formatCps = rogaineFormatCps(row.course, courses, legendCps, startCp, finishCp)
                 val added = EventStore.rogaineAddedCps(id, corrections)
@@ -2780,8 +2908,6 @@ private fun ResultRowDetails(
                     }
                 }
             }
-        } else {
-            Text("Нет номера в протоколе — персональные корректировки недоступны.", color = Muted)
         }
     }
     if (marksOpen) {

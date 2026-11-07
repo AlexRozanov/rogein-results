@@ -167,4 +167,15 @@ class RogaineScoringTest {
         assertEquals(1, places[1])
         assertEquals(3, places[2])
     }
+
+    @Test
+    fun teamSharesPlaceFromBestMember() {
+        val stronger = OrientCalc(STATUS_OK, 2, 1000, emptyList(), 10, 0, 10)
+        val weaker = OrientCalc(STATUS_OK, 2, 1200, emptyList(), 8, 0, 8)
+        val solo = OrientCalc(STATUS_OK, 1, 900, emptyList(), 9, 0, 9)
+        val places = assignRogaineTeamPlaces(listOf(stronger, weaker, solo), listOf(1, 1, 0))
+        assertEquals(1, places[0])
+        assertEquals(1, places[1])
+        assertEquals(2, places[2])
+    }
 }

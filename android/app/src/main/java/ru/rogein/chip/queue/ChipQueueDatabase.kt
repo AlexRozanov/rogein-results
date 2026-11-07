@@ -43,6 +43,7 @@ data class StartPersonEntity(
     val gender: String = "",
     val birthDate: String = "",
     val teamId: Int = 0,
+    val issuedUid: String = "",
 )
 
 @Entity(tableName = "start_courses")
@@ -85,6 +86,18 @@ interface ChipQueueDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(item: QueuedChipEntity)
+
+    @Query("SELECT * FROM chip_queue WHERE id = :id LIMIT 1")
+    suspend fun byId(id: String): QueuedChipEntity?
+
+    @Query(
+        """
+        UPDATE chip_queue
+        SET logicalId = :logicalId, personName = :personName, courseName = :courseName
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateFinishIdentity(id: String, logicalId: Int?, personName: String, courseName: String)
 
     @Query(
         """
@@ -199,7 +212,7 @@ interface StartArchiveDao {
         CorrectionEntity::class,
         ExclusionEntity::class,
     ],
-    version = 8,
+    version = 9,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
@@ -297,6 +310,12 @@ abstract class ChipQueueDatabase : RoomDatabase() {
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE start_people ADD COLUMN teamId INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE start_people ADD COLUMN issuedUid TEXT NOT NULL DEFAULT ''")
             }
         }
 

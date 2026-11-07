@@ -294,7 +294,8 @@ private fun EventSnapshot.toJson(): String {
                 .put("issuedCourse", person.issuedCourse)
                 .put("gender", person.gender)
                 .put("birthDate", person.birthDate)
-                .put("teamId", person.teamId),
+                .put("teamId", person.teamId)
+                .put("issuedUid", person.issuedUid),
         )
     }
     root.put("people", peopleJson)
@@ -386,6 +387,7 @@ private fun decodePayload(json: String): EventSnapshot {
             gender = obj.optString("gender"),
             birthDate = obj.optString("birthDate"),
             teamId = obj.optInt("teamId"),
+            issuedUid = obj.optString("issuedUid"),
         )
     }
     val courses = jsonObjects(root.optJSONArray("courses")).map { obj ->

@@ -115,6 +115,54 @@ pub struct EventDetail {
     pub results: Vec<ResultPublic>,
 }
 
+pub fn sort_results_keeping_teams(rows: &mut [ResultPublic]) {
+    use std::collections::HashMap;
+    let mut team_best: HashMap<(i64, i64), i32> = HashMap::new();
+    for row in rows.iter() {
+        let Some(team_id) = row.team_id.filter(|id| *id > 0) else {
+            continue;
+        };
+        let place = row.place.unwrap_or(i32::MAX);
+        let key = (row.award_group_id, team_id);
+        let entry = team_best.entry(key).or_insert(place);
+        if place < *entry {
+            *entry = place;
+        }
+    }
+    rows.sort_by(|a, b| {
+        a.award_group_id
+            .cmp(&b.award_group_id)
+            .then_with(|| team_rank_place(a, &team_best).cmp(&team_rank_place(b, &team_best)))
+            .then_with(|| team_id_sort(a.team_id).cmp(&team_id_sort(b.team_id)))
+            .then_with(|| a.place.unwrap_or(i32::MAX).cmp(&b.place.unwrap_or(i32::MAX)))
+            .then_with(|| b.points_final.cmp(&a.points_final))
+            .then_with(|| a.elapsed_seconds.cmp(&b.elapsed_seconds))
+            .then_with(|| bib_sort_key(&a.bib).cmp(&bib_sort_key(&b.bib)))
+    });
+}
+
+fn team_rank_place(row: &ResultPublic, best: &std::collections::HashMap<(i64, i64), i32>) -> i32 {
+    row.team_id
+        .filter(|id| *id > 0)
+        .and_then(|team_id| best.get(&(row.award_group_id, team_id)).copied())
+        .unwrap_or_else(|| row.place.unwrap_or(i32::MAX))
+}
+
+fn team_id_sort(team_id: Option<i64>) -> (u8, i64) {
+    match team_id.filter(|id| *id > 0) {
+        Some(id) => (0, id),
+        None => (1, 0),
+    }
+}
+
+fn bib_sort_key(bib: &str) -> (i64, String) {
+    let trimmed = bib.trim();
+    (
+        trimmed.parse::<i64>().unwrap_or(i64::MAX),
+        trimmed.to_ascii_lowercase(),
+    )
+}
+
 #[derive(Debug, FromRow)]
 pub struct EventRow {
     pub id: i64,

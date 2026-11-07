@@ -21,6 +21,7 @@ type Participant = {
   source_id: SourceId;
   bib: string;
   name: string;
+  team_id?: number | null;
   marks: Mark[];
   path: unknown;
   distance_m?: number | null;
@@ -37,6 +38,9 @@ type AwardGroup = {
 type ResultRow = {
   award_group_id: number;
   participant_source_id: SourceId;
+  bib?: string;
+  name?: string;
+  team_id?: number | null;
   place?: number | null;
   points_final: number;
   elapsed_seconds: number;
@@ -105,6 +109,31 @@ const awardGroupName = computed(() => {
 });
 
 const isOrient = computed(() => event.value?.sport_kind === "orient");
+const teamId = computed(() => {
+  const id = Number(person.value?.team_id);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+});
+const teammates = computed(() => {
+  if (!person.value || !event.value || !teamId.value) return [];
+  const self = String(person.value.source_id);
+  const seen = new Set<string>([self]);
+  const rows: ResultRow[] = [];
+  for (const row of event.value.results) {
+    const tid = Number(row.team_id);
+    if (!(Number.isFinite(tid) && tid === teamId.value)) continue;
+    const key = String(row.participant_source_id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(row);
+  }
+  return rows;
+});
+
+function personHref(sourceId: SourceId, groupId: number) {
+  const prefix = isLive.value ? "/live" : "/events";
+  const slug = event.value?.slug ?? "";
+  return `${prefix}/${slug}/p/${sourceId}?g=${groupId}`;
+}
 const mapImageSize = ref<{ width: number; height: number } | null>(null);
 watch(
   () => event.value?.map_url,
@@ -563,7 +592,19 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
         <template v-else>
           <span>№ {{ person.bib }}</span>
           <span>{{ awardGroupName }}</span>
+          <span v-if="teamId">Команда Т{{ teamId }}</span>
         </template>
+      </p>
+      <p v-if="!isOrient && teammates.length" class="person-sub">
+        <span>Напарники:</span>
+        <router-link
+          v-for="mate in teammates"
+          :key="mate.participant_source_id"
+          class="bib"
+          :to="personHref(mate.participant_source_id, mate.award_group_id)"
+        >
+          № {{ mate.bib || "—" }} {{ mate.name || "" }}
+        </router-link>
       </p>
     </header>
 

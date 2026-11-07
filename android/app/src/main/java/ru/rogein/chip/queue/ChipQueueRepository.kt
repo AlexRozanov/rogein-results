@@ -5,6 +5,13 @@ import androidx.room.Room
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.CsvImport
 import ru.rogein.chip.parse.EventPackFile
+import ru.rogein.chip.parse.FinishEnqueueKind
+import ru.rogein.chip.parse.FinishQueueRef
+import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.canChangeFinishNumber
+import ru.rogein.chip.parse.classifyFinishEnqueue
+import ru.rogein.chip.parse.normalizeChipUid
+import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.toChipDump
 import ru.rogein.chip.printer.PrinterStore
 import ru.rogein.chip.startlist.StartListStore
@@ -12,7 +19,11 @@ import ru.rogein.chip.startlist.eventPackLoadedMessage
 import java.util.UUID
 
 sealed class EnqueueResult {
-    data class Saved(val snapshotError: String?) : EnqueueResult()
+    data class Saved(
+        val snapshotError: String?,
+        val numberConflict: Boolean = false,
+        val otherUid: String = "",
+    ) : EnqueueResult()
     data class Duplicate(val logicalId: Int?, val courseName: String) : EnqueueResult()
 }
 
@@ -56,7 +67,7 @@ class ChipQueueRepository(
 
     suspend fun ensureCurrentStart() = archive.ensureCurrent()
 
-    /** Saved — чип в очереди. Duplicate — этот номер уже считан на этой дистанции. */
+    /** Saved — чип в очереди. Duplicate — этот же физический чип уже считан на этой дистанции. */
     suspend fun enqueue(
         dump: ChipDump,
         rawHex: String = "",
@@ -66,16 +77,17 @@ class ChipQueueRepository(
         publish: Boolean = true,
     ): EnqueueResult {
         val course = courseName.trim()
-        val chipId = dump.logicalId
-        if (chipId != null && dao.existsByChipAndCourse(chipId, course)) {
-            if (!replace) {
-                return EnqueueResult.Duplicate(chipId, course)
-            }
-            dao.deleteByChipAndCourse(chipId, course)
+        val items = dao.listAll()
+        val refs = items.map { it.toFinishRef() }
+        val kind = classifyFinishEnqueue(dump.uid, dump.logicalId, course, refs)
+        if (kind == FinishEnqueueKind.SameChip && !replace) {
+            return EnqueueResult.Duplicate(dump.logicalId, course)
         }
+        val keep = if (kind == FinishEnqueueKind.SameChip) matchExistingFinish(dump, course, items) else null
+        val id = keep?.id ?: UUID.randomUUID().toString()
         dao.insert(
             QueuedChipEntity(
-                id = UUID.randomUUID().toString(),
+                id = id,
                 uid = dump.uid,
                 logicalId = dump.logicalId,
                 clearedAt = dump.clearedAt,
@@ -86,17 +98,58 @@ class ChipQueueRepository(
                     """{"cp":${punch.cp},"time":"${punch.time}"}"""
                 },
                 rawHex = rawHex,
-                createdAt = System.currentTimeMillis(),
+                createdAt = keep?.createdAt ?: System.currentTimeMillis(),
                 ackedAt = null,
                 personName = personName,
                 courseName = course,
             ),
         )
-        return EnqueueResult.Saved(if (publish) publishSnapshot() else null)
+        val nextRefs = refs.filter { it.id != id } + FinishQueueRef(id, dump.uid, dump.logicalId, course)
+        val numberConflict = id in numberConflictIds(nextRefs)
+        val otherUid = nextRefs.find { row ->
+            row.id != id && row.logicalId != null && row.logicalId == dump.logicalId
+        }?.uid.orEmpty()
+        return EnqueueResult.Saved(
+            snapshotError = if (publish) publishSnapshot() else null,
+            numberConflict = numberConflict,
+            otherUid = otherUid,
+        )
+    }
+
+    suspend fun reassignFinishNumber(queueId: String, newLogicalId: Int): String? {
+        if (newLogicalId !in 1..MAX_LOGICAL_ID) {
+            error("Номер вне 1…$MAX_LOGICAL_ID")
+        }
+        val item = dao.byId(queueId) ?: error("Запись финиша не найдена")
+        val current = item.logicalId
+        if (current == newLogicalId) error("Укажите другой номер")
+        val items = dao.listAll()
+        val people = startList.peopleNow()
+        val sameCount = items.count { it.logicalId != null && it.logicalId == current }
+        val issuedUid = people.find { it.id == current }?.issuedUid
+        if (!canChangeFinishNumber(current, item.uid, sameCount, issuedUid)) {
+            error("Сменить номер можно, если он есть у двух чипов или UID не совпал с выдачей")
+        }
+        val clash = items.find { row ->
+            row.id != queueId &&
+                row.logicalId == newLogicalId &&
+                normalizeChipUid(row.uid) != normalizeChipUid(item.uid)
+        }
+        if (clash != null) {
+            error("№ $newLogicalId уже есть в финише с другого чипа")
+        }
+        val person = startList.person(newLogicalId)
+        val name = person?.name?.takeIf { it.isNotBlank() } ?: item.personName
+        val course = item.courseName.ifBlank { person?.currentCourse.orEmpty() }
+        dao.updateFinishIdentity(queueId, newLogicalId, name, course)
+        startList.rebindIssuedUid(current, newLogicalId, item.uid)
+        event.markLivePending()
+        return publishSnapshot()
     }
 
     suspend fun previewFinishCsv(text: String): FinishCsvImportPreview {
         val rows = CsvImport.finishDump(text)
+        val existing = dao.listAll().map { it.toFinishRef() }
         val fresh = ArrayList<PendingFinishImport>()
         val conflicts = ArrayList<PendingFinishImport>()
         for (row in rows) {
@@ -107,10 +160,9 @@ class ChipQueueRepository(
                 personName = row.name,
                 courseName = row.course.trim(),
             )
-            if (dao.existsByChipAndCourse(id, pending.courseName)) {
-                conflicts += pending
-            } else {
-                fresh += pending
+            when (classifyFinishEnqueue(dump.uid, id, pending.courseName, existing)) {
+                FinishEnqueueKind.SameChip -> conflicts += pending
+                FinishEnqueueKind.OtherChipSameNumber, FinishEnqueueKind.Fresh -> fresh += pending
             }
         }
         if (fresh.isEmpty() && conflicts.isEmpty()) {
@@ -232,6 +284,20 @@ class ChipQueueRepository(
         }
     }
 
+    private fun matchExistingFinish(
+        dump: ChipDump,
+        course: String,
+        items: List<QueuedChipEntity>,
+    ): QueuedChipEntity? {
+        val nuid = normalizeChipUid(dump.uid)
+        if (nuid.isNotEmpty()) {
+            items.find { normalizeChipUid(it.uid) == nuid && it.courseName.equals(course, ignoreCase = true) }
+                ?.let { return it }
+        }
+        val logicalId = dump.logicalId ?: return null
+        return items.find { it.logicalId == logicalId && it.courseName.equals(course, ignoreCase = true) }
+    }
+
     companion object {
         const val PROTOCOL_FILE_NAME = "start-protocol.json"
 
@@ -250,6 +316,7 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_5_6,
                     ChipQueueDatabase.MIGRATION_6_7,
                     ChipQueueDatabase.MIGRATION_7_8,
+                    ChipQueueDatabase.MIGRATION_8_9,
                 )
                 .build()
             return ChipQueueRepository(
@@ -264,3 +331,10 @@ class ChipQueueRepository(
         }
     }
 }
+
+private fun QueuedChipEntity.toFinishRef() = FinishQueueRef(
+    id = id,
+    uid = uid,
+    logicalId = logicalId,
+    courseName = courseName,
+)

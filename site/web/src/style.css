@@ -454,6 +454,79 @@ th { color: #64748b; font-weight: 600; }
   min-width: 10rem;
 }
 
+.results-table .team-brace-col {
+  width: 14px;
+  padding-left: 0;
+  padding-right: 0;
+  vertical-align: stretch;
+}
+
+.team-brace {
+  display: block;
+  position: relative;
+  width: 12px;
+  height: 100%;
+  min-height: 2.2em;
+  margin: 0 auto;
+}
+
+.team-brace-rail {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px solid #94a3b8;
+}
+
+.team-brace-start .team-brace-rail {
+  top: 50%;
+  border-top: 2px solid #94a3b8;
+  width: 8px;
+}
+
+.team-brace-end .team-brace-rail {
+  bottom: 50%;
+  border-bottom: 2px solid #94a3b8;
+  width: 8px;
+}
+
+.team-brace-mid .team-brace-rail {
+  top: 0;
+  bottom: 0;
+}
+
+.team-brace-only .team-brace-rail {
+  top: 50%;
+  bottom: 50%;
+  width: 8px;
+  border-top: 2px solid #94a3b8;
+  border-bottom: 2px solid #94a3b8;
+}
+
+.result-name {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+}
+
+.team-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid #94a3b8;
+  border-radius: 4px;
+  font-size: 0.78em;
+  font-weight: 700;
+  line-height: 1.45;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.results-table tr.row-team-block-start td {
+  border-top: 2px solid #cbd5e1;
+}
+
 .splits-toggle {
   display: inline-flex;
   align-items: center;
@@ -726,6 +799,19 @@ th { color: #64748b; font-weight: 600; }
 .rogaine-card-empty {
   padding: 12px 4px;
   color: var(--slate);
+}
+
+.rogaine-card.is-team-start {
+  border-top: 2px solid #cbd5e1;
+}
+
+.rogaine-card.is-team-cont {
+  padding-top: 6px;
+}
+
+.rogaine-card .team-badge {
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .group-nav {

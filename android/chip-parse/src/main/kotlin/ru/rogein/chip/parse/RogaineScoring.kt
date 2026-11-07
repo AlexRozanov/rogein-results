@@ -199,3 +199,37 @@ fun assignRogainePlaces(results: List<OrientCalc>): List<Int?> {
     }
     return places
 }
+
+/** Команда — одна зачётная единица: место по лучшему члену, все получают одно место. */
+fun assignRogaineTeamPlaces(results: List<OrientCalc>, teamIds: List<Int>): List<Int?> {
+    data class Unit(val members: List<Int>, val points: Int, val time: Int)
+    val buckets = LinkedHashMap<String, ArrayList<Int>>()
+    for (index in results.indices) {
+        if (!results[index].ok) continue
+        val teamId = teamIds.getOrElse(index) { 0 }
+        val key = if (teamId > 0) "t$teamId" else "p$index"
+        buckets.getOrPut(key) { ArrayList() }.add(index)
+    }
+    val units = buckets.map { (_, members) ->
+        val best = members.minWith(
+            compareByDescending<Int> { results[it].pointsFinal }.thenBy { results[it].elapsedSeconds },
+        )
+        Unit(members, results[best].pointsFinal, results[best].elapsedSeconds)
+    }.sortedWith(compareByDescending<Unit> { it.points }.thenBy { it.time })
+    val places = MutableList<Int?>(results.size) { null }
+    var place = 1
+    var prev: Pair<Int, Int>? = null
+    var seen = 0
+    for (unit in units) {
+        seen += 1
+        val key = unit.points to unit.time
+        if (prev != key) {
+            place = seen
+            prev = key
+        }
+        for (index in unit.members) {
+            places[index] = place
+        }
+    }
+    return places
+}

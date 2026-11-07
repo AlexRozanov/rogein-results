@@ -31,12 +31,14 @@ import ru.rogein.chip.parse.RogaineSettings
 import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.applyRogaineFormat
 import ru.rogein.chip.parse.assignPlaces
-import ru.rogein.chip.parse.assignRogainePlaces
+import ru.rogein.chip.parse.assignRogaineTeamPlaces
 import ru.rogein.chip.parse.calculateOrientResult
 import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.calculateRogaineResult
+import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
+import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.orientCourseLegs
 import ru.rogein.chip.parse.personAwardAge
@@ -112,6 +114,7 @@ data class ScoredResult(
     val place: Int?,
     val chipHint: String? = null,
     val teamId: Int = 0,
+    val numberConflict: Boolean = false,
 )
 
 data class ResultGroup(
@@ -526,6 +529,11 @@ class EventStore(
                 startMode = settings.startMode,
                 competitionStartTime = settings.competitionStartTime,
             )
+            val conflictIds = numberConflictIds(
+                items.map { item ->
+                    FinishQueueRef(item.id, item.uid, item.logicalId, item.courseName)
+                },
+            )
             val raw = items.map { item ->
                 val person = item.logicalId?.let { id -> people.find { it.id == id } }
                 val assigned = assignedCourse(item.logicalId, corrections)
@@ -567,16 +575,24 @@ class EventStore(
                     place = null,
                     chipHint = ChipCellLog.hintFromRawHex(item.rawHex),
                     teamId = if (rogaine) person?.teamId ?: 0 else 0,
+                    numberConflict = item.id in conflictIds,
                 )
             }
             val byCourse = raw.groupBy { courseKey(it.course) }
             val placed = ArrayList<ScoredResult>(raw.size)
             for (group in byCourse.values) {
-                val places = if (rogaine) assignRogainePlaces(group.map { it.calc }) else assignPlaces(group.map { it.calc })
-                group.forEachIndexed { i, row -> placed += row.copy(place = places[i]) }
+                val ranked = group.filter { !it.numberConflict }
+                val skipped = group.filter { it.numberConflict }
+                val places = if (rogaine) {
+                    assignRogaineTeamPlaces(ranked.map { it.calc }, ranked.map { it.teamId })
+                } else {
+                    assignPlaces(ranked.map { it.calc })
+                }
+                ranked.forEachIndexed { i, row -> placed += row.copy(place = places[i]) }
+                skipped.forEach { row -> placed += row.copy(place = null) }
             }
             val teamBestPlace = placed
-                .filter { it.teamId > 0 }
+                .filter { it.teamId > 0 && !it.numberConflict }
                 .groupBy { it.teamId to courseKey(it.course) }
                 .mapValues { (_, rows) -> rows.mapNotNull { it.place }.minOrNull() ?: Int.MAX_VALUE }
             return placed.sortedWith(
@@ -1097,7 +1113,7 @@ class EventStore(
 
         private fun rankRogaineGroup(rows: List<ScoredResult>): List<ScoredResult> {
             if (rows.isEmpty()) return rows
-            val places = assignRogainePlaces(rows.map { it.calc })
+            val places = assignRogaineTeamPlaces(rows.map { it.calc }, rows.map { it.teamId })
             val placed = rows.mapIndexed { index, row -> row.copy(place = places[index]) }
             val teamBestPlace = placed
                 .filter { it.teamId > 0 }

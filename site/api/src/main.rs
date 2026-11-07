@@ -31,7 +31,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use crate::models::{
     AwardGroupPublic, EventDetail, EventListItem, EventListPage, EventRow, ParticipantPublic,
-    ResultPublic, UpcomingListItem,
+    ResultPublic, UpcomingListItem, sort_results_keeping_teams,
 };
 use crate::map_image::{prepare_web_map, scale_meters_per_pixel, sync_pack_map_geometry};
 use crate::publish::{publish_event, publish_live_event, publish_map, PublishPayload};
@@ -894,7 +894,7 @@ async fn load_event_detail(
     .fetch_all(pool)
     .await?;
 
-    let results = sqlx::query_as::<_, ResultPublic>(
+    let mut results = sqlx::query_as::<_, ResultPublic>(
         r#"
         SELECT
             r.id,
@@ -924,6 +924,7 @@ async fn load_event_detail(
     .bind(event.id)
     .fetch_all(pool)
     .await?;
+    sort_results_keeping_teams(&mut results);
 
     let map_url = event
         .map_file_name

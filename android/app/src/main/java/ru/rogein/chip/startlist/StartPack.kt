@@ -24,6 +24,7 @@ data class StartPerson(
     val gender: String = "",
     val birthDate: String = "",
     val teamId: Int = 0,
+    val issuedUid: String = "",
 ) {
     val displayName: String get() = name.ifBlank { "без ФИО" }
     val teamLabel: String get() = if (teamId > 0) "Т$teamId" else ""

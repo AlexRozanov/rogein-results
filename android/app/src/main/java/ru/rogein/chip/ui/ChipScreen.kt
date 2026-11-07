@@ -128,6 +128,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val finishMissingPrompt by viewModel.finishMissingPrompt.collectAsStateWithLifecycle()
     val finishCsvPrompt by viewModel.finishCsvPrompt.collectAsStateWithLifecycle()
     val issueOverwritePrompt by viewModel.issueOverwritePrompt.collectAsStateWithLifecycle()
+    val finishNumberConflictPrompt by viewModel.finishNumberConflictPrompt.collectAsStateWithLifecycle()
     val issueFillPrompt by viewModel.issueFillPrompt.collectAsStateWithLifecycle()
     val stationWritePrompt by viewModel.stationWritePrompt.collectAsStateWithLifecycle()
     val stationProgram by viewModel.stationProgram.collectAsStateWithLifecycle()
@@ -385,6 +386,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     canPrint = printerName.isNotBlank(),
                     onPrint = viewModel::printScored,
                     onPickFinishCsv = { csvPicker.pick(CsvImportKind.Finish) },
+                    onDeleteFinish = viewModel::deleteQueued,
+                    onReassignFinish = viewModel::reassignFinishNumber,
                     sportKind = settings.sportKind,
                     startClockSeconds = parseDaySeconds(settings.competitionStartTime)
                         .takeIf { isRogaine(settings.sportKind) && settings.startMode == "time" },
@@ -505,18 +508,52 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
         )
     }
     issueOverwritePrompt?.let { prompt ->
+        val title = when (prompt.kind) {
+            IssueOverwriteKind.CourseAlreadyIssued -> "Перезаписать чип?"
+            IssueOverwriteKind.NumberBoundOtherChip -> "Номер уже на другом чипе"
+            IssueOverwriteKind.ChipBoundOtherNumber -> "Этот чип уже выдан"
+            IssueOverwriteKind.NumberIssuedUnknownChip -> "Номер уже выдан"
+        }
+        val body = when (prompt.kind) {
+            IssueOverwriteKind.CourseAlreadyIssued -> {
+                val what = if (isRogaine(settings.sportKind)) "формата" else "дистанции"
+                "Чип уже готов для $what ${prompt.issuedCourse}.\nПерезаписать чип?"
+            }
+            IssueOverwriteKind.NumberBoundOtherChip ->
+                "№ ${prompt.id} уже привязан к другому чипу (${prompt.boundUid}).\n" +
+                    "Записать этот номер на текущий чип?"
+            IssueOverwriteKind.ChipBoundOtherNumber ->
+                "Этот чип уже выдан как № ${prompt.otherId}.\nЗаписать на него № ${prompt.id}?"
+            IssueOverwriteKind.NumberIssuedUnknownChip ->
+                "№ ${prompt.id} уже отмечен как выданный, UID неизвестен (возможно, другой телефон).\n" +
+                    "Записать на этот чип?"
+        }
         AlertDialog(
             onDismissRequest = viewModel::cancelIssueOverwrite,
-            title = { Text("Перезаписать чип?") },
-            text = {
-                val what = if (isRogaine(settings.sportKind)) "формата" else "дистанции"
-                Text("Чип уже готов для $what ${prompt.issuedCourse}.\nПерезаписать чип?")
-            },
+            title = { Text(title) },
+            text = { Text(body) },
             confirmButton = {
                 TextButton(onClick = viewModel::confirmIssueOverwrite) { Text("Да") }
             },
             dismissButton = {
                 TextButton(onClick = viewModel::cancelIssueOverwrite) { Text("Нет") }
+            },
+        )
+    }
+    finishNumberConflictPrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissFinishNumberConflict,
+            title = { Text("Два чипа с № ${prompt.logicalId}") },
+            text = {
+                Text(
+                    "Логический номер ${prompt.logicalId} уже есть в финише с другого чипа " +
+                        "(${prompt.otherUid.ifBlank { "UID неизвестен" }}). " +
+                        "Текущий чип (${prompt.newUid.ifBlank { "без UID" }}) тоже сохранён.\n\n" +
+                        "Оба результата помечены как конфликт. В протоколе смените номер у одного из них.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::dismissFinishNumberConflict) { Text("Понятно") }
             },
         )
     }

@@ -38,6 +38,8 @@ type ResultRow = {
   marks?: unknown;
 };
 
+type TeamPos = "none" | "start" | "mid" | "end" | "only";
+
 type EventDetail = {
   slug: string;
   title: string;
@@ -93,7 +95,10 @@ const groupedResults = computed(() => {
   const startCp = event.value.start_cp ?? 241;
   const finishCp = event.value.finish_cp ?? 240;
   return event.value.award_groups.map((group) => {
-    const rows = event.value!.results.filter((row) => row.award_group_id === group.id);
+    const rows = sortRogaineRows(
+      event.value!.results.filter((row) => row.award_group_id === group.id),
+      isOrient.value,
+    );
     const okTimes = rows
       .filter((row) => isOk(row.status) && row.elapsed_seconds > 0)
       .map((row) => row.elapsed_seconds);
@@ -386,6 +391,65 @@ function sourceKey(id: SourceId) {
   return String(id);
 }
 
+function teamIdOf(row: ResultRow) {
+  const id = Number(row.team_id);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
+function bibNum(bib: string) {
+  const n = Number(String(bib).trim());
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
+}
+
+function sortRogaineRows(rows: ResultRow[], orient: boolean) {
+  if (orient || rows.length < 2) return rows;
+  const teamBest = new Map<number, number>();
+  for (const row of rows) {
+    const teamId = teamIdOf(row);
+    if (!teamId) continue;
+    const place = row.place ?? Number.MAX_SAFE_INTEGER;
+    const prev = teamBest.get(teamId);
+    if (prev == null || place < prev) teamBest.set(teamId, place);
+  }
+  return [...rows].sort((a, b) => {
+    const ta = teamIdOf(a);
+    const tb = teamIdOf(b);
+    const pa = (ta ? teamBest.get(ta) : null) ?? a.place ?? Number.MAX_SAFE_INTEGER;
+    const pb = (tb ? teamBest.get(tb) : null) ?? b.place ?? Number.MAX_SAFE_INTEGER;
+    if (pa !== pb) return pa - pb;
+    if ((ta ? 0 : 1) !== (tb ? 0 : 1)) return (ta ? 0 : 1) - (tb ? 0 : 1);
+    if (ta !== tb) return ta - tb;
+    const pla = a.place ?? Number.MAX_SAFE_INTEGER;
+    const plb = b.place ?? Number.MAX_SAFE_INTEGER;
+    if (pla !== plb) return pla - plb;
+    if (b.points_final !== a.points_final) return b.points_final - a.points_final;
+    if (a.elapsed_seconds !== b.elapsed_seconds) return a.elapsed_seconds - b.elapsed_seconds;
+    return bibNum(a.bib) - bibNum(b.bib);
+  });
+}
+
+function teamPos(rows: ResultRow[], index: number): TeamPos {
+  const row = rows[index];
+  if (!row) return "none";
+  const teamId = teamIdOf(row);
+  if (!teamId) return "none";
+  const prev = index > 0 ? teamIdOf(rows[index - 1]) : 0;
+  const next = index + 1 < rows.length ? teamIdOf(rows[index + 1]) : 0;
+  const samePrev = prev === teamId;
+  const sameNext = next === teamId;
+  if (!samePrev && !sameNext) return "only";
+  if (!samePrev && sameNext) return "start";
+  if (samePrev && sameNext) return "mid";
+  return "end";
+}
+
+function displayPlace(rows: ResultRow[], index: number) {
+  const pos = teamPos(rows, index);
+  if (pos === "mid" || pos === "end") return "";
+  const place = rows[index]?.place;
+  return place != null ? String(place) : "—";
+}
+
 function personHref(slug: string, sourceId: SourceId, groupId: number) {
   const prefix = isLive.value ? "/live" : "/events";
   return `${prefix}/${slug}/p/${sourceKey(sourceId)}?g=${groupId}`;
@@ -661,6 +725,7 @@ onBeforeUnmount(() => {
           <thead>
             <tr>
               <th>Место</th>
+              <th v-if="!isOrient" class="team-brace-col" title="Команда"></th>
               <th v-if="!isOrient">Номер</th>
               <th class="col-name">Имя</th>
               <th v-if="!isOrient" class="col-aux">Очки</th>
@@ -680,12 +745,25 @@ onBeforeUnmount(() => {
           </thead>
           <tbody>
             <tr v-if="!block.viewRows.length">
-              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 8">
+              <td :colspan="isOrient ? orientColspan(block.splitCols.length, block.comparing) : 9">
                 {{ emptyGroupText }}
               </td>
             </tr>
-            <tr v-for="(row, rowIndex) in block.viewRows" :key="row.participant_source_id">
-              <td>{{ row.place ?? "—" }}</td>
+            <tr
+              v-for="(row, rowIndex) in block.viewRows"
+              :key="row.participant_source_id"
+              :class="{ 'row-team-block-start': !isOrient && (teamPos(block.viewRows, rowIndex) === 'start' || teamPos(block.viewRows, rowIndex) === 'only') }"
+            >
+              <td>{{ isOrient ? (row.place ?? "—") : displayPlace(block.viewRows, rowIndex) }}</td>
+              <td v-if="!isOrient" class="team-brace-col" aria-hidden="true">
+                <span
+                  v-if="teamPos(block.viewRows, rowIndex) !== 'none'"
+                  class="team-brace"
+                  :class="`team-brace-${teamPos(block.viewRows, rowIndex)}`"
+                >
+                  <span class="team-brace-rail"></span>
+                </span>
+              </td>
               <td v-if="!isOrient">
                 <router-link
                   class="bib"
@@ -695,12 +773,15 @@ onBeforeUnmount(() => {
                 </router-link>
               </td>
               <td class="col-name">
-                <router-link
-                  class="bib"
-                  :to="personHref(event.slug, row.participant_source_id, block.group.id)"
-                >
-                  {{ row.name }}
-                </router-link>
+                <span class="result-name">
+                  <router-link
+                    class="bib"
+                    :to="personHref(event.slug, row.participant_source_id, block.group.id)"
+                  >
+                    {{ row.name }}
+                  </router-link>
+                  <span v-if="!isOrient && teamIdOf(row)" class="team-badge">Т{{ teamIdOf(row) }}</span>
+                </span>
               </td>
               <td v-if="!isOrient" class="col-aux">{{ row.points_raw }}</td>
               <td v-if="!isOrient" class="col-aux">{{ row.penalty_points }}</td>
@@ -728,11 +809,15 @@ onBeforeUnmount(() => {
         <ul v-if="!isOrient" class="rogaine-cards">
           <li v-if="!block.viewRows.length" class="rogaine-card-empty">{{ emptyGroupText }}</li>
           <li
-            v-for="row in block.viewRows"
+            v-for="(row, rowIndex) in block.viewRows"
             :key="`m-${row.participant_source_id}`"
             class="rogaine-card"
+            :class="{
+              'is-team-start': teamPos(block.viewRows, rowIndex) === 'start' || teamPos(block.viewRows, rowIndex) === 'only',
+              'is-team-cont': teamPos(block.viewRows, rowIndex) === 'mid' || teamPos(block.viewRows, rowIndex) === 'end',
+            }"
           >
-            <span class="rogaine-card-place">{{ row.place ?? "—" }}</span>
+            <span class="rogaine-card-place">{{ displayPlace(block.viewRows, rowIndex) }}</span>
             <div class="rogaine-card-main">
               <router-link
                 class="bib"
@@ -740,6 +825,7 @@ onBeforeUnmount(() => {
               >
                 <span class="rogaine-card-bib">{{ row.bib }}</span>
                 {{ row.name }}
+                <span v-if="teamIdOf(row)" class="team-badge">Т{{ teamIdOf(row) }}</span>
               </router-link>
               <p class="rogaine-card-meta">
                 {{ fmtHms(row.elapsed_seconds) }}

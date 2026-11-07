@@ -22,7 +22,10 @@ import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.ChipMemoryLog
 import ru.rogein.chip.parse.CsvExport
 import ru.rogein.chip.parse.RogaineResultCsvRow
+import ru.rogein.chip.parse.IssueUidConflict
+import ru.rogein.chip.parse.IssuedChipRef
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.classifyIssueUid
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.Punch
@@ -108,11 +111,28 @@ data class FinishMissingPrompt(
     val finish: Punch,
 )
 
+enum class IssueOverwriteKind {
+    CourseAlreadyIssued,
+    NumberBoundOtherChip,
+    ChipBoundOtherNumber,
+    NumberIssuedUnknownChip,
+}
+
 data class IssueOverwritePrompt(
     val id: Int,
     val name: String,
     val issuedCourse: String,
     val newCourse: String,
+    val kind: IssueOverwriteKind = IssueOverwriteKind.CourseAlreadyIssued,
+    val otherId: Int? = null,
+    val boundUid: String = "",
+    val chipUid: String = "",
+)
+
+data class FinishNumberConflictPrompt(
+    val logicalId: Int,
+    val newUid: String,
+    val otherUid: String,
 )
 
 data class IssueFillPrompt(
@@ -225,6 +245,9 @@ class ChipQueueViewModel(
 
     private val _issueOverwritePrompt = MutableStateFlow<IssueOverwritePrompt?>(null)
     val issueOverwritePrompt = _issueOverwritePrompt.asStateFlow()
+
+    private val _finishNumberConflictPrompt = MutableStateFlow<FinishNumberConflictPrompt?>(null)
+    val finishNumberConflictPrompt = _finishNumberConflictPrompt.asStateFlow()
 
     private val _issueFillPrompt = MutableStateFlow<IssueFillPrompt?>(null)
     val issueFillPrompt = _issueFillPrompt.asStateFlow()
@@ -1275,8 +1298,12 @@ class ChipQueueViewModel(
         val pending = _issueOverwritePrompt.value ?: return
         _issueOverwritePrompt.value = null
         viewModelScope.launch(Dispatchers.IO) {
-            issueToChip(pending.id, pending.name, pending.newCourse, replace = true)
+            issueToChip(pending.id, pending.name, pending.newCourse, replace = true, uid = pending.chipUid)
         }
+    }
+
+    fun dismissFinishNumberConflict() {
+        _finishNumberConflictPrompt.value = null
     }
 
     fun cancelIssueOverwrite() {
@@ -1502,19 +1529,30 @@ class ChipQueueViewModel(
             }
             is EnqueueResult.Saved -> {
                 repository.requestLiveSend()
-                val saved = if (result.snapshotError == null) {
-                    "$who · ${dump.punches.size} отметок сохранено, chip-queue.json записан."
+                if (result.numberConflict) {
+                    val id = dump.logicalId ?: 0
+                    _finishNumberConflictPrompt.value = FinishNumberConflictPrompt(
+                        logicalId = id,
+                        newUid = dump.uid,
+                        otherUid = result.otherUid,
+                    )
+                    _status.value = "№ $id: другой чип с этим номером уже в финише. Оба результата сохранены."
+                    signalError()
                 } else {
-                    "$who · в очереди, chip-queue.json не записан: ${result.snapshotError}"
+                    val saved = if (result.snapshotError == null) {
+                        "$who · ${dump.punches.size} отметок сохранено, chip-queue.json записан."
+                    } else {
+                        "$who · в очереди, chip-queue.json не записан: ${result.snapshotError}"
+                    }
+                    val hint = ChipCellLog.hintFromRawHex(rawHex)
+                    _status.value = if (hint == null) {
+                        saved
+                    } else {
+                        "$saved Возможна ошибка считки: $hint. Полный лог — вкладка «Тесты»."
+                    }
+                    signalSuccess()
+                    maybeAskPrint(dump.logicalId, course)
                 }
-                val hint = ChipCellLog.hintFromRawHex(rawHex)
-                _status.value = if (hint == null) {
-                    saved
-                } else {
-                    "$saved Возможна ошибка считки: $hint. Полный лог — вкладка «Тесты»."
-                }
-                signalSuccess()
-                maybeAskPrint(dump.logicalId, course)
             }
         }
     }
@@ -1542,7 +1580,13 @@ class ChipQueueViewModel(
         return if (finished) null else issued
     }
 
-    private suspend fun issueToChip(id: Int, name: String, course: String, replace: Boolean = false) {
+    private suspend fun issueToChip(
+        id: Int,
+        name: String,
+        course: String,
+        replace: Boolean = false,
+        uid: String = lastUid.orEmpty(),
+    ) {
         val order = blockOrder
         val io = chipIo
         if (!_chipReady.value || order == null || io == null) {
@@ -1550,6 +1594,41 @@ class ChipQueueViewModel(
             return
         }
         if (!replace) {
+            val uidConflict = classifyIssueUid(
+                id,
+                uid,
+                people.value.map { IssuedChipRef(it.id, it.issued, it.issuedUid) },
+            )
+            if (uidConflict.kind != IssueUidConflict.None) {
+                val kind = when (uidConflict.kind) {
+                    IssueUidConflict.NumberBoundOtherChip -> IssueOverwriteKind.NumberBoundOtherChip
+                    IssueUidConflict.ChipBoundOtherNumber -> IssueOverwriteKind.ChipBoundOtherNumber
+                    IssueUidConflict.NumberIssuedUnknownChip -> IssueOverwriteKind.NumberIssuedUnknownChip
+                    IssueUidConflict.None -> IssueOverwriteKind.CourseAlreadyIssued
+                }
+                val other = uidConflict.otherId?.let { otherId -> people.value.find { it.id == otherId } }
+                _issueOverwritePrompt.value = IssueOverwritePrompt(
+                    id = id,
+                    name = name,
+                    issuedCourse = other?.issuedCourse?.ifBlank { other.currentCourse }
+                        .orEmpty()
+                        .ifBlank { unfinishedIssuedCourse(id).orEmpty() },
+                    newCourse = course,
+                    kind = kind,
+                    otherId = uidConflict.otherId,
+                    boundUid = uidConflict.boundUid,
+                    chipUid = uid,
+                )
+                _status.value = when (kind) {
+                    IssueOverwriteKind.NumberBoundOtherChip -> "№ $id уже привязан к другому чипу."
+                    IssueOverwriteKind.ChipBoundOtherNumber ->
+                        "Этот чип уже выдан как № ${uidConflict.otherId}."
+                    IssueOverwriteKind.NumberIssuedUnknownChip ->
+                        "№ $id уже отмечен как выданный."
+                    IssueOverwriteKind.CourseAlreadyIssued -> "Перезаписать чип?"
+                }
+                return
+            }
             val issued = unfinishedIssuedCourse(id)
             if (issued != null) {
                 _issueOverwritePrompt.value = IssueOverwritePrompt(
@@ -1557,6 +1636,8 @@ class ChipQueueViewModel(
                     name = name,
                     issuedCourse = issued,
                     newCourse = course,
+                    kind = IssueOverwriteKind.CourseAlreadyIssued,
+                    chipUid = uid,
                 )
                 _status.value = if (isRogaine(settings.value.sportKind)) {
                     "Чип уже готов для формата $issued."
@@ -1570,7 +1651,7 @@ class ChipQueueViewModel(
             io.issue(order, id, pointerEnd, chipBlockCount)
             repository.startList.upsertLocal(id, name, course)
             val teamNote = assignSavedPersonTeam(id)
-            repository.startList.markIssued(id, course)
+            repository.startList.markIssued(id, course, uid)
             runCatching { repository.publishProtocolSnapshot() }
             val nextMate = nextUnissuedTeammate(id)
             _query.value = ""
@@ -2043,6 +2124,22 @@ class ChipQueueViewModel(
         _sessionSummary.value = null
     }
 
+    fun reassignFinishNumber(queueId: String, newLogicalId: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val snapshotError = repository.reassignFinishNumber(queueId, newLogicalId)
+                repository.requestLiveSend()
+                _status.value = if (snapshotError == null) {
+                    "В финише номер сменён на № $newLogicalId."
+                } else {
+                    "Номер сменён, снимок в Загрузках не обновлён: $snapshotError"
+                }
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось сменить номер"
+            }
+        }
+    }
+
     fun deleteQueued(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val snapshotError = repository.deleteQueued(id)
@@ -2159,6 +2256,7 @@ class ChipQueueViewModel(
         _finishReplacePrompt.value = null
         _finishMissingPrompt.value = null
         _issueOverwritePrompt.value = null
+        _finishNumberConflictPrompt.value = null
         _issueFillPrompt.value = null
         _overwritePrompt.value = false
     }

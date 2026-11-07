@@ -14,6 +14,7 @@ import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.FormatCsvRow
 import ru.rogein.chip.parse.LegendCsvRow
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
+import ru.rogein.chip.parse.normalizeChipUid
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.SPORT_ROGAINE
 import ru.rogein.chip.parse.isRogaine
@@ -212,6 +213,7 @@ class StartListStore(
                     gender = person.gender.ifBlank { local?.gender.orEmpty() },
                     birthDate = person.birthDate.ifBlank { local?.birthDate.orEmpty() },
                     teamId = if (person.teamId > 0) person.teamId else local?.teamId ?: 0,
+                    issuedUid = local?.issuedUid.orEmpty(),
                 ),
             )
         }
@@ -280,6 +282,7 @@ class StartListStore(
                     gender = existing?.gender.orEmpty(),
                     birthDate = existing?.birthDate.orEmpty(),
                     teamId = existing?.teamId ?: 0,
+                    issuedUid = existing?.issuedUid.orEmpty(),
                 ),
             )
             imported += 1
@@ -332,6 +335,7 @@ class StartListStore(
                     gender = row.gender.ifBlank { existing?.gender.orEmpty() },
                     birthDate = row.birth.ifBlank { existing?.birthDate.orEmpty() },
                     teamId = existing?.teamId ?: 0,
+                    issuedUid = existing?.issuedUid.orEmpty(),
                 ),
             )
             imported += 1
@@ -451,6 +455,7 @@ class StartListStore(
                 gender = gender ?: existing?.gender.orEmpty(),
                 birthDate = birthDate ?: existing?.birthDate.orEmpty(),
                 teamId = existing?.teamId ?: 0,
+                issuedUid = existing?.issuedUid.orEmpty(),
             ),
         )
     }
@@ -515,14 +520,36 @@ class StartListStore(
         return buildStartProtocolSnapshotJson(people)
     }
 
-    suspend fun markIssued(id: Int, course: String = "") {
+    suspend fun markIssued(id: Int, course: String = "", uid: String = "") {
+        val normalized = normalizeChipUid(uid)
+        if (normalized.isNotEmpty()) {
+            for (person in dao.listPeople()) {
+                if (person.logicalId != id && normalizeChipUid(person.issuedUid) == normalized) {
+                    dao.upsertPerson(person.copy(issuedUid = ""))
+                }
+            }
+        }
         val existing = dao.person(id) ?: return
         dao.upsertPerson(
             existing.copy(
                 issuedAt = System.currentTimeMillis(),
                 issuedCourse = course.trim().ifBlank { existing.issuedCourse.ifBlank { existing.currentCourse } },
+                issuedUid = if (normalized.isNotEmpty()) uid.trim() else existing.issuedUid,
             ),
         )
+    }
+
+    suspend fun rebindIssuedUid(fromId: Int?, toId: Int, uid: String) {
+        val normalized = normalizeChipUid(uid)
+        if (normalized.isEmpty()) return
+        if (fromId != null && fromId != toId) {
+            val from = dao.person(fromId)
+            if (from != null && normalizeChipUid(from.issuedUid) == normalized) {
+                dao.upsertPerson(from.copy(issuedUid = ""))
+            }
+        }
+        val to = dao.person(toId) ?: return
+        dao.upsertPerson(to.copy(issuedUid = uid.trim()))
     }
 
     suspend fun setCurrentCourse(id: Int, course: String) {
@@ -663,6 +690,7 @@ private fun StartPersonEntity.toPerson(): StartPerson {
         gender = gender,
         birthDate = birthDate,
         teamId = teamId,
+        issuedUid = issuedUid,
     )
 }
 
