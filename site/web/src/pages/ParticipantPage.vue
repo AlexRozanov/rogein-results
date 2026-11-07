@@ -237,7 +237,7 @@ const metrics = computed(() => {
   const speed = km != null && hours != null && hours > 0 ? km / hours : null;
   const pace = km != null && elapsed != null && elapsed > 0 && km > 0 ? elapsed / km : null;
   const pointsPerKm = km != null && points != null && km > 0 ? points / km : null;
-  return { points, elapsed, pointsPerKm, pace, speed };
+  return { points, elapsed, km, pointsPerKm, pace, speed };
 });
 
 function onMapSize(size: { width: number; height: number }) {
@@ -615,6 +615,10 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       <div class="stat">
         <span class="stat-label">Время</span>
         <span class="stat-value">{{ fmtHms(metrics.elapsed) }}</span>
+      </div>
+      <div v-if="!isOrient" class="stat">
+        <span class="stat-label">Расстояние</span>
+        <span class="stat-value">{{ metrics.km != null ? `${fmtNum(metrics.km, 1)} км` : "—" }}</span>
       </div>
       <div v-if="isOrient" class="stat">
         <span class="stat-label">Старт</span>
