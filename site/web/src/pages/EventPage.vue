@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { sportKindLabel } from "../content/site";
+import { isPublishedGone, replaceWithPublished } from "../liveToPublished";
 import PageLoading from "../components/PageLoading.vue";
 import {
   buildSplitCells,
@@ -67,6 +68,7 @@ type EventDetail = {
 };
 
 const route = useRoute();
+const router = useRouter();
 const isLive = computed(() => route.path.startsWith("/live/"));
 const event = ref<EventDetail | null>(null);
 const error = ref("");
@@ -260,6 +262,16 @@ function isOk(status: string | null | undefined) {
   return (status || "OK") === "OK";
 }
 
+function statusRank(status: string | null | undefined) {
+  const s = status || "";
+  if (isOk(s)) return 0;
+  if (s === "Дисквалификация" || s === "DSQ") return 1;
+  if (s === "DNF") return 2;
+  if (s === "Ошибка") return 3;
+  if (s === "Не стартовал" || s === "DNS") return 4;
+  return 5;
+}
+
 function statusLabel(status: string) {
   if (status === "Дисквалификация") return "DSQ";
   if (status === "Не стартовал") return "DNS";
@@ -439,19 +451,28 @@ function bibNum(bib: string) {
 }
 
 function sortRogaineRows(rows: ResultRow[], orient: boolean) {
-  if (orient) return rows;
+  if (orient) {
+    return [...rows].sort((a, b) => statusRank(a.status) - statusRank(b.status));
+  }
   if (rows.length < 2) return compactTeamPlaces(rows);
   const teamBest = new Map<number, number>();
+  const teamBestStatus = new Map<number, number>();
   for (const row of rows) {
     const teamId = teamIdOf(row);
     if (!teamId) continue;
     const place = row.place ?? Number.MAX_SAFE_INTEGER;
     const prev = teamBest.get(teamId);
     if (prev == null || place < prev) teamBest.set(teamId, place);
+    const rank = statusRank(row.status);
+    const prevRank = teamBestStatus.get(teamId);
+    if (prevRank == null || rank < prevRank) teamBestStatus.set(teamId, rank);
   }
   const sorted = [...rows].sort((a, b) => {
     const ta = teamIdOf(a);
     const tb = teamIdOf(b);
+    const sa = (ta ? teamBestStatus.get(ta) : null) ?? statusRank(a.status);
+    const sb = (tb ? teamBestStatus.get(tb) : null) ?? statusRank(b.status);
+    if (sa !== sb) return sa - sb;
     const pa = (ta ? teamBest.get(ta) : null) ?? a.place ?? Number.MAX_SAFE_INTEGER;
     const pb = (tb ? teamBest.get(tb) : null) ?? b.place ?? Number.MAX_SAFE_INTEGER;
     if (pa !== pb) return pa - pb;
@@ -481,9 +502,14 @@ function uniqueOverallRows(rows: ResultRow[]): ResultRow[] {
 
 function rankOverallRows(rows: ResultRow[]): ResultRow[] {
   const teamBest = new Map<number, { points: number; time: number }>();
+  const teamBestStatus = new Map<number, number>();
   for (const row of rows) {
     const teamId = teamIdOf(row);
-    if (!teamId || !isOk(row.status)) continue;
+    if (!teamId) continue;
+    const rank = statusRank(row.status);
+    const prevRank = teamBestStatus.get(teamId);
+    if (prevRank == null || rank < prevRank) teamBestStatus.set(teamId, rank);
+    if (!isOk(row.status)) continue;
     const prev = teamBest.get(teamId);
     if (
       !prev ||
@@ -494,11 +520,11 @@ function rankOverallRows(rows: ResultRow[]): ResultRow[] {
     }
   }
   const sorted = [...rows].sort((a, b) => {
-    const okA = isOk(a.status) ? 0 : 1;
-    const okB = isOk(b.status) ? 0 : 1;
-    if (okA !== okB) return okA - okB;
     const ta = teamIdOf(a);
     const tb = teamIdOf(b);
+    const okA = (ta && teamBestStatus.has(ta) ? teamBestStatus.get(ta)! : statusRank(a.status));
+    const okB = (tb && teamBestStatus.has(tb) ? teamBestStatus.get(tb)! : statusRank(b.status));
+    if (okA !== okB) return okA - okB;
     const sa = ta && teamBest.has(ta) ? teamBest.get(ta)! : { points: a.points_final, time: a.elapsed_seconds };
     const sb = tb && teamBest.has(tb) ? teamBest.get(tb)! : { points: b.points_final, time: b.elapsed_seconds };
     if (sa.points !== sb.points) return sb.points - sa.points;
@@ -619,6 +645,12 @@ const updatedLabel = computed(() => {
   });
 });
 
+async function goToPublished() {
+  if (!isLive.value) return;
+  stopLiveUpdates();
+  await replaceWithPublished(router, route);
+}
+
 async function load(silent = false) {
   if (!silent) {
     loading.value = true;
@@ -626,8 +658,14 @@ async function load(silent = false) {
     if (!isLive.value) event.value = null;
     observer?.disconnect();
   }
+  let redirected = false;
   try {
     const res = await fetch(`${eventApiUrl()}?t=${Date.now()}`, { cache: "no-store" });
+    if (isLive.value && isPublishedGone(res)) {
+      redirected = true;
+      await goToPublished();
+      return;
+    }
     if (!res.ok) throw new Error(await res.text());
     const next = (await res.json()) as EventDetail;
     if (silent && event.value && next.revision === event.value.revision) {
@@ -643,7 +681,7 @@ async function load(silent = false) {
       if (!silent) event.value = null;
     }
   } finally {
-    if (!silent) loading.value = false;
+    if (!silent && !redirected) loading.value = false;
   }
 }
 
@@ -674,6 +712,9 @@ function startLiveUpdates() {
       liveConnected.value = true;
       void load(true);
     });
+    liveSource.addEventListener("published", () => {
+      void goToPublished();
+    });
     liveSource.onopen = () => {
       liveConnected.value = true;
     };
@@ -690,7 +731,7 @@ onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("keydown", onKeydown);
 });
-watch(() => route.params.slug, () => {
+watch(() => [String(route.params.slug ?? ""), isLive.value], () => {
   navOpen.value = false;
   showSplits.value = false;
   compareIds.value = {};

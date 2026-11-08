@@ -37,6 +37,18 @@ const val STATUS_OK = "OK"
 const val STATUS_DQ = "Дисквалификация"
 const val STATUS_ERR = "Ошибка"
 const val STATUS_DNS = "Не стартовал"
+const val STATUS_DNF = "DNF"
+const val DID_NOT_FINISH = "did_not_finish"
+
+/** OK, then DQ, then DNF, then other non-finishes. */
+fun protocolStatusRank(status: String): Int = when (status) {
+    STATUS_OK -> 0
+    STATUS_DQ -> 1
+    STATUS_DNF -> 2
+    STATUS_ERR -> 3
+    STATUS_DNS -> 4
+    else -> 5
+}
 
 fun diagnosticLabel(code: String): String = when (code) {
     "missing_course" -> "нет дистанции"
@@ -50,6 +62,7 @@ fun diagnosticLabel(code: String): String = when (code) {
     "finish_not_last" -> "финиш не последняя отметка"
     "course_incomplete" -> "дистанция пройдена не полностью"
     "overtime" -> "превышение контрольного времени"
+    "did_not_finish" -> "не финишировал"
     else -> code
 }
 
@@ -65,6 +78,7 @@ fun resultStatusLine(status: String, diagnostics: List<String> = emptyList()): S
             val reason = reasons.ifEmpty { listOf("не стартовал") }
             "Не стартовал: ${reason.joinToString(", ")}"
         }
+        STATUS_DNF -> "Не финишировал"
         STATUS_ERR -> {
             val reason = reasons.ifEmpty { listOf("ошибка") }
             "Ошибка: ${reason.joinToString(", ")}"

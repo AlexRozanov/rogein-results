@@ -3,6 +3,7 @@ package ru.rogein.chip.queue
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import ru.rogein.chip.parse.isDnfUid
 
 /**
  * Полная копия очереди рядом со start-pack.json: каталог приложения и Download/rogein.
@@ -20,7 +21,8 @@ class ChipQueueSnapshotWriter(private val context: Context) {
             } catch (_: Exception) {
                 JSONArray()
             }
-            if (punches.length() == 0) continue
+            val dnf = isDnfUid(item.uid)
+            if (punches.length() == 0 && !dnf) continue
             array.put(
                 JSONObject()
                     .put("id", item.id)
@@ -29,7 +31,8 @@ class ChipQueueSnapshotWriter(private val context: Context) {
                     .put("name", item.personName)
                     .put("courseName", item.courseName)
                     .put("clearedAt", item.clearedAt ?: JSONObject.NULL)
-                    .put("punches", punches),
+                    .put("punches", punches)
+                    .put("dnf", dnf),
             )
         }
         return JSONObject().put("items", array).toString()

@@ -119,7 +119,7 @@ interface ChipQueueDao {
     )
     suspend fun deleteByChipAndCourse(logicalId: Int, courseName: String)
 
-    @Query("UPDATE chip_queue SET ackedAt = :ackedAt WHERE id = :id")
+    @Query("UPDATE chip_queue SET   ackedAt = :ackedAt WHERE id = :id")
     suspend fun ack(id: String, ackedAt: Long)
 
     @Query("DELETE FROM chip_queue WHERE id = :id")

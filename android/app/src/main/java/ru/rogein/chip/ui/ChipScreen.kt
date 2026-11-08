@@ -366,6 +366,8 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onCourseCheck = viewModel::setCourseCheck,
                     onCourseCheckCourse = viewModel::setCourseCheckCourse,
                     onClearChip = viewModel::clearMarks,
+                    corrections = corrections,
+                    onMarkDidNotFinish = viewModel::markDidNotFinish,
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Results -> ResultsScreen(
@@ -388,6 +390,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onPickFinishCsv = { csvPicker.pick(CsvImportKind.Finish) },
                     onDeleteFinish = viewModel::deleteQueued,
                     onReassignFinish = viewModel::reassignFinishNumber,
+                    onCopyTeamPunches = viewModel::copyTeamPunches,
                     sportKind = settings.sportKind,
                     startClockSeconds = parseDaySeconds(settings.competitionStartTime)
                         .takeIf { isRogaine(settings.sportKind) && settings.startMode == "time" },

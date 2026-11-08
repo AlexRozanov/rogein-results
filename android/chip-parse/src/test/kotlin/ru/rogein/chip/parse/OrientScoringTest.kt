@@ -5,6 +5,15 @@ import org.junit.jupiter.api.Test
 
 class OrientScoringTest {
     @Test
+    fun protocolStatusRankPutsDnfAfterDq() {
+        assertEquals(0, protocolStatusRank(STATUS_OK))
+        assertEquals(1, protocolStatusRank(STATUS_DQ))
+        assertEquals(2, protocolStatusRank(STATUS_DNF))
+        assertEquals(3, protocolStatusRank(STATUS_ERR))
+        assertEquals(4, protocolStatusRank(STATUS_DNS))
+    }
+
+    @Test
     fun subsequenceAllowsExtrasAndAdds() {
         assertEquals(5, courseSubsequenceTaken(listOf(1, 1, 2, 4, 3, 4, 5), listOf(1, 2, 3, 4, 5)))
         assertEquals(4, courseSubsequenceTaken(listOf(241, 240), listOf(241, 250, 250, 240), mapOf(250 to 2)))

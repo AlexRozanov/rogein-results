@@ -32,7 +32,7 @@ type NativeParticipantDetails = {
     chip_raw_id: string | null;
     participant_id: string;
     name: string;
-    status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "Нет в протоколе";
+    status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "DNF" | "Нет в протоколе";
     format_name?: string;
     team_id?: number | null;
     team_size?: number;
@@ -96,6 +96,25 @@ const addCpNumber = ref<number | null>(null);
 const removeCpNumber = ref<number | null>(null);
 const removeMode = ref<"remove_legs" | "points_only">("remove_legs");
 const addToProtocolOpen = ref(false);
+
+type TeamPunchCopyPerson = {
+  bib: string;
+  name: string;
+  has_finish: boolean;
+  mark_count: number;
+  finish_participant_id: number | null;
+};
+
+type TeamPunchCopyOptions = {
+  current_bib: string;
+  current_name: string;
+  current_finish_id: number | null;
+  current_mark_count: number;
+  teammates: TeamPunchCopyPerson[];
+};
+
+const copyOptions = ref<TeamPunchCopyOptions | null>(null);
+const extraCopyBib = ref("");
 
 type PathDistanceInfo = {
   ready: boolean;
@@ -226,6 +245,25 @@ const canAddToProtocol = computed(() => {
 const canDeleteFinish = computed(() => {
   const id = Number(finishKeyClean.value);
   return Number.isFinite(id) && id > 0;
+});
+
+const canMarkDnf = computed(() => {
+  if (!details.value) return false;
+  if (details.value.result?.status === "DNF") return false;
+  return (details.value.raw_marks?.length ?? 0) === 0;
+});
+
+const copyPunchesNote = computed(() =>
+  details.value?.corrections.find((c) => c.correction_type === "copy_punches") ?? null,
+);
+
+const copySources = computed(() =>
+  (copyOptions.value?.teammates ?? []).filter((row) => row.mark_count > 0),
+);
+
+const copyTargets = computed(() => {
+  if ((copyOptions.value?.current_mark_count ?? 0) <= 0) return [];
+  return copyOptions.value?.teammates ?? [];
 });
 
 const addCpCounts = computed(() => {
@@ -367,6 +405,8 @@ function correctionTypeText(correctionType: string) {
   if (correctionType === "set_start_mark") return "Время стартовой отметки";
   if (correctionType === "remap_cp") return "Замена КП (станция)";
   if (correctionType === "assign_course") return "Смена дистанции";
+  if (correctionType === "copy_punches") return "Отметки с напарника";
+  if (correctionType === "did_not_finish") return "Не финишировал";
   return correctionType;
 }
 
@@ -443,6 +483,11 @@ function correctionPayloadText(c: NativeParticipantDetails["corrections"][number
     return `${fromCourse} → ${toCourse}`;
   }
 
+  if (c.correction_type === "copy_punches") {
+    const fromBib = String(c.payload?.from_bib || "").trim();
+    return fromBib ? `Скопированы с № ${fromBib}` : "Скопированы с напарника";
+  }
+
   return JSON.stringify(c.payload);
 }
 
@@ -461,6 +506,15 @@ async function loadDetails() {
     });
     details.value = response;
     status.value = `Загружен результат #${resultId}: ${response.participant.name} (id ${response.participant.participant_id})`;
+    copyOptions.value = null;
+    extraCopyBib.value = "";
+    try {
+      copyOptions.value = await invoke<TeamPunchCopyOptions>("get_team_punch_copy_options", {
+        resultId,
+      });
+    } catch {
+      copyOptions.value = null;
+    }
     try {
       const settings = await invoke<{
         sport_kind?: string;
@@ -679,9 +733,105 @@ onMounted(() => {
   void loadDetails();
 });
 
+function copyPersonLabel(row: TeamPunchCopyPerson) {
+  const name = String(row.name || "").trim();
+  return name ? `№ ${row.bib} ${name}` : `№ ${row.bib}`;
+}
+
+function currentCopyLabel() {
+  const options = copyOptions.value;
+  if (!options) return "";
+  const name = String(options.current_name || "").trim();
+  return name ? `№ ${options.current_bib} ${name}` : `№ ${options.current_bib}`;
+}
+
+async function copyTeamPunches(sourceFinishId: number, targetBib: string, createNew: boolean) {
+  const source = Number(sourceFinishId);
+  const bib = String(targetBib || "").trim();
+  if (!Number.isFinite(source) || source <= 0 || !bib) return;
+  const confirmText = createNew
+    ? `Добавить № ${bib} в финиш с отметками ${currentCopyLabel()}?`
+    : `Скопировать отметки на № ${bib}? Текущие отметки будут заменены.`;
+  if (!window.confirm(confirmText)) return;
+  busy.value = true;
+  try {
+    status.value = await invoke<string>("copy_team_punches", {
+      sourceFinishId: source,
+      targetBib: bib,
+    });
+    extraCopyBib.value = "";
+    await loadDetails();
+  } catch (error) {
+    status.value = `Ошибка копирования отметок: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function takePunchesFrom(person: TeamPunchCopyPerson) {
+  const source = Number(person.finish_participant_id);
+  const target = copyOptions.value?.current_bib;
+  if (!target) return;
+  const createNew = !copyOptions.value?.current_finish_id;
+  await copyTeamPunches(source, target, createNew);
+}
+
+async function copyPunchesOnto(person: TeamPunchCopyPerson) {
+  const source = Number(copyOptions.value?.current_finish_id);
+  await copyTeamPunches(source, person.bib, !person.has_finish);
+}
+
+async function copyPunchesByNumber() {
+  const bib = extraCopyBib.value.trim();
+  if (!bib) return;
+  busy.value = true;
+  try {
+    const person = await invoke<TeamPunchCopyPerson>("lookup_team_punch_copy_person", { bib });
+    const currentMarks = copyOptions.value?.current_mark_count ?? 0;
+    const currentFinish = Number(copyOptions.value?.current_finish_id);
+    if (currentMarks > 0 && Number.isFinite(currentFinish) && currentFinish > 0) {
+      busy.value = false;
+      await copyPunchesOnto(person);
+      return;
+    }
+    if (person.mark_count > 0 && person.finish_participant_id) {
+      busy.value = false;
+      await takePunchesFrom(person);
+      return;
+    }
+    status.value = "Нет отметок ни у этого участника, ни у указанного номера.";
+  } catch (error) {
+    status.value = `Ошибка копирования отметок: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function goBackToResults() {
   markReturnToResultsTab();
   await closeAuxiliaryWindowOrClearHash(["participant-card"]);
+}
+
+async function markDidNotFinish() {
+  const bib =
+    details.value?.result?.participant_id ||
+    details.value?.participant.participant_id ||
+    "";
+  const name =
+    details.value?.result?.name || details.value?.participant.name || "";
+  if (!bib) return;
+  if (!window.confirm(`Добавить ${bib} ${name} в финиш со статусом «не финишировал»?`)) {
+    return;
+  }
+  busy.value = true;
+  try {
+    status.value = await invoke<string>("mark_did_not_finish", { bib });
+    await loadDetails();
+  } catch (error) {
+    status.value = `Ошибка: ${String(error)}`;
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function deleteFromFinish() {
@@ -801,6 +951,14 @@ async function openPathWindow() {
           Добавить в протокол
         </button>
         <button
+          v-if="canMarkDnf"
+          type="button"
+          :disabled="busy"
+          @click="markDidNotFinish"
+        >
+          Не финишировал
+        </button>
+        <button
           v-if="canDeleteFinish"
           type="button"
           :disabled="busy"
@@ -820,6 +978,45 @@ async function openPathWindow() {
       </div>
       <h2>Карточка участника</h2>
       <p class="status">{{ status }}</p>
+      <div v-if="!isOrient && copyOptions" class="native-settings" style="margin-top: 12px">
+        <button
+          v-for="person in copySources"
+          :key="`from-${person.bib}`"
+          type="button"
+          :disabled="busy"
+          @click="takePunchesFrom(person)"
+        >
+          Отметки с {{ copyPersonLabel(person) }}
+        </button>
+        <button
+          v-for="person in copyTargets"
+          :key="`onto-${person.bib}`"
+          type="button"
+          :disabled="busy"
+          @click="copyPunchesOnto(person)"
+        >
+          {{
+            person.has_finish
+              ? `Скопировать отметки на ${copyPersonLabel(person)}`
+              : `Добавить ${copyPersonLabel(person)} с этими отметками`
+          }}
+        </button>
+        <label>
+          Другой номер
+          <input v-model="extraCopyBib" type="text" inputmode="numeric" />
+        </label>
+        <button
+          type="button"
+          :disabled="busy || !extraCopyBib.trim()"
+          @click="copyPunchesByNumber"
+        >
+          Копировать
+        </button>
+      </div>
+      <p v-if="!isOrient && copyOptions" class="subtitle">
+        Если чип напарника не сработал: скопировать его отметки, включая старт и финиш.
+        Выдача на этом компьютере не нужна — достаточно стартового протокола.
+      </p>
     </section>
 
     <section v-if="details" class="native-tools">
@@ -938,6 +1135,10 @@ async function openPathWindow() {
           <tr><th>Старт КП</th><td>{{ details.participant.start_station_id }}</td></tr>
           <tr><th>Старт</th><td>{{ details.participant.start_time }}</td></tr>
           <tr><th>Статус</th><td>{{ details.result?.status ?? "-" }}</td></tr>
+          <tr v-if="copyPunchesNote">
+            <th>Отметки</th>
+            <td>{{ correctionPayloadText(copyPunchesNote) }}</td>
+          </tr>
           <tr v-if="isOrient">
             <th>КП</th>
             <td>

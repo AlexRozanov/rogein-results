@@ -43,6 +43,7 @@ const selectedStatusLabel = computed(() => {
   if (props.status === "Дисквалификация") return "Дисквалификация";
   if (props.status === "Ошибка") return "Ошибка";
   if (props.status === "Не стартовал") return "Не стартовал";
+  if (props.status === "DNF") return "Не финишировал";
   if (props.status === "Нет в протоколе") return "Нет в протоколе";
   return "Все";
 });
@@ -119,6 +120,7 @@ onBeforeUnmount(() => {
         <option value="Дисквалификация">Дисквалификация</option>
         <option value="Ошибка">Ошибка</option>
         <option value="Не стартовал">Не стартовал</option>
+        <option value="DNF">Не финишировал</option>
         <option value="Нет в протоколе">Нет в протоколе</option>
       </select>
     </label>

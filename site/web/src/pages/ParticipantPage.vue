@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
 import PageLoading from "../components/PageLoading.vue";
+import { isPublishedGone, replaceWithPublished } from "../liveToPublished";
 import { parseMarkMs, wrapDeltaSec, inferCourseCps, classifyCoursePunches } from "../orientSplits";
 
 type PathPoint = {
@@ -72,12 +73,14 @@ type CourseProgressItem = {
 };
 
 const route = useRoute();
+const router = useRouter();
 const isLive = computed(() => route.path.startsWith("/live/"));
 const person = ref<Participant | null>(null);
 const event = ref<EventDetail | null>(null);
 const error = ref("");
 const loading = ref(true);
 let livePoll: number | null = null;
+let liveSource: EventSource | null = null;
 
 const personResults = computed(() => {
   if (!person.value || !event.value) return [];
@@ -513,6 +516,12 @@ function eventApiUrl() {
   return isLive.value ? `/api/live/${slug}` : `/api/events/${slug}`;
 }
 
+async function goToPublished() {
+  if (!isLive.value) return;
+  stopLivePoll();
+  await replaceWithPublished(router, route);
+}
+
 async function load(silent = false) {
   if (!silent) {
     loading.value = true;
@@ -522,12 +531,18 @@ async function load(silent = false) {
       event.value = null;
     }
   }
+  let redirected = false;
   try {
     const sourceId = String(route.params.sourceId);
     const [pRes, eRes] = await Promise.all([
       fetch(`${eventApiUrl()}/participants/${sourceId}?t=${Date.now()}`, { cache: "no-store" }),
       fetch(`${eventApiUrl()}?t=${Date.now()}`, { cache: "no-store" }),
     ]);
+    if (isLive.value && (isPublishedGone(pRes) || isPublishedGone(eRes))) {
+      redirected = true;
+      await goToPublished();
+      return;
+    }
     if (!pRes.ok) throw new Error(await pRes.text());
     if (!eRes.ok) throw new Error(await eRes.text());
     person.value = await pRes.json();
@@ -542,11 +557,13 @@ async function load(silent = false) {
       }
     }
   } finally {
-    if (!silent) loading.value = false;
+    if (!silent && !redirected) loading.value = false;
   }
 }
 
 function stopLivePoll() {
+  liveSource?.close();
+  liveSource = null;
   if (livePoll != null) {
     window.clearInterval(livePoll);
     livePoll = null;
@@ -559,6 +576,15 @@ function startLivePoll() {
   livePoll = window.setInterval(() => {
     void load(true);
   }, 3000);
+  const slug = String(route.params.slug ?? "");
+  try {
+    liveSource = new EventSource(`/api/live/${slug}/stream`);
+    liveSource.addEventListener("published", () => {
+      void goToPublished();
+    });
+  } catch {
+    liveSource = null;
+  }
 }
 
 onMounted(() => {

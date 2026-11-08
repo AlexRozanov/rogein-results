@@ -64,7 +64,7 @@ type NativeResultRow = {
   chip_raw_id: string | null;
   participant_id: string;
   name: string;
-  status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "Нет в протоколе";
+  status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "DNF" | "Нет в протоколе";
   format_id: number | null;
   format_name: string;
   team_id: number | null;
@@ -185,6 +185,7 @@ const nativeCounts = ref<Record<string, number>>({
   Дисквалификация: 0,
   Ошибка: 0,
   "Не стартовал": 0,
+  DNF: 0,
   "Нет в протоколе": 0,
 });
 const nativeFilterStatus = ref<string>("");
@@ -960,6 +961,7 @@ async function onSortChanged(column: SortBy) {
         </button>
         <span v-else>Ошибка: {{ nativeCounts["Ошибка"] ?? 0 }}</span>
         <span>Не стартовал: {{ nativeCounts["Не стартовал"] ?? 0 }}</span>
+        <span>Не финишировал: {{ nativeCounts.DNF ?? 0 }}</span>
         <span>Нет в протоколе: {{ nativeCounts["Нет в протоколе"] ?? 0 }}</span>
       </div>
 

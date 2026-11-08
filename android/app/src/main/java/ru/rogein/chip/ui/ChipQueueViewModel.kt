@@ -2124,6 +2124,28 @@ class ChipQueueViewModel(
         _sessionSummary.value = null
     }
 
+    fun markDidNotFinish(logicalId: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _status.value = repository.markDidNotFinish(logicalId)
+                repository.requestLiveSend()
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось отметить «не финишировал»"
+            }
+        }
+    }
+
+    fun copyTeamPunches(sourceQueueId: String, targetLogicalId: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _status.value = repository.copyTeamPunches(sourceQueueId, targetLogicalId)
+                repository.requestLiveSend()
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось скопировать отметки"
+            }
+        }
+    }
+
     fun reassignFinishNumber(queueId: String, newLogicalId: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             try {

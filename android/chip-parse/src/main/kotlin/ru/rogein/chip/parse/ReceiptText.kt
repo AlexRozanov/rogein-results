@@ -117,6 +117,7 @@ object ReceiptText {
         STATUS_OK -> "OK"
         STATUS_DQ -> "дискв."
         STATUS_DNS -> "не стартовал"
+        STATUS_DNF -> "не финишировал"
         STATUS_ERR -> "ошибка"
         else -> status
     }

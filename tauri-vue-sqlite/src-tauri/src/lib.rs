@@ -17,8 +17,9 @@ use domain::{
     CpRemapAnalyzeSummary, CpRemapApplyItem, CpRemapApplySummary, ErrorRow, ExclusionRuleRow,
     FormatCpTypeRuleInput, FormatCpTypeRulesBundle, FormatSettings, ImportSummary,
     PhoneImportSummary,
-    MapGeorefInfo, MapGpsAnchor, MapGpsAnchorUpsert, ParticipantDetails, ParticipantPathDistance,
+    MapGeorefInfo, MapGpsAnchor, MapGpsAnchorUpsert,     ParticipantDetails, ParticipantPathDistance,
     ParticipantRow, ResultRow, SearchSuggestion, Settings, StartProtocolFormatRow,
+    TeamPunchCopyOptions,
     StartProtocolImportSummary, StartProtocolRow, DataPresenceCounts,
 };
 use serde::Serialize;
@@ -1703,6 +1704,65 @@ fn dissolve_start_protocol_team(
 }
 
 #[tauri::command]
+fn lookup_team_punch_copy_person(
+    state: State<'_, AppState>,
+    bib: String,
+) -> Result<domain::TeamPunchCopyPerson, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::lookup_team_punch_copy_person(&conn, &bib)
+}
+
+#[tauri::command]
+fn get_team_punch_copy_options(
+    state: State<'_, AppState>,
+    result_id: i64,
+) -> Result<TeamPunchCopyOptions, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    domain::team_punch_copy_options(&conn, result_id)
+}
+
+#[tauri::command]
+fn mark_did_not_finish(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bib: String,
+) -> Result<String, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let message = domain::mark_did_not_finish(&mut conn, &bib)?;
+    let _ = app.emit("results-updated", ());
+    Ok(message)
+}
+
+#[tauri::command]
+fn copy_team_punches(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_finish_id: i64,
+    target_bib: String,
+) -> Result<String, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let message = domain::copy_team_punches(&mut conn, source_finish_id, &target_bib)?;
+    let _ = app.emit("results-updated", ());
+    Ok(message)
+}
+
+#[tauri::command]
 fn get_participant_details(
     state: State<'_, AppState>,
     result_id: i64,
@@ -2200,6 +2260,10 @@ pub fn run() {
             update_start_protocol_entry,
             delete_start_protocol_entry,
             delete_finish_participant,
+            get_team_punch_copy_options,
+            lookup_team_punch_copy_person,
+            copy_team_punches,
+            mark_did_not_finish,
             add_start_protocol_course,
             merge_start_protocol_team,
             leave_start_protocol_team,

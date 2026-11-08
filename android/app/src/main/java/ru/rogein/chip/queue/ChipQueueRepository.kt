@@ -2,6 +2,7 @@ package ru.rogein.chip.queue
 
 import android.content.Context
 import androidx.room.Room
+import ru.rogein.chip.parse.COPY_PUNCHES
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.CsvImport
 import ru.rogein.chip.parse.EventPackFile
@@ -10,8 +11,13 @@ import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
 import ru.rogein.chip.parse.classifyFinishEnqueue
+import ru.rogein.chip.parse.dnfUid
+import ru.rogein.chip.parse.isDnfUid
+import ru.rogein.chip.parse.isSyntheticFinishUid
+import ru.rogein.chip.parse.isTeamCopyUid
 import ru.rogein.chip.parse.normalizeChipUid
 import ru.rogein.chip.parse.numberConflictIds
+import ru.rogein.chip.parse.teamCopyUid
 import ru.rogein.chip.parse.toChipDump
 import ru.rogein.chip.printer.PrinterStore
 import ru.rogein.chip.startlist.StartListStore
@@ -79,11 +85,38 @@ class ChipQueueRepository(
         val course = courseName.trim()
         val items = dao.listAll()
         val refs = items.map { it.toFinishRef() }
-        val kind = classifyFinishEnqueue(dump.uid, dump.logicalId, course, refs)
+        var kind = classifyFinishEnqueue(dump.uid, dump.logicalId, course, refs)
+        val synthetic = matchSyntheticCopy(dump.logicalId, course, items)
+        if (kind == FinishEnqueueKind.OtherChipSameNumber && synthetic != null) {
+            if (dump.punches.size < synthetic.punchCount) {
+                dao.insert(
+                    synthetic.copy(
+                        uid = dump.uid.ifBlank { synthetic.uid },
+                        rawHex = rawHex.ifBlank { synthetic.rawHex },
+                    ),
+                )
+                return savedEnqueue(synthetic.id, dump.uid, dump.logicalId, course, refs, publish)
+            }
+            kind = FinishEnqueueKind.SameChip
+        }
         if (kind == FinishEnqueueKind.SameChip && !replace) {
             return EnqueueResult.Duplicate(dump.logicalId, course)
         }
-        val keep = if (kind == FinishEnqueueKind.SameChip) matchExistingFinish(dump, course, items) else null
+        val keep = if (kind == FinishEnqueueKind.SameChip) {
+            matchExistingFinish(dump, course, items) ?: synthetic
+        } else {
+            null
+        }
+        if (keep != null && shouldKeepCopiedPunches(keep, dump.punches.size)) {
+            val uid = dump.uid.ifBlank { keep.uid }
+            dao.insert(
+                keep.copy(
+                    uid = uid,
+                    rawHex = rawHex.ifBlank { keep.rawHex },
+                ),
+            )
+            return savedEnqueue(keep.id, uid, keep.logicalId, course, refs, publish)
+        }
         val id = keep?.id ?: UUID.randomUUID().toString()
         dao.insert(
             QueuedChipEntity(
@@ -104,6 +137,9 @@ class ChipQueueRepository(
                 courseName = course,
             ),
         )
+        if (dump.punches.isNotEmpty()) {
+            dump.logicalId?.let { event.clearDidNotFinish(it) }
+        }
         val nextRefs = refs.filter { it.id != id } + FinishQueueRef(id, dump.uid, dump.logicalId, course)
         val numberConflict = id in numberConflictIds(nextRefs)
         val otherUid = nextRefs.find { row ->
@@ -145,6 +181,101 @@ class ChipQueueRepository(
         startList.rebindIssuedUid(current, newLogicalId, item.uid)
         event.markLivePending()
         return publishSnapshot()
+    }
+
+    suspend fun copyTeamPunches(sourceQueueId: String, targetLogicalId: Int): String {
+        if (targetLogicalId !in 1..MAX_LOGICAL_ID) {
+            error("Номер вне 1…$MAX_LOGICAL_ID")
+        }
+        val source = dao.byId(sourceQueueId) ?: error("Запись финиша не найдена")
+        if (source.punchCount <= 0) error("У напарника нет отметок")
+        val sourceId = source.logicalId
+        if (sourceId != null && sourceId == targetLogicalId) {
+            error("Нельзя скопировать отметки на того же участника")
+        }
+        val person = startList.person(targetLogicalId)
+            ?: error("№ $targetLogicalId нет в стартовом протоколе")
+        val items = dao.listAll()
+        val existing = items.filter { it.logicalId == targetLogicalId }
+        if (existing.size > 1) {
+            error("У № $targetLogicalId несколько записей финиша — сначала разберите конфликт номеров")
+        }
+        val target = existing.singleOrNull()
+        val created = target == null
+        val id = target?.id ?: UUID.randomUUID().toString()
+        dao.insert(
+            QueuedChipEntity(
+                id = id,
+                uid = target?.uid?.takeIf { it.isNotBlank() && !isTeamCopyUid(it) } ?: teamCopyUid(targetLogicalId),
+                logicalId = targetLogicalId,
+                clearedAt = target?.clearedAt ?: source.clearedAt,
+                punchCount = source.punchCount,
+                firstTime = source.firstTime,
+                lastTime = source.lastTime,
+                punchesJson = source.punchesJson,
+                rawHex = target?.rawHex.orEmpty(),
+                createdAt = target?.createdAt ?: System.currentTimeMillis(),
+                ackedAt = null,
+                personName = person.name.ifBlank { target?.personName.orEmpty() }.ifBlank { "№ $targetLogicalId" },
+                courseName = target?.courseName?.ifBlank { null }
+                    ?: source.courseName.ifBlank { person.currentCourse },
+            ),
+        )
+        event.clearDidNotFinish(targetLogicalId)
+        if (sourceId != null) {
+            event.setCopyPunchesNote(targetLogicalId, sourceId)
+        }
+        event.markLivePending()
+        val snapshotError = publishSnapshot()
+        val who = person.name.ifBlank { "№ $targetLogicalId" }
+        val from = sourceId?.let { "№ $it" } ?: "напарника"
+        val base = if (created) {
+            "№ $targetLogicalId $who добавлен в финиш с отметками $from (${source.punchCount} КП)."
+        } else {
+            "Отметки $from скопированы на № $targetLogicalId $who (${source.punchCount} КП)."
+        }
+        return if (snapshotError == null) base else "$base Снимок в Загрузках не обновлён: $snapshotError"
+    }
+
+    suspend fun markDidNotFinish(logicalId: Int): String {
+        if (logicalId !in 1..MAX_LOGICAL_ID) {
+            error("Номер вне 1…$MAX_LOGICAL_ID")
+        }
+        val person = startList.person(logicalId)
+            ?: error("№ $logicalId нет в стартовом протоколе")
+        val items = dao.listAll()
+        val existing = items.filter { it.logicalId == logicalId }
+        if (existing.size > 1) {
+            error("У № $logicalId несколько записей финиша — сначала разберите конфликт номеров")
+        }
+        val current = existing.singleOrNull()
+        if (current != null && current.punchCount > 0 && !isDnfUid(current.uid)) {
+            error("У № $logicalId уже есть отметки. Сначала удалите финиш, если это ошибка.")
+        }
+        val id = current?.id ?: UUID.randomUUID().toString()
+        dao.insert(
+            QueuedChipEntity(
+                id = id,
+                uid = current?.uid?.takeIf { it.isNotBlank() && !isTeamCopyUid(it) } ?: dnfUid(logicalId),
+                logicalId = logicalId,
+                clearedAt = current?.clearedAt,
+                punchCount = 0,
+                firstTime = null,
+                lastTime = null,
+                punchesJson = "[]",
+                rawHex = current?.rawHex.orEmpty(),
+                createdAt = current?.createdAt ?: System.currentTimeMillis(),
+                ackedAt = null,
+                personName = person.name.ifBlank { current?.personName.orEmpty() }.ifBlank { "№ $logicalId" },
+                courseName = current?.courseName?.ifBlank { null } ?: person.currentCourse,
+            ),
+        )
+        event.setDidNotFinish(logicalId)
+        event.markLivePending()
+        val snapshotError = publishSnapshot()
+        val who = person.name.ifBlank { "№ $logicalId" }
+        val base = "№ $logicalId $who добавлен в финиш со статусом «не финишировал»."
+        return if (snapshotError == null) base else "$base Снимок в Загрузках не обновлён: $snapshotError"
     }
 
     suspend fun previewFinishCsv(text: String): FinishCsvImportPreview {
@@ -281,6 +412,46 @@ class ChipQueueRepository(
             null
         } catch (e: Exception) {
             e.message ?: "не удалось записать снимок"
+        }
+    }
+
+    private suspend fun savedEnqueue(
+        id: String,
+        uid: String,
+        logicalId: Int?,
+        course: String,
+        refs: List<FinishQueueRef>,
+        publish: Boolean,
+    ): EnqueueResult.Saved {
+        val nextRefs = refs.filter { it.id != id } + FinishQueueRef(id, uid, logicalId, course)
+        val numberConflict = id in numberConflictIds(nextRefs)
+        val otherUid = nextRefs.find { row ->
+            row.id != id && row.logicalId != null && row.logicalId == logicalId
+        }?.uid.orEmpty()
+        return EnqueueResult.Saved(
+            snapshotError = if (publish) publishSnapshot() else null,
+            numberConflict = numberConflict,
+            otherUid = otherUid,
+        )
+    }
+
+    private suspend fun shouldKeepCopiedPunches(keep: QueuedChipEntity, incomingCount: Int): Boolean {
+        if (incomingCount >= keep.punchCount) return false
+        if (isTeamCopyUid(keep.uid)) return true
+        val logicalId = keep.logicalId ?: return false
+        return event.correctionsNow().any { it.type == COPY_PUNCHES && it.logicalId == logicalId }
+    }
+
+    private fun matchSyntheticCopy(
+        logicalId: Int?,
+        course: String,
+        items: List<QueuedChipEntity>,
+    ): QueuedChipEntity? {
+        if (logicalId == null) return null
+        return items.find { row ->
+            row.logicalId == logicalId &&
+                row.courseName.equals(course, ignoreCase = true) &&
+                isSyntheticFinishUid(row.uid)
         }
     }
 

@@ -4,6 +4,7 @@ enum class ProtocolRunStatus {
     NotStarted,
     OnCourse,
     Finished,
+    DidNotFinish,
     ;
 
     val label: String
@@ -11,6 +12,7 @@ enum class ProtocolRunStatus {
             NotStarted -> "не стартовал"
             OnCourse -> "на дистанции"
             Finished -> "финишировал"
+            DidNotFinish -> "не финишировал"
         }
 }
 

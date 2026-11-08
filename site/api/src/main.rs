@@ -16,7 +16,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_core::Stream;
@@ -40,6 +40,7 @@ use crate::publish::{publish_event, publish_live_event, publish_map, PublishPayl
 struct LiveTick {
     slug: String,
     revision: i64,
+    published: bool,
 }
 
 #[derive(Clone)]
@@ -267,10 +268,13 @@ async fn get_event(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<Json<EventDetail>, (StatusCode, String)> {
-    let event = load_event_detail(&state.pool, &slug, Some("published"))
+    let mut event = load_event_detail(&state.pool, &slug, Some("published"))
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Event not found".into()))?;
+    fill_live_map_from_pack(&state.pool, &slug, &mut event)
+        .await
+        .map_err(internal)?;
     Ok(Json(event))
 }
 
@@ -282,11 +286,42 @@ fn normalize_slug(raw: &str) -> Result<String, (StatusCode, String)> {
     Ok(slug)
 }
 
+fn live_no_store() -> (header::HeaderName, HeaderValue) {
+    (
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    )
+}
+
+fn live_published_response(slug: &str, extra_path: &str) -> Response {
+    (
+        StatusCode::GONE,
+        [live_no_store()],
+        Json(serde_json::json!({
+            "status": "published",
+            "redirect": format!("/events/{slug}{extra_path}"),
+        })),
+    )
+        .into_response()
+}
+
+async fn event_is_published(pool: &PgPool, slug: &str) -> Result<bool, (StatusCode, String)> {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM events WHERE slug = $1")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(internal)?;
+    Ok(matches!(status.as_deref(), Some("published")))
+}
+
 async fn get_live_event(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
+    if event_is_published(&state.pool, &slug).await? {
+        return Ok(live_published_response(&slug, ""));
+    }
     let mut event = match load_event_detail(&state.pool, &slug, Some("live"))
         .await
         .map_err(internal)?
@@ -301,12 +336,10 @@ async fn get_live_event(
         .await
         .map_err(internal)?;
     Ok((
-        [(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store, no-cache, must-revalidate"),
-        )],
+        [live_no_store()],
         Json(event),
-    ))
+    )
+        .into_response())
 }
 
 async fn put_live_event(
@@ -336,6 +369,7 @@ async fn put_live_event(
     let _ = state.live_tx.send(LiveTick {
         slug: slug.clone(),
         revision,
+        published: false,
     });
     Ok(Json(serde_json::json!({ "ok": true, "slug": slug, "revision": revision })))
 }
@@ -357,22 +391,35 @@ async fn live_stream(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
-    let revision: i64 = sqlx::query_scalar(
-        "SELECT revision FROM events WHERE slug = $1 AND status = 'live'",
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status, revision FROM events WHERE slug = $1",
     )
     .bind(&slug)
     .fetch_optional(&state.pool)
     .await
-    .map_err(internal)?
-    .unwrap_or(0);
+    .map_err(internal)?;
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(16);
-    let _ = tx.try_send(Event::default().event("revision").data(revision.to_string()));
+    match row {
+        Some((status, _)) if status == "published" => {
+            let _ = tx.try_send(Event::default().event("published").data(slug.clone()));
+        }
+        Some((_, revision)) => {
+            let _ = tx.try_send(Event::default().event("revision").data(revision.to_string()));
+        }
+        None => {
+            let _ = tx.try_send(Event::default().event("revision").data("0"));
+        }
+    }
     let mut bcast = state.live_tx.subscribe();
     tokio::spawn(async move {
         loop {
             match bcast.recv().await {
                 Ok(tick) if tick.slug == slug => {
-                    let event = Event::default().event("revision").data(tick.revision.to_string());
+                    let event = if tick.published {
+                        Event::default().event("published").data(tick.slug)
+                    } else {
+                        Event::default().event("revision").data(tick.revision.to_string())
+                    };
                     if tx.send(event).await.is_err() {
                         break;
                     }
@@ -417,19 +464,23 @@ async fn get_participant(
 async fn get_live_participant(
     State(state): State<Arc<AppState>>,
     Path((slug, source_id)): Path<(String, i64)>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let slug = normalize_slug(&slug)?;
+    if event_is_published(&state.pool, &slug).await? {
+        return Ok(live_published_response(
+            &slug,
+            &format!("/p/{source_id}"),
+        ));
+    }
     let row = load_participant(&state.pool, &slug, source_id, Some("live"))
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Participant not found".into()))?;
     Ok((
-        [(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store, no-cache, must-revalidate"),
-        )],
+        [live_no_store()],
         Json(row),
-    ))
+    )
+        .into_response())
 }
 
 async fn put_event(
@@ -443,6 +494,11 @@ async fn put_event(
     publish_event(&state.pool, &state.media_dir, &slug, payload)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let _ = state.live_tx.send(LiveTick {
+        slug: slug.clone(),
+        revision: 0,
+        published: true,
+    });
     Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
 }
 

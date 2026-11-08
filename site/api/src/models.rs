@@ -118,20 +118,27 @@ pub struct EventDetail {
 pub fn sort_results_keeping_teams(rows: &mut [ResultPublic]) {
     use std::collections::HashMap;
     let mut team_best: HashMap<(i64, i64), i32> = HashMap::new();
+    let mut team_status: HashMap<(i64, i64), i32> = HashMap::new();
     for row in rows.iter() {
         let Some(team_id) = row.team_id.filter(|id| *id > 0) else {
             continue;
         };
-        let place = row.place.unwrap_or(i32::MAX);
         let key = (row.award_group_id, team_id);
+        let place = row.place.unwrap_or(i32::MAX);
         let entry = team_best.entry(key).or_insert(place);
         if place < *entry {
             *entry = place;
+        }
+        let rank = protocol_status_rank(&row.status);
+        let status_entry = team_status.entry(key).or_insert(rank);
+        if rank < *status_entry {
+            *status_entry = rank;
         }
     }
     rows.sort_by(|a, b| {
         a.award_group_id
             .cmp(&b.award_group_id)
+            .then_with(|| team_status_rank(a, &team_status).cmp(&team_status_rank(b, &team_status)))
             .then_with(|| team_rank_place(a, &team_best).cmp(&team_rank_place(b, &team_best)))
             .then_with(|| team_id_sort(a.team_id).cmp(&team_id_sort(b.team_id)))
             .then_with(|| a.place.unwrap_or(i32::MAX).cmp(&b.place.unwrap_or(i32::MAX)))
@@ -207,6 +214,33 @@ fn compact_team_places(rows: &mut [ResultPublic]) {
 fn result_ok(status: &str) -> bool {
     let status = status.trim();
     status.is_empty() || status.eq_ignore_ascii_case("OK")
+}
+
+fn protocol_status_rank(status: &str) -> i32 {
+    let status = status.trim();
+    if result_ok(status) {
+        0
+    } else if status == "Дисквалификация" || status.eq_ignore_ascii_case("DSQ") {
+        1
+    } else if status.eq_ignore_ascii_case("DNF") {
+        2
+    } else if status == "Ошибка" {
+        3
+    } else if status == "Не стартовал" || status.eq_ignore_ascii_case("DNS") {
+        4
+    } else {
+        5
+    }
+}
+
+fn team_status_rank(
+    row: &ResultPublic,
+    best: &std::collections::HashMap<(i64, i64), i32>,
+) -> i32 {
+    row.team_id
+        .filter(|id| *id > 0)
+        .and_then(|team_id| best.get(&(row.award_group_id, team_id)).copied())
+        .unwrap_or_else(|| protocol_status_rank(&row.status))
 }
 
 fn team_rank_place(row: &ResultPublic, best: &std::collections::HashMap<(i64, i64), i32>) -> i32 {
@@ -331,4 +365,45 @@ pub struct PublishResult {
     pub status: Option<String>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(id: i64, bib: &str, status: &str, place: Option<i32>, points: i32) -> ResultPublic {
+        ResultPublic {
+            id,
+            award_group_id: 1,
+            participant_id: id,
+            participant_source_id: id,
+            bib: bib.to_string(),
+            name: bib.to_string(),
+            gender: None,
+            age: None,
+            team_id: None,
+            format_name: None,
+            place,
+            points_raw: points,
+            penalty_points: 0,
+            points_final: points,
+            elapsed_seconds: 0,
+            status: status.to_string(),
+            diagnostics: json!([]),
+            marks: json!([]),
+        }
+    }
+
+    #[test]
+    fn dnf_sorts_after_disqualified() {
+        let mut rows = vec![
+            row(1, "3", "DNF", None, 90),
+            row(2, "1", "OK", Some(1), 100),
+            row(3, "2", "Дисквалификация", None, 80),
+        ];
+        sort_results_keeping_teams(&mut rows);
+        let statuses: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(statuses, vec!["OK", "Дисквалификация", "DNF"]);
+    }
 }

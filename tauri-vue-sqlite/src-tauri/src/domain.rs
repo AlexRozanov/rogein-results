@@ -17,13 +17,21 @@ const STATUS_DQ: &str = "Дисквалификация";
 const STATUS_ERR: &str = "Ошибка";
 /// In start protocol, no finish dump row.
 const STATUS_DNS: &str = "Не стартовал";
+const STATUS_DNF: &str = "DNF";
+const DID_NOT_FINISH: &str = "did_not_finish";
 /// In finish dump, not matched to start protocol.
 const STATUS_NOT_IN_PROTOCOL: &str = "Нет в протоколе";
 
 fn is_known_status(status: &str) -> bool {
     matches!(
         status,
-        STATUS_OK | STATUS_DQ | STATUS_ERR | STATUS_DNS | STATUS_NOT_IN_PROTOCOL
+        STATUS_OK | STATUS_DQ | STATUS_ERR | STATUS_DNS | STATUS_DNF | STATUS_NOT_IN_PROTOCOL
+    )
+}
+
+fn sql_protocol_status_rank(column: &str) -> String {
+    format!(
+        "CASE {column} WHEN '{STATUS_OK}' THEN 0 WHEN '{STATUS_DQ}' THEN 1 WHEN '{STATUS_DNF}' THEN 2 WHEN '{STATUS_ERR}' THEN 3 WHEN '{STATUS_DNS}' THEN 4 WHEN '{STATUS_NOT_IN_PROTOCOL}' THEN 5 ELSE 6 END"
     )
 }
 
@@ -1430,6 +1438,8 @@ struct PhoneSnapshotItem {
     name: Option<String>,
     #[serde(default, rename = "courseName")]
     course_name: Option<String>,
+    #[serde(default)]
+    dnf: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1608,6 +1618,21 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
                     .execute(params![finish_id, seq, cp, mark_time])
                     .map_err(|e| format!("insert phone mark for {}: {e}", row.bib))?;
             }
+            tx.execute(
+                "DELETE FROM manual_corrections WHERE finish_participant_id = ? AND correction_type = ?",
+                params![finish_id, DID_NOT_FINISH],
+            )
+            .map_err(|e| format!("clear dnf note: {e}"))?;
+            if row.dnf {
+                tx.execute(
+                    r#"
+                    INSERT INTO manual_corrections(finish_participant_id, correction_type, payload_json)
+                    VALUES(?, ?, '{}')
+                    "#,
+                    params![finish_id, DID_NOT_FINISH],
+                )
+                .map_err(|e| format!("save dnf note: {e}"))?;
+            }
             seen_stmt
                 .execute(params![row.queue_id])
                 .map_err(|e| format!("remember phone chip {}: {e}", row.queue_id))?;
@@ -1642,6 +1667,7 @@ struct PreparedPhoneRow {
     start_time: String,
     marks: Vec<(i64, i64, String)>,
     matched: bool,
+    dnf: bool,
 }
 
 fn phone_item_label(item: &PhoneSnapshotItem) -> String {
@@ -1667,8 +1693,27 @@ fn prepare_phone_item(
         })?;
         punches.push((punch.cp, clock));
     }
+    let dnf = item.dnf || is_dnf_uid(&item.uid);
     if punches.is_empty() {
-        return Ok(None);
+        if !dnf {
+            return Ok(None);
+        }
+        let (bib, name, course_name, matched) =
+            phone_item_identity(conn, item, orient)?;
+        let start_time = format!("{} 00:00:00", competition_date.format("%Y-%m-%d"));
+        return Ok(Some(PreparedPhoneRow {
+            queue_id: item.id.clone(),
+            logical_id: item.logical_id.filter(|id| *id > 0),
+            bib,
+            uid: item.uid.clone(),
+            name,
+            course_name,
+            start_station_id: 0,
+            start_time,
+            marks: Vec::new(),
+            matched,
+            dnf: true,
+        }));
     }
     let stamped = stamp_clock_times(competition_date, &punches.iter().map(|(_, t)| *t).collect::<Vec<_>>());
     let marks: Vec<(i64, i64, String)> = punches
@@ -1740,7 +1785,61 @@ fn prepare_phone_item(
         start_time: marks[start_idx].2.clone(),
         marks,
         matched,
+        dnf,
     }))
+}
+
+fn phone_item_identity(
+    conn: &Connection,
+    item: &PhoneSnapshotItem,
+    orient: bool,
+) -> Result<(String, String, String, bool), String> {
+    let stamped_course = item
+        .course_name
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let stamped_name = item
+        .name
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    Ok(match item.logical_id {
+        Some(logical_id) => {
+            let hits = protocol_hits_for_bib(conn, logical_id)?;
+            if hits.len() == 1 {
+                let (protocol_bib, protocol_name, format_name) = &hits[0];
+                let course = stamped_course.unwrap_or_else(|| {
+                    if orient {
+                        format_name.clone()
+                    } else {
+                        String::new()
+                    }
+                });
+                (
+                    protocol_bib.clone(),
+                    stamped_name.unwrap_or_else(|| protocol_name.clone()),
+                    course,
+                    true,
+                )
+            } else if stamped_name.is_some() && stamped_course.is_some() {
+                (
+                    logical_id.to_string(),
+                    stamped_name.unwrap(),
+                    stamped_course.unwrap(),
+                    !hits.is_empty(),
+                )
+            } else {
+                (
+                    logical_id.to_string(),
+                    stamped_name.unwrap_or_else(|| format!("чип {logical_id}")),
+                    stamped_course.unwrap_or_default(),
+                    false,
+                )
+            }
+        }
+        None => (item.uid.clone(), format!("чип {}", item.uid), String::new(), false),
+    })
 }
 
 struct CollapsedPhoneSnapshot {
@@ -3075,6 +3174,29 @@ fn recalculate_orient_tx(
         let mut marks = load_marks(tx, participant.id)?;
         let manual_corrections = load_manual_corrections(tx, participant.id)?;
         apply_manual_mark_corrections(&mut marks, &manual_corrections);
+        if manual_corrections
+            .iter()
+            .any(|c| c.correction_type == DID_NOT_FINISH)
+        {
+            insert_result_row(
+                tx,
+                Some(participant.id),
+                participant.chip_raw_id.as_deref(),
+                &participant.participant_id,
+                &participant.name,
+                &ResultCalc {
+                    status: STATUS_DNF.to_string(),
+                    points_raw: 0,
+                    penalty_points: 0,
+                    points_final: 0,
+                    elapsed_seconds: 0,
+                    delay_seconds: 0,
+                    penalty_minutes: 0,
+                    diagnostics: vec!["did_not_finish".to_string()],
+                },
+            )?;
+            continue;
+        }
         let course_name = effective_course_name(
             &participant.course_name,
             participant.id,
@@ -3489,6 +3611,21 @@ fn calculate_result(
     cp_type_by_number: &HashMap<i64, i64>,
     type_rules: Option<&[(i64, Option<i64>)]>,
 ) -> Result<ResultCalc, String> {
+    if manual_corrections
+        .iter()
+        .any(|c| c.correction_type == DID_NOT_FINISH)
+    {
+        return Ok(ResultCalc {
+            status: STATUS_DNF.to_string(),
+            points_raw: 0,
+            penalty_points: 0,
+            points_final: 0,
+            elapsed_seconds: 0,
+            delay_seconds: 0,
+            penalty_minutes: 0,
+            diagnostics: vec!["did_not_finish".to_string()],
+        });
+    }
     let mut diagnostics: Vec<String> = Vec::new();
     let control_seconds = settings.control_minutes * 60;
     let dq_seconds = (settings.control_minutes + settings.dq_minutes) * 60;
@@ -4690,7 +4827,7 @@ fn append_course_name_filter(
 }
 
 fn orient_results_order_sql(sort_by: &str, sort_dir: &str) -> String {
-    let status_rank = "CASE results.status WHEN 'OK' THEN 0 WHEN 'Дисквалификация' THEN 1 WHEN 'Ошибка' THEN 2 WHEN 'Не стартовал' THEN 3 ELSE 4 END";
+    let status_rank = sql_protocol_status_rank("results.status");
     let bib_asc = sql_bib_order("results.participant_id", "asc");
     let bib_desc = sql_bib_order("results.participant_id", "desc");
     match (sort_by, sort_dir) {
@@ -4941,9 +5078,10 @@ pub fn query_results(
     );
     let bib_asc = sql_bib_order("results.participant_id", "asc");
     let bib_desc = sql_bib_order("results.participant_id", "desc");
-    let status_rank = "CASE results.status WHEN 'OK' THEN 0 WHEN 'Не стартовал' THEN 1 WHEN 'Нет в протоколе' THEN 2 WHEN 'Дисквалификация' THEN 3 ELSE 4 END";
+    let status_rank = sql_protocol_status_rank("results.status");
+    let team_status_inner = sql_protocol_status_rank("r2.status");
     let team_status_key = format!(
-        "COALESCE((SELECT MIN(CASE r2.status WHEN 'OK' THEN 0 WHEN 'Не стартовал' THEN 1 WHEN 'Нет в протоколе' THEN 2 WHEN 'Дисквалификация' THEN 3 ELSE 4 END) {team_join}), {status_rank})"
+        "COALESCE((SELECT MIN({team_status_inner}) {team_join}), {status_rank})"
     );
     // Must follow the team rank key immediately so members stay contiguous.
     let team_group_tail =
@@ -4978,10 +5116,10 @@ pub fn query_results(
             "{team_status_key} ASC, {team_points_final_key} DESC, {team_group_tail}, results.points_final DESC, results.elapsed_seconds ASC, {bib_asc}"
         ),
         ("elapsed_seconds", "desc") => format!(
-            "{team_elapsed_key} DESC, {team_group_tail}, results.elapsed_seconds DESC, results.points_final DESC, {bib_asc}"
+            "{team_status_key} ASC, {team_elapsed_key} DESC, {team_group_tail}, results.elapsed_seconds DESC, results.points_final DESC, {bib_asc}"
         ),
         _ => format!(
-            "{team_elapsed_key} ASC, {team_group_tail}, results.elapsed_seconds ASC, results.points_final DESC, {bib_asc}"
+            "{team_status_key} ASC, {team_elapsed_key} ASC, {team_group_tail}, results.elapsed_seconds ASC, results.points_final DESC, {bib_asc}"
         ),
         }
     };
@@ -5121,6 +5259,7 @@ pub fn query_status_counts(
         (STATUS_DQ.to_string(), 0_i64),
         (STATUS_ERR.to_string(), 0_i64),
         (STATUS_DNS.to_string(), 0_i64),
+        (STATUS_DNF.to_string(), 0_i64),
         (STATUS_NOT_IN_PROTOCOL.to_string(), 0_i64),
     ]);
     let protocol_join = start_finish_protocol_join("results", "sp");
@@ -8986,6 +9125,481 @@ pub fn delete_finish_participant(
     Ok(())
 }
 
+const COPY_PUNCHES: &str = "copy_punches";
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TeamPunchCopyPerson {
+    pub bib: String,
+    pub name: String,
+    pub has_finish: bool,
+    pub mark_count: i64,
+    pub finish_participant_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TeamPunchCopyOptions {
+    pub current_bib: String,
+    pub current_name: String,
+    pub current_finish_id: Option<i64>,
+    pub current_mark_count: i64,
+    pub teammates: Vec<TeamPunchCopyPerson>,
+}
+
+pub fn team_punch_copy_options(
+    conn: &Connection,
+    result_id: i64,
+) -> Result<TeamPunchCopyOptions, String> {
+    require_rogaine_punch_copy(conn)?;
+    let (bib, name, finish_id): (String, String, Option<i64>) = conn
+        .query_row(
+            "SELECT participant_id, name, finish_participant_id FROM results WHERE id = ?",
+            params![result_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load result {result_id}: {e}"))?
+        .ok_or_else(|| format!("result id {result_id} not found"))?;
+    let current_mark_count = match finish_id {
+        Some(id) => mark_count(conn, id)?,
+        None => 0,
+    };
+    let team_id = start_protocol_team_id(conn, &bib)?;
+    let teammates = if let Some(team_id) = team_id {
+        list_team_punch_copy_people(conn, team_id, &bib)?
+    } else {
+        Vec::new()
+    };
+    Ok(TeamPunchCopyOptions {
+        current_bib: bib,
+        current_name: name,
+        current_finish_id: finish_id,
+        current_mark_count,
+        teammates,
+    })
+}
+
+pub fn lookup_team_punch_copy_person(
+    conn: &Connection,
+    bib: &str,
+) -> Result<TeamPunchCopyPerson, String> {
+    require_rogaine_punch_copy(conn)?;
+    let logical = parse_logical_bib(bib)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("Некорректный номер «{bib}»"))?;
+    let (stored_bib, name): (String, String) = conn
+        .query_row(
+            r#"
+            SELECT participant_id, name
+            FROM start_protocol
+            WHERE CAST(TRIM(participant_id) AS INTEGER) = ?
+            ORDER BY id
+            LIMIT 1
+            "#,
+            params![logical],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("lookup person: {e}"))?
+        .ok_or_else(|| format!("№ {logical} нет в стартовом протоколе"))?;
+    let existing = finishes_for_bib(conn, logical)?;
+    if existing.len() > 1 {
+        return Err(format!(
+            "У № {logical} несколько записей финиша — сначала разберите конфликт"
+        ));
+    }
+    let (finish_id, mark_count) = if let Some((id, _)) = existing.first() {
+        (*id, mark_count(conn, *id)?)
+    } else {
+        (0, 0)
+    };
+    Ok(TeamPunchCopyPerson {
+        bib: stored_bib,
+        name,
+        has_finish: finish_id > 0,
+        mark_count,
+        finish_participant_id: if finish_id > 0 { Some(finish_id) } else { None },
+    })
+}
+
+pub fn copy_team_punches(
+    conn: &mut Connection,
+    source_finish_id: i64,
+    target_bib: &str,
+) -> Result<String, String> {
+    require_rogaine_punch_copy(conn)?;
+    if source_finish_id <= 0 {
+        return Err("Не указан источник отметок".to_string());
+    }
+    let target_logical = parse_logical_bib(target_bib)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("Некорректный номер «{target_bib}»"))?;
+    let (
+        source_bib,
+        source_name,
+        source_course,
+        source_start_station,
+        source_start_time,
+    ): (String, String, String, i64, String) = conn
+        .query_row(
+            r#"
+            SELECT participant_id, name, IFNULL(course_name, ''), start_station_id, start_time
+            FROM participants
+            WHERE id = ?
+            "#,
+            params![source_finish_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load source finish: {e}"))?
+        .ok_or_else(|| "Запись финиша источника не найдена".to_string())?;
+    let source_marks = mark_count(conn, source_finish_id)?;
+    if source_marks <= 0 {
+        return Err("У напарника нет отметок".to_string());
+    }
+    let source_logical = parse_logical_bib(&source_bib).unwrap_or(0);
+    if source_logical == target_logical {
+        return Err("Нельзя скопировать отметки на того же участника".to_string());
+    }
+    let (target_bib_stored, target_name, target_format): (String, String, String) = conn
+        .query_row(
+            r#"
+            SELECT participant_id, name, IFNULL(format_name, '')
+            FROM start_protocol
+            WHERE CAST(TRIM(participant_id) AS INTEGER) = ?
+            ORDER BY id
+            LIMIT 1
+            "#,
+            params![target_logical],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("lookup start protocol: {e}"))?
+        .ok_or_else(|| format!("№ {target_logical} нет в стартовом протоколе"))?;
+    let existing = finishes_for_bib(conn, target_logical)?;
+    if existing.len() > 1 {
+        return Err(format!(
+            "У № {target_logical} несколько записей финиша — сначала разберите конфликт"
+        ));
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("start copy punches transaction: {e}"))?;
+    let created = existing.is_empty();
+    let target_finish_id = if let Some((keep_id, chip_raw)) = existing.first().cloned() {
+        let uid = chip_raw
+            .filter(|uid| !uid.is_empty() && !is_team_copy_uid(uid))
+            .unwrap_or_else(|| format!("COPY{target_logical}"));
+        tx.execute(
+            r#"
+            UPDATE participants
+            SET chip_raw_id = ?, name = ?, start_station_id = ?, start_time = ?, course_name = ?
+            WHERE id = ?
+            "#,
+            params![
+                uid,
+                target_name,
+                source_start_station,
+                source_start_time,
+                if source_course.is_empty() {
+                    target_format.clone()
+                } else {
+                    source_course.clone()
+                },
+                keep_id
+            ],
+        )
+        .map_err(|e| format!("update target finish: {e}"))?;
+        tx.execute(
+            "DELETE FROM marks_raw WHERE finish_participant_id = ?",
+            params![keep_id],
+        )
+        .map_err(|e| format!("clear target marks: {e}"))?;
+        keep_id
+    } else {
+        let course = if source_course.is_empty() {
+            target_format.clone()
+        } else {
+            source_course.clone()
+        };
+        tx.execute(
+            r#"
+            INSERT INTO participants(
+                participant_id, chip_raw_id, name, start_station_id, start_time, source_row, course_name
+            ) VALUES(?, ?, ?, ?, ?, 0, ?)
+            "#,
+            params![
+                target_bib_stored,
+                format!("COPY{target_logical}"),
+                target_name,
+                source_start_station,
+                source_start_time,
+                course
+            ],
+        )
+        .map_err(|e| format!("insert target finish: {e}"))?;
+        tx.last_insert_rowid()
+    };
+    tx.execute(
+        r#"
+        INSERT INTO marks_raw(finish_participant_id, seq, cp_number, mark_time)
+        SELECT ?, seq, cp_number, mark_time
+        FROM marks_raw
+        WHERE finish_participant_id = ?
+        "#,
+        params![target_finish_id, source_finish_id],
+    )
+    .map_err(|e| format!("copy marks: {e}"))?;
+    tx.execute(
+        r#"
+        DELETE FROM manual_corrections
+        WHERE finish_participant_id = ?
+          AND correction_type IN (?, ?)
+        "#,
+        params![target_finish_id, COPY_PUNCHES, DID_NOT_FINISH],
+    )
+    .map_err(|e| format!("clear copy note: {e}"))?;
+    tx.execute(
+        r#"
+        INSERT INTO manual_corrections(finish_participant_id, correction_type, payload_json)
+        VALUES(?, ?, ?)
+        "#,
+        params![
+            target_finish_id,
+            COPY_PUNCHES,
+            json!({ "from_bib": source_bib }).to_string()
+        ],
+    )
+    .map_err(|e| format!("save copy note: {e}"))?;
+    recalculate_tx(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("commit copy punches: {e}"))?;
+    let who = if target_name.trim().is_empty() {
+        format!("№ {target_logical}")
+    } else {
+        format!("№ {target_logical} {target_name}")
+    };
+    let from = if source_name.trim().is_empty() {
+        format!("№ {source_bib}")
+    } else {
+        format!("№ {source_bib} {source_name}")
+    };
+    if created {
+        Ok(format!(
+            "{who} добавлен в финиш с отметками {from} ({source_marks} КП)."
+        ))
+    } else {
+        Ok(format!(
+            "Отметки {from} скопированы на {who} ({source_marks} КП)."
+        ))
+    }
+}
+
+pub fn mark_did_not_finish(conn: &mut Connection, bib: &str) -> Result<String, String> {
+    let logical = parse_logical_bib(bib)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("Некорректный номер «{bib}»"))?;
+    let (stored_bib, name, format_name): (String, String, String) = conn
+        .query_row(
+            r#"
+            SELECT participant_id, name, IFNULL(format_name, '')
+            FROM start_protocol
+            WHERE CAST(TRIM(participant_id) AS INTEGER) = ?
+            ORDER BY id
+            LIMIT 1
+            "#,
+            params![logical],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("lookup start protocol: {e}"))?
+        .ok_or_else(|| format!("№ {logical} нет в стартовом протоколе"))?;
+    let existing = finishes_for_bib(conn, logical)?;
+    if existing.len() > 1 {
+        return Err(format!(
+            "У № {logical} несколько записей финиша — сначала разберите конфликт"
+        ));
+    }
+    if let Some((id, _)) = existing.first() {
+        let marks = mark_count(conn, *id)?;
+        if marks > 0 {
+            return Err(format!(
+                "У № {logical} уже есть отметки. Сначала удалите финиш, если это ошибка."
+            ));
+        }
+    }
+    let settings = get_settings(conn)?;
+    let start_time = match NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d") {
+        Ok(date) => format!("{} 00:00:00", date.format("%Y-%m-%d")),
+        Err(_) => "1970-01-01 00:00:00".to_string(),
+    };
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("start dnf transaction: {e}"))?;
+    let finish_id = if let Some((keep_id, chip_raw)) = existing.first().cloned() {
+        let uid = chip_raw
+            .filter(|uid| !uid.is_empty() && !is_team_copy_uid(uid))
+            .unwrap_or_else(|| format!("DNF{logical}"));
+        tx.execute(
+            r#"
+            UPDATE participants
+            SET chip_raw_id = ?, name = ?, start_station_id = 0, start_time = ?, course_name = ?
+            WHERE id = ?
+            "#,
+            params![uid, name, start_time, format_name, keep_id],
+        )
+        .map_err(|e| format!("update dnf finish: {e}"))?;
+        keep_id
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO participants(
+                participant_id, chip_raw_id, name, start_station_id, start_time, source_row, course_name
+            ) VALUES(?, ?, ?, 0, ?, 0, ?)
+            "#,
+            params![stored_bib, format!("DNF{logical}"), name, start_time, format_name],
+        )
+        .map_err(|e| format!("insert dnf finish: {e}"))?;
+        tx.last_insert_rowid()
+    };
+    tx.execute(
+        "DELETE FROM manual_corrections WHERE finish_participant_id = ? AND correction_type = ?",
+        params![finish_id, DID_NOT_FINISH],
+    )
+    .map_err(|e| format!("clear dnf note: {e}"))?;
+    tx.execute(
+        r#"
+        INSERT INTO manual_corrections(finish_participant_id, correction_type, payload_json)
+        VALUES(?, ?, '{}')
+        "#,
+        params![finish_id, DID_NOT_FINISH],
+    )
+    .map_err(|e| format!("save dnf note: {e}"))?;
+    recalculate_tx(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("commit dnf: {e}"))?;
+    let who = if name.trim().is_empty() {
+        format!("№ {logical}")
+    } else {
+        format!("№ {logical} {name}")
+    };
+    Ok(format!(
+        "{who} добавлен в финиш со статусом «не финишировал»."
+    ))
+}
+
+fn require_rogaine_punch_copy(conn: &Connection) -> Result<(), String> {
+    let settings = get_settings(conn)?;
+    if settings.sport_kind == "orient" {
+        Err("Копирование отметок напарника доступно только в рогейне".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn is_team_copy_uid(uid: &str) -> bool {
+    let n = uid.trim().to_ascii_uppercase();
+    n.starts_with("COPY") && n[4..].chars().all(|ch| ch.is_ascii_digit()) && n.len() > 4
+}
+
+fn is_dnf_uid(uid: &str) -> bool {
+    let n = uid.trim().to_ascii_uppercase();
+    n.starts_with("DNF") && n.len() > 3 && n[3..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn mark_count(conn: &Connection, finish_id: i64) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM marks_raw WHERE finish_participant_id = ?",
+        params![finish_id],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("count marks: {e}"))
+}
+
+fn start_protocol_team_id(conn: &Connection, bib: &str) -> Result<Option<i64>, String> {
+    let Some(logical) = parse_logical_bib(bib) else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT team_id FROM start_protocol WHERE CAST(TRIM(participant_id) AS INTEGER) = ? LIMIT 1",
+        params![logical],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("lookup team: {e}"))
+}
+
+fn list_team_punch_copy_people(
+    conn: &Connection,
+    team_id: i64,
+    skip_bib: &str,
+) -> Result<Vec<TeamPunchCopyPerson>, String> {
+    let skip = parse_logical_bib(skip_bib).unwrap_or(0);
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                sp.participant_id,
+                sp.name,
+                p.id,
+                IFNULL((SELECT COUNT(*) FROM marks_raw m WHERE m.finish_participant_id = p.id), 0)
+            FROM start_protocol sp
+            LEFT JOIN participants p
+              ON CAST(TRIM(p.participant_id) AS INTEGER) = CAST(TRIM(sp.participant_id) AS INTEGER)
+            WHERE sp.team_id = ?
+              AND CAST(TRIM(sp.participant_id) AS INTEGER) <> ?
+            ORDER BY CAST(TRIM(sp.participant_id) AS INTEGER)
+            "#,
+        )
+        .map_err(|e| format!("prepare teammates: {e}"))?;
+    let rows = stmt
+        .query_map(params![team_id, skip], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query teammates: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (bib, name, finish_id, mark_count) =
+            row.map_err(|e| format!("read teammate: {e}"))?;
+        out.push(TeamPunchCopyPerson {
+            bib,
+            name,
+            has_finish: finish_id.is_some(),
+            mark_count,
+            finish_participant_id: finish_id,
+        });
+    }
+    Ok(out)
+}
+
+fn finishes_for_bib(
+    conn: &Connection,
+    logical_id: i64,
+) -> Result<Vec<(i64, Option<String>)>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, chip_raw_id
+            FROM participants
+            WHERE CAST(TRIM(participant_id) AS INTEGER) = ?
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| format!("prepare finish lookup: {e}"))?;
+    let rows = stmt
+        .query_map(params![logical_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| format!("query finishes: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read finish: {e}"))?);
+    }
+    Ok(out)
+}
+
 pub fn add_start_protocol_course(
     conn: &Connection,
     entry_id: i64,
@@ -11693,11 +12307,12 @@ mod tests {
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot, import_phone_protocol,
         import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
-        delete_finish_participant,
+        delete_finish_participant, copy_team_punches, mark_did_not_finish, team_punch_copy_options,
         build_start_pack, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
         FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, register_search_functions, resolve_orient_leg_to,
+        STATUS_DNS, STATUS_DNF, STATUS_DQ, STATUS_OK,
         set_setting_value, suggested_start_time, ExclusionRule, Mark, Settings,
     };
     use rusqlite::Connection;
@@ -11943,6 +12558,44 @@ mod tests {
         .unwrap();
         let bibs: Vec<_> = rows.iter().map(|r| r.participant_id.as_str()).collect();
         assert_eq!(bibs, vec!["1", "2", "10"]);
+    }
+
+    #[test]
+    fn results_sort_dnf_after_disqualified() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        for (bib, name, status, points) in [
+            ("3", "Не финишировал", STATUS_DNF, 90_i32),
+            ("1", "Ок", STATUS_OK, 100),
+            ("2", "Дискв", STATUS_DQ, 80),
+            ("4", "Не стартовал", STATUS_DNS, 0),
+        ] {
+            conn.execute(
+                "INSERT INTO results(participant_id, name, status, points_raw, penalty_points, points_final, elapsed_seconds, delay_seconds, penalty_minutes, diagnostics_json)
+                 VALUES(?, ?, ?, ?, 0, ?, 0, 0, 0, '{}')",
+                rusqlite::params![bib, name, status, points, points],
+            )
+            .unwrap();
+        }
+        let (rows, _) = query_results(
+            &conn,
+            50,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let statuses: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(
+            statuses,
+            vec![STATUS_OK, STATUS_DQ, STATUS_DNF, STATUS_DNS]
+        );
     }
 
     #[test]
@@ -12497,6 +13150,128 @@ mod tests {
 
         let err = delete_finish_participant(&mut conn, finish_id).unwrap_err();
         assert!(err.contains("не найдена"));
+    }
+
+    #[test]
+    fn copy_team_punches_creates_teammate_finish() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "start_mode", "station").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name, format_name, team_id) VALUES('8', 'Иванов', '4ч', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name, format_name, team_id) VALUES('9', 'Петров', '4ч', 1)",
+            [],
+        )
+        .unwrap();
+        import_phone_snapshot(
+            &mut conn,
+            r#"{
+                "items":[{
+                    "id":"q1",
+                    "uid":"AA11",
+                    "logicalId":8,
+                    "punches":[
+                        {"cp":241,"time":"10:00:00"},
+                        {"cp":32,"time":"10:20:00"},
+                        {"cp":240,"time":"12:00:00"}
+                    ]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let source_id: i64 = conn
+            .query_row("SELECT id FROM participants WHERE participant_id = '8'", [], |r| r.get(0))
+            .unwrap();
+        let result_id: i64 = conn
+            .query_row("SELECT id FROM results WHERE participant_id = '8'", [], |r| r.get(0))
+            .unwrap();
+        let options = team_punch_copy_options(&conn, result_id).unwrap();
+        assert_eq!(options.teammates.len(), 1);
+        assert_eq!(options.teammates[0].bib, "9");
+        assert!(!options.teammates[0].has_finish);
+
+        let message = copy_team_punches(&mut conn, source_id, "9").unwrap();
+        assert!(message.contains("добавлен"));
+        let marks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM marks_raw WHERE finish_participant_id = (SELECT id FROM participants WHERE participant_id = '9')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marks, 3);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM results WHERE participant_id = '9'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(status, "Не стартовал");
+        let note: String = conn
+            .query_row(
+                "SELECT payload_json FROM manual_corrections WHERE correction_type = 'copy_punches'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(note.contains("8"));
+
+        copy_team_punches(&mut conn, source_id, "9").unwrap();
+        let finishes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants WHERE participant_id = '9'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(finishes, 1);
+    }
+
+    #[test]
+    fn copy_team_punches_rejects_orient() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        conn.execute(
+            "INSERT INTO participants(participant_id, name, start_station_id, start_time, source_row, course_name)
+             VALUES('1', 'A', 241, '2026-08-02 10:00:00', 0, 'D1')",
+            [],
+        )
+        .unwrap();
+        let err = copy_team_punches(&mut conn, 1, "2").unwrap_err();
+        assert!(err.contains("рогейн"));
+    }
+
+    #[test]
+    fn mark_did_not_finish_adds_empty_finish() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        conn.execute(
+            "INSERT INTO start_protocol(participant_id, name, format_name) VALUES('9', 'Петров', '4ч')",
+            [],
+        )
+        .unwrap();
+        recalculate(&mut conn).unwrap();
+        let status_before: String = conn
+            .query_row("SELECT status FROM results WHERE participant_id = '9'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status_before, "Не стартовал");
+        mark_did_not_finish(&mut conn, "9").unwrap();
+        let (status, finish): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finish_participant_id FROM results WHERE participant_id = '9'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "DNF");
+        assert!(finish.is_some());
+        let marks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM marks_raw", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marks, 0);
     }
 
     #[test]

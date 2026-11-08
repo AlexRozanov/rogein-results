@@ -12,7 +12,7 @@ type NativeResultRow = {
   chip_raw_id?: string | null;
   participant_id: string;
   name: string;
-  status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "Нет в протоколе";
+  status: "OK" | "Дисквалификация" | "Ошибка" | "Не стартовал" | "DNF" | "Нет в протоколе";
   format_id: number | null;
   format_name: string;
   team_id?: number | null;

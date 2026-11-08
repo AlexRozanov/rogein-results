@@ -131,6 +131,8 @@ import ru.rogein.chip.parse.CP_FINISH
 import ru.rogein.chip.parse.OrientMark
 import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.STATUS_DNS
+import ru.rogein.chip.parse.STATUS_DNF
+import ru.rogein.chip.parse.isDnfUid
 import ru.rogein.chip.parse.STATUS_DQ
 import ru.rogein.chip.parse.STATUS_ERR
 import ru.rogein.chip.parse.STATUS_OK
@@ -139,6 +141,12 @@ import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.classifyActualPunches
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
+import ru.rogein.chip.parse.PunchCopyCandidate
+import ru.rogein.chip.parse.PunchCopyFinish
+import ru.rogein.chip.parse.PunchCopyPerson
+import ru.rogein.chip.parse.punchCopyCandidateByNumber
+import ru.rogein.chip.parse.punchCopySources
+import ru.rogein.chip.parse.punchCopyTargets
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.courseProgress
 import ru.rogein.chip.parse.filterCourseCps
@@ -150,6 +158,8 @@ import ru.rogein.chip.parse.rogaineSplitRows
 import ru.rogein.chip.parse.RogaineSplitKind
 import ru.rogein.chip.parse.protocolRunStatus
 import ru.rogein.chip.parse.ProtocolRunStatus
+import ru.rogein.chip.parse.COPY_PUNCHES
+import ru.rogein.chip.parse.DID_NOT_FINISH
 import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.AwardCategory
@@ -200,16 +210,21 @@ private val TeamBraceColor = Color(0xFF94A3B8)
 internal fun personProtocolStatus(
     person: StartPerson,
     finishedCourses: List<String>,
-): ProtocolRunStatus = protocolRunStatus(
-    issued = person.issued,
-    issuedCourse = person.issuedCourse,
-    currentCourse = person.currentCourse,
-    finishedCourses = finishedCourses,
-)
+    didNotFinish: Boolean = false,
+): ProtocolRunStatus {
+    if (didNotFinish) return ProtocolRunStatus.DidNotFinish
+    return protocolRunStatus(
+        issued = person.issued,
+        issuedCourse = person.issuedCourse,
+        currentCourse = person.currentCourse,
+        finishedCourses = finishedCourses,
+    )
+}
 
 internal fun protocolStatusColor(status: ProtocolRunStatus): Color = when (status) {
     ProtocolRunStatus.OnCourse -> Danger
     ProtocolRunStatus.Finished -> OkGreen
+    ProtocolRunStatus.DidNotFinish -> Warn
     ProtocolRunStatus.NotStarted -> Muted
 }
 
@@ -655,11 +670,14 @@ fun ProtocolScreen(
     onCourseCheck: (Boolean) -> Unit,
     onCourseCheckCourse: (String) -> Unit,
     onClearChip: () -> Unit,
+    corrections: List<CorrectionEntity> = emptyList(),
+    onMarkDidNotFinish: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var pane by remember { mutableStateOf(if (courseCheckOn) ProtocolPane.Check else ProtocolPane.People) }
     var confirmDelete by remember { mutableStateOf<StartPerson?>(null) }
     var confirmLeave by remember { mutableStateOf<StartPerson?>(null) }
+    var confirmDnf by remember { mutableStateOf<StartPerson?>(null) }
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
     val editorOpen = pane == ProtocolPane.People && !searching && (addingNew || selected != null)
@@ -695,7 +713,11 @@ fun ProtocolScreen(
             person.id.toString().contains(q) ||
             (person.teamId > 0 && (person.teamLabel.lowercase().contains(q) || person.teamId.toString() == q))
         if (!nameHit) return@filter false
-        val status = personProtocolStatus(person, finishedById[person.id].orEmpty())
+        val status = personProtocolStatus(
+            person,
+            finishedById[person.id].orEmpty(),
+            EventStore.isDidNotFinish(person.id, corrections),
+        )
         statusFilter.isEmpty() || status in statusFilter
     }.let { rows ->
         if (!isRogaine(sportKind)) rows
@@ -752,6 +774,16 @@ fun ProtocolScreen(
                 },
                 onDelete = if (selected != null && !addingNew) {
                     { confirmDelete = selected }
+                } else {
+                    null
+                },
+                onMarkDidNotFinish = if (
+                    selected != null &&
+                    !addingNew &&
+                    !EventStore.isDidNotFinish(selected.id, corrections) &&
+                    items.none { it.logicalId == selected.id && it.punchCount > 0 && !isDnfUid(it.uid) }
+                ) {
+                    { confirmDnf = selected }
                 } else {
                     null
                 },
@@ -1010,7 +1042,11 @@ fun ProtocolScreen(
                 itemsIndexed(filtered, key = { _, person -> person.id }) { index, person ->
                     PersonProtocolLine(
                         person = person,
-                        status = personProtocolStatus(person, finishedById[person.id].orEmpty()),
+                        status = personProtocolStatus(
+                            person,
+                            finishedById[person.id].orEmpty(),
+                            EventStore.isDidNotFinish(person.id, corrections),
+                        ),
                         selected = person.id == selected?.id,
                         onClick = { onSelect(person.id) },
                         emptyCourseLabel = if (rogaine) "без формата" else "без дистанции",
@@ -1075,6 +1111,29 @@ fun ProtocolScreen(
         }
         }
         }
+    }
+    confirmDnf?.let { person ->
+        AlertDialog(
+            onDismissRequest = { confirmDnf = null },
+            title = { Text("Не финишировал?") },
+            text = {
+                Text(
+                    "№ ${person.id} ${person.displayName} будет добавлен в финишный протокол без отметок, статус «не финишировал». Выдача на этом телефоне не нужна.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val id = person.id
+                        confirmDnf = null
+                        onMarkDidNotFinish(id)
+                    },
+                ) { Text("Добавить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDnf = null }) { Text("Отмена") }
+            },
+        )
     }
     confirmLeave?.let { person ->
         AlertDialog(
@@ -1215,6 +1274,7 @@ private fun ProtocolPersonEditor(
     onClose: () -> Unit,
     onLeaveTeam: (() -> Unit)? = null,
     onDelete: (() -> Unit)?,
+    onMarkDidNotFinish: (() -> Unit)? = null,
     numberFocus: FocusRequester,
 ) {
     val editorScroll = rememberScrollState()
@@ -1383,6 +1443,9 @@ private fun ProtocolPersonEditor(
         ) {
             Button(onClick = onSavePerson) {
                 Text(if (addingNew) "Сохранить" else "Обновить")
+            }
+            if (onMarkDidNotFinish != null) {
+                CompactTextButton("Не финишировал", onMarkDidNotFinish, Warn)
             }
             if (onDelete != null) {
                 CompactTextButton("Удалить", onDelete, Danger)
@@ -2361,6 +2424,7 @@ fun ResultsScreen(
     onPickFinishCsv: () -> Unit = {},
     onDeleteFinish: (String) -> Unit = {},
     onReassignFinish: (String, Int) -> Unit = { _, _ -> },
+    onCopyTeamPunches: (String, Int) -> Unit = { _, _ -> },
     sportKind: String = SPORT_ORIENT,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
@@ -2507,6 +2571,9 @@ fun ResultsScreen(
                                 reassignRow = live
                                 reassignText = ""
                             },
+                            onCopyTeamPunches = onCopyTeamPunches,
+                            allResults = results,
+                            people = people,
                             canPrint = canPrint,
                             onPrint = onPrint,
                             rogaine = rogaine,
@@ -2656,6 +2723,9 @@ private fun ResultProtocolRow(
     onDeleteFinish: () -> Unit = {},
     canChangeNumber: Boolean = false,
     onChangeNumber: () -> Unit = {},
+    onCopyTeamPunches: (String, Int) -> Unit = { _, _ -> },
+    allResults: List<ScoredResult> = emptyList(),
+    people: List<StartPerson> = emptyList(),
     rogaine: Boolean = false,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
@@ -2771,6 +2841,9 @@ private fun ResultProtocolRow(
                 onDeleteFinish = onDeleteFinish,
                 canChangeNumber = canChangeNumber,
                 onChangeNumber = onChangeNumber,
+                onCopyTeamPunches = onCopyTeamPunches,
+                allResults = allResults,
+                people = people,
                 canPrint = canPrint,
                 onPrint = onPrint,
                 rogaine = rogaine,
@@ -2798,6 +2871,9 @@ private fun ResultRowDetails(
     onDeleteFinish: () -> Unit = {},
     canChangeNumber: Boolean = false,
     onChangeNumber: () -> Unit = {},
+    onCopyTeamPunches: (String, Int) -> Unit = { _, _ -> },
+    allResults: List<ScoredResult> = emptyList(),
+    people: List<StartPerson> = emptyList(),
     canPrint: Boolean,
     onPrint: (ScoredResult) -> Unit,
     rogaine: Boolean = false,
@@ -2815,6 +2891,23 @@ private fun ResultRowDetails(
     val addable = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
     var marksOpen by remember { mutableStateOf(false) }
     var courseChangeOpen by remember { mutableStateOf(false) }
+    var copyPrompt by remember { mutableStateOf<PunchCopyCandidate?>(null) }
+    var copyTakeFrom by remember { mutableStateOf(false) }
+    var extraCopyNumber by remember { mutableStateOf("") }
+    val copyPeople = remember(people) {
+        people.map { PunchCopyPerson(it.id, it.name, it.teamId) }
+    }
+    val copyFinishes = remember(allResults) {
+        allResults.map { PunchCopyFinish(it.queueId, it.logicalId, it.punches.size) }
+    }
+    val copySources = remember(row.logicalId, row.teamId, copyPeople, copyFinishes, rogaine) {
+        if (!rogaine) emptyList() else punchCopySources(row.logicalId, row.teamId, copyPeople, copyFinishes)
+    }
+    val copyTargets = remember(row.logicalId, row.teamId, copyPeople, copyFinishes, rogaine, row.punches.size) {
+        if (!rogaine || row.punches.isEmpty()) emptyList()
+        else punchCopyTargets(row.logicalId, row.teamId, copyPeople, copyFinishes)
+    }
+    val copiedFrom = EventStore.copiedFromLogicalId(row.logicalId, corrections)
     EditorCard(
         onClose = onClose,
         modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
@@ -2844,6 +2937,66 @@ private fun ResultRowDetails(
                 color = Warn,
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+        if (copiedFrom != null) {
+            val fromName = people.find { it.id == copiedFrom }?.name.orEmpty()
+            Text(
+                if (fromName.isBlank()) "Отметки скопированы с № $copiedFrom"
+                else "Отметки скопированы с № $copiedFrom $fromName",
+                color = Warn,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (rogaine && !row.numberConflict && row.logicalId != null) {
+            copySources.forEach { candidate ->
+                CompactTextButton(
+                    "Отметки с № ${candidate.logicalId}",
+                    onClick = {
+                        copyTakeFrom = true
+                        copyPrompt = candidate
+                    },
+                )
+            }
+            copyTargets.forEach { candidate ->
+                CompactTextButton(
+                    if (candidate.createNew) {
+                        "Добавить № ${candidate.logicalId} с этими отметками"
+                    } else {
+                        "Скопировать отметки на № ${candidate.logicalId}"
+                    },
+                    onClick = {
+                        copyTakeFrom = false
+                        copyPrompt = candidate
+                    },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = extraCopyNumber,
+                    onValueChange = { extraCopyNumber = it.filter { ch -> ch.isDigit() }.take(5) },
+                    singleLine = true,
+                    label = { Text("Другой номер") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+                val extra = extraCopyNumber.toIntOrNull()?.let { number ->
+                    punchCopyCandidateByNumber(number, row.logicalId, copyPeople, copyFinishes)
+                }
+                TextButton(
+                    enabled = extra != null && (extra.punchCount > 0 || row.punches.isNotEmpty()),
+                    onClick = {
+                        val candidate = extra ?: return@TextButton
+                        copyTakeFrom = row.punches.size < candidate.punchCount
+                        copyPrompt = candidate
+                    },
+                ) {
+                    Text("Копировать")
+                }
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2891,7 +3044,7 @@ private fun ResultRowDetails(
                     it.type == "add_cp" ||
                         it.type == "assign_course" ||
                         (rogaine && it.type == "remove_cp")
-                    )
+                    ) && it.type != COPY_PUNCHES
             }
             if (personal.isNotEmpty()) {
                 Text("Персональные корректировки", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -2934,6 +3087,57 @@ private fun ResultRowDetails(
             onConfirm = { next ->
                 onAssignCourse(id, row.course, next)
                 courseChangeOpen = false
+            },
+        )
+    }
+    copyPrompt?.let { candidate ->
+        val takeFrom = copyTakeFrom
+        val sourceId = if (takeFrom) candidate.queueId else row.queueId
+        val targetId = if (takeFrom) row.logicalId else candidate.logicalId
+        val sourceLabel = if (takeFrom) {
+            "№ ${candidate.logicalId} ${candidate.name}".trim()
+        } else {
+            "№ ${row.logicalId ?: "—"} ${row.name}".trim()
+        }
+        val targetLabel = if (takeFrom) {
+            "№ ${row.logicalId ?: "—"} ${row.name}".trim()
+        } else {
+            "№ ${candidate.logicalId} ${candidate.name}".trim()
+        }
+        val punchCount = if (takeFrom) candidate.punchCount else row.punches.size
+        val createNew = !takeFrom && candidate.createNew
+        AlertDialog(
+            onDismissRequest = { copyPrompt = null },
+            title = {
+                Text(if (createNew) "Добавить напарника с отметками?" else "Скопировать отметки?")
+            },
+            text = {
+                Text(
+                    buildString {
+                        if (createNew) {
+                            append("$targetLabel будет добавлен в финиш с $punchCount отметками $sourceLabel.")
+                        } else {
+                            append("Скопировать $punchCount отметок с $sourceLabel на $targetLabel?")
+                            append(" Текущие отметки $targetLabel будут заменены.")
+                        }
+                        append(" Выдача на этом телефоне не нужна.")
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = sourceId != null && targetId != null && punchCount > 0,
+                    onClick = {
+                        val from = sourceId
+                        val to = targetId
+                        copyPrompt = null
+                        extraCopyNumber = ""
+                        if (from != null && to != null) onCopyTeamPunches(from, to)
+                    },
+                ) { Text(if (createNew) "Добавить" else "Скопировать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { copyPrompt = null }) { Text("Отмена") }
             },
         )
     }
@@ -4143,6 +4347,7 @@ private fun statusLabel(status: String): String = when (status) {
     STATUS_OK -> "OK"
     STATUS_DQ -> "дискв."
     STATUS_DNS -> "не стартовал"
+    STATUS_DNF -> "не финишировал"
     STATUS_ERR -> "ошибка"
     else -> status
 }
@@ -4151,6 +4356,7 @@ private fun statusShort(status: String): String = when (status) {
     STATUS_OK -> "OK"
     STATUS_DQ -> "дискв."
     STATUS_DNS -> "н/с"
+    STATUS_DNF -> "н/ф"
     STATUS_ERR -> "ошибка"
     else -> status
 }
@@ -4158,7 +4364,7 @@ private fun statusShort(status: String): String = when (status) {
 private fun statusColor(status: String): Color = when (status) {
     STATUS_OK -> OkGreen
     STATUS_DQ, STATUS_ERR -> Danger
-    STATUS_DNS -> Muted
+    STATUS_DNS, STATUS_DNF -> Muted
     else -> Warn
 }
 
@@ -4169,6 +4375,8 @@ private fun formatCp(cp: Int, settings: EventSettings): String = when (cp) {
 }
 
 internal fun correctionLabel(row: CorrectionEntity, rogaine: Boolean = false): String = when (row.type) {
+    COPY_PUNCHES -> "отметки с № ${EventStore.copiedFromLogicalId(row.logicalId, listOf(row)) ?: "—"}"
+    DID_NOT_FINISH -> "не финишировал"
     "add_cp" -> "добавлен КП ${EventStore.correctionCp(row) ?: "—"}"
     "assign_course" -> "дистанция «${EventStore.correctionCourse(row)}»"
     "remove_cp" -> {

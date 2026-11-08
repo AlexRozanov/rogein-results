@@ -87,6 +87,8 @@ pub async fn publish_event(
 
     if let Some(map) = payload.map {
         save_map_from_base64(&mut tx, media_dir, slug, event_id, map).await?;
+    } else {
+        copy_pack_map_to_event(&mut tx, media_dir, slug, event_id).await?;
     }
 
     complete_matching_upcoming(&mut tx, slug, event_id).await?;
@@ -372,6 +374,57 @@ pub async fn publish_map(
     )
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn copy_pack_map_to_event(
+    tx: &mut Transaction<'_, Postgres>,
+    media_dir: &Path,
+    slug: &str,
+    event_id: i64,
+) -> anyhow::Result<()> {
+    let pack: Option<(Option<String>, Option<String>, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT map_file_name, map_mime, map_width, map_height FROM event_packs WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((name, mime, width, height)) = pack else {
+        return Ok(());
+    };
+    let Some(name) = name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let file_name = std::path::Path::new(&name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("map.bin")
+        .to_string();
+    let src = media_dir.join("packs").join(slug).join(&file_name);
+    if !src.is_file() {
+        return Ok(());
+    }
+    let dest_dir = media_dir.join("events").join(slug);
+    std::fs::create_dir_all(&dest_dir)?;
+    std::fs::copy(&src, dest_dir.join(&file_name))?;
+    sqlx::query(
+        r#"
+        UPDATE events
+        SET map_file_name = $1,
+            map_mime = COALESCE($2, map_mime),
+            map_width = COALESCE(map_width, $3),
+            map_height = COALESCE(map_height, $4)
+        WHERE id = $5
+        "#,
+    )
+    .bind(&file_name)
+    .bind(mime)
+    .bind(width.filter(|v| *v > 0))
+    .bind(height.filter(|v| *v > 0))
+    .bind(event_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

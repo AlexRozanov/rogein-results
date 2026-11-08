@@ -33,8 +33,11 @@ import ru.rogein.chip.parse.applyRogaineFormat
 import ru.rogein.chip.parse.assignPlaces
 import ru.rogein.chip.parse.assignRogaineTeamPlaces
 import ru.rogein.chip.parse.calculateOrientResult
+import ru.rogein.chip.parse.COPY_PUNCHES
+import ru.rogein.chip.parse.DID_NOT_FINISH
 import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
+import ru.rogein.chip.parse.STATUS_DNF
 import ru.rogein.chip.parse.calculateRogaineResult
 import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
@@ -43,6 +46,7 @@ import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.orientCourseLegs
 import ru.rogein.chip.parse.personAwardAge
 import ru.rogein.chip.parse.personAwardCategories
+import ru.rogein.chip.parse.protocolStatusRank
 import ru.rogein.chip.parse.storedBirthDate
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
@@ -230,6 +234,40 @@ class EventStore(
                 logicalId = logicalId,
                 courseName = "",
                 payloadJson = JSONObject().put("cp_number", cp).put("remove_mode", mode).toString(),
+            ),
+        )
+    }
+
+    suspend fun setDidNotFinish(logicalId: Int) {
+        if (logicalId <= 0) return
+        if (isDidNotFinish(logicalId, eventDao.listCorrections())) return
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = DID_NOT_FINISH,
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = "{}",
+            ),
+        )
+    }
+
+    suspend fun clearDidNotFinish(logicalId: Int) {
+        eventDao.listCorrections()
+            .filter { it.type == DID_NOT_FINISH && it.logicalId == logicalId }
+            .forEach { eventDao.deleteCorrection(it.id) }
+    }
+
+    suspend fun setCopyPunchesNote(logicalId: Int, fromLogicalId: Int) {
+        if (logicalId <= 0 || fromLogicalId <= 0 || logicalId == fromLogicalId) return
+        eventDao.listCorrections()
+            .filter { it.type == COPY_PUNCHES && it.logicalId == logicalId }
+            .forEach { eventDao.deleteCorrection(it.id) }
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = COPY_PUNCHES,
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject().put("from_logical_id", fromLogicalId).toString(),
             ),
         )
     }
@@ -540,7 +578,10 @@ class EventStore(
                 val course = assigned.ifBlank { item.courseName.ifBlank { person?.currentCourse.orEmpty() } }
                 val punches = parsePunches(item.punchesJson)
                 val adds = addCpCounts(item.logicalId, course, corrections)
-                val calc = if (rogaine) {
+                val dnf = isDidNotFinish(item.logicalId, corrections)
+                val calc = if (dnf) {
+                    OrientCalc(STATUS_DNF, 0, 0, listOf(DID_NOT_FINISH))
+                } else if (rogaine) {
                     val override = formatOverrides[courseKey(course)]
                     calculateRogaineResult(
                         punches,
@@ -595,8 +636,16 @@ class EventStore(
                 .filter { it.teamId > 0 && !it.numberConflict }
                 .groupBy { it.teamId to courseKey(it.course) }
                 .mapValues { (_, rows) -> rows.mapNotNull { it.place }.minOrNull() ?: Int.MAX_VALUE }
+            val teamBestStatus = placed
+                .filter { it.teamId > 0 && !it.numberConflict }
+                .groupBy { it.teamId to courseKey(it.course) }
+                .mapValues { (_, rows) -> rows.minOf { protocolStatusRank(it.calc.status) } }
             return placed.sortedWith(
                 compareBy<ScoredResult> { courseKey(it.course) }
+                    .thenBy {
+                        teamBestStatus[it.teamId to courseKey(it.course)]
+                            ?: protocolStatusRank(it.calc.status)
+                    }
                     .thenBy { teamBestPlace[it.teamId to courseKey(it.course)] ?: it.place ?: Int.MAX_VALUE }
                     .thenBy { if (it.teamId > 0) 0 else 1 }
                     .thenBy { it.teamId }
@@ -619,6 +668,17 @@ class EventStore(
             payloadString(row.payloadJson, "remove_mode").ifBlank { ROGAINE_REMOVE_LEGS }
 
         fun correctionCourse(row: CorrectionEntity): String = payloadString(row.payloadJson, "course")
+
+        fun isDidNotFinish(logicalId: Int?, corrections: List<CorrectionEntity>): Boolean {
+            if (logicalId == null) return false
+            return corrections.any { it.type == DID_NOT_FINISH && it.logicalId == logicalId }
+        }
+
+        fun copiedFromLogicalId(logicalId: Int?, corrections: List<CorrectionEntity>): Int? {
+            if (logicalId == null) return null
+            return corrections.lastOrNull { it.type == COPY_PUNCHES && it.logicalId == logicalId }
+                ?.let { payloadInt(it.payloadJson, "from_logical_id") }
+        }
 
         fun rogaineAddedCps(logicalId: Int?, corrections: List<CorrectionEntity>): Set<Int> {
             if (logicalId == null) return emptySet()
@@ -1119,8 +1179,15 @@ class EventStore(
                 .filter { it.teamId > 0 }
                 .groupBy { it.teamId }
                 .mapValues { (_, teamRows) -> teamRows.mapNotNull { it.place }.minOrNull() ?: Int.MAX_VALUE }
+            val teamBestStatus = placed
+                .filter { it.teamId > 0 }
+                .groupBy { it.teamId }
+                .mapValues { (_, teamRows) -> teamRows.minOf { protocolStatusRank(it.calc.status) } }
             return placed.sortedWith(
-                compareBy<ScoredResult> { teamBestPlace[it.teamId] ?: it.place ?: Int.MAX_VALUE }
+                compareBy<ScoredResult> {
+                    teamBestStatus[it.teamId] ?: protocolStatusRank(it.calc.status)
+                }
+                    .thenBy { teamBestPlace[it.teamId] ?: it.place ?: Int.MAX_VALUE }
                     .thenBy { if (it.teamId > 0) 0 else 1 }
                     .thenBy { it.teamId }
                     .thenBy { it.place ?: Int.MAX_VALUE }
