@@ -232,6 +232,15 @@ const courseProgress = computed(() => {
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
 
+const compareAll = computed(() => String(route.query.cmp) === "all");
+
+function setCompare(mode: "group" | "all") {
+  const query = { ...route.query };
+  if (mode === "all") query.cmp = "all";
+  else delete query.cmp;
+  void router.replace({ query });
+}
+
 const routeStats = computed(() => {
   if (isOrient.value || !person.value || !event.value) return null;
   const group = selectedGroup.value;
@@ -253,7 +262,7 @@ const routeStats = computed(() => {
         }
       : null;
   const peers = event.value.results.filter(
-    (row) => group != null && row.award_group_id === group.id,
+    (row) => compareAll.value || (group != null && row.award_group_id === group.id),
   );
   const stored = person.value.distance_m;
   const totalMeters =
@@ -264,9 +273,11 @@ const routeStats = computed(() => {
     selfMarks: person.value.marks,
     peers: peers.map((row) => ({
       sourceId: String(row.participant_source_id),
+      teamId: row.team_id,
       marks: row.marks,
     })),
     selfSourceId: String(person.value.source_id),
+    selfTeamId: person.value.team_id,
     startCp: startCp.value,
     finishCp: finishCp.value,
     rogaine: true,
@@ -886,7 +897,17 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
         <p v-else class="muted">Карта для этого старта не опубликована.</p>
       </section>
       <section v-if="routeStats" class="person-legs">
-        <h2>Перегоны</h2>
+        <div class="legs-head">
+          <h2>Перегоны</h2>
+          <div class="legs-compare" role="group" aria-label="Сравнение">
+            <button type="button" :class="{ 'is-on': !compareAll }" @click="setCompare('group')">
+              В группе
+            </button>
+            <button type="button" :class="{ 'is-on': compareAll }" @click="setCompare('all')">
+              Все участники
+            </button>
+          </div>
+        </div>
         <div class="card marks-card legs-card">
           <div class="legs-scroll">
             <table

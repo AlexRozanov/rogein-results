@@ -23,8 +23,11 @@ export type PathVertex = {
 
 export type RoutePeer = {
   sourceId: string;
+  teamId?: number | null;
   marks: unknown;
 };
+
+type TimedPunch = { cp: number; ms: number };
 
 export type RouteLegRow = {
   n: number;
@@ -257,20 +260,93 @@ function isAhead(
   return score.reachedAt < self.reachedAt;
 }
 
+function competitorKey(sourceId: string, teamId?: number | null): string {
+  const tid = Number(teamId);
+  if (Number.isFinite(tid) && tid > 0) return `t:${tid}`;
+  return `p:${sourceId}`;
+}
+
+function uniqueBySource(peers: RoutePeer[]): RoutePeer[] {
+  const seen = new Set<string>();
+  const out: RoutePeer[] = [];
+  for (const peer of peers) {
+    const id = String(peer.sourceId);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(peer);
+  }
+  return out;
+}
+
+function competitorMembers(
+  peers: RoutePeer[],
+  selfSourceId: string,
+  selfTeamId: number | null | undefined,
+  startCp: number | null,
+  finishCp: number | null,
+): TimedPunch[][][] {
+  const selfKey = competitorKey(selfSourceId, selfTeamId);
+  const buckets = new Map<string, TimedPunch[][]>();
+  for (const peer of uniqueBySource(peers)) {
+    if (String(peer.sourceId) === selfSourceId) continue;
+    const key = competitorKey(peer.sourceId, peer.teamId);
+    if (key === selfKey) continue;
+    const list = buckets.get(key) ?? [];
+    list.push(timedWindow(peer.marks, startCp, finishCp));
+    buckets.set(key, list);
+  }
+  return [...buckets.values()];
+}
+
+function bestScoreAtElapsed(
+  members: TimedPunch[][],
+  elapsed: number,
+  startCp: number | null,
+  finishCp: number | null,
+  rogaine: boolean,
+) {
+  let best: { points: number; controls: number; reachedAt: number } | null = null;
+  for (const timed of members) {
+    const score = scoreAtElapsed(timed, elapsed, startCp, finishCp, rogaine);
+    if (best == null || isAhead(score, best, rogaine)) best = score;
+  }
+  return best ?? { points: 0, controls: 0, reachedAt: Number.POSITIVE_INFINITY };
+}
+
 function rankAtElapsed(
   selfElapsed: number,
   selfScore: { points: number; controls: number; reachedAt: number },
-  field: Array<Array<{ cp: number; ms: number }>>,
+  competitors: TimedPunch[][][],
   startCp: number | null,
   finishCp: number | null,
   rogaine: boolean,
 ): number {
   let better = 0;
-  for (const other of field) {
-    const score = scoreAtElapsed(other, selfElapsed, startCp, finishCp, rogaine);
+  for (const members of competitors) {
+    const score = bestScoreAtElapsed(members, selfElapsed, startCp, finishCp, rogaine);
     if (isAhead(score, selfScore, rogaine)) better += 1;
   }
   return better + 1;
+}
+
+function competitorPairSplits(competitors: TimedPunch[][][]): Map<string, number[]> {
+  const splitsByPair = new Map<string, number[]>();
+  for (const members of competitors) {
+    const best = new Map<string, number>();
+    for (const timed of members) {
+      for (const pair of collectPairs(timed)) {
+        const key = pairKey(pair.from, pair.to);
+        const prev = best.get(key);
+        if (prev == null || pair.splitSec < prev) best.set(key, pair.splitSec);
+      }
+    }
+    for (const [key, sec] of best) {
+      const list = splitsByPair.get(key) ?? [];
+      list.push(sec);
+      splitsByPair.set(key, list);
+    }
+  }
+  return splitsByPair;
 }
 
 function collectPairs(timed: Array<{ cp: number; ms: number }>) {
@@ -288,6 +364,7 @@ export function buildRouteStats(opts: {
   selfMarks: unknown;
   peers: RoutePeer[];
   selfSourceId: string;
+  selfTeamId?: number | null;
   startCp: number | null;
   finishCp: number | null;
   rogaine: boolean;
@@ -301,18 +378,19 @@ export function buildRouteStats(opts: {
   const pairs = collectPairs(timed);
   if (!pairs.length) return null;
 
-  const peerTimed = opts.peers
-    .filter((peer) => String(peer.sourceId) !== opts.selfSourceId)
-    .map((peer) => timedWindow(peer.marks, opts.startCp, opts.finishCp));
-  const allTimed = [timed, ...peerTimed];
-  const splitsByPair = new Map<string, number[]>();
-  for (const person of allTimed) {
-    for (const pair of collectPairs(person)) {
-      const key = pairKey(pair.from, pair.to);
-      const list = splitsByPair.get(key) ?? [];
-      list.push(pair.splitSec);
-      splitsByPair.set(key, list);
-    }
+  const competitors = competitorMembers(
+    opts.peers,
+    opts.selfSourceId,
+    opts.selfTeamId,
+    opts.startCp,
+    opts.finishCp,
+  );
+  const splitsByPair = competitorPairSplits(competitors);
+  for (const pair of pairs) {
+    const key = pairKey(pair.from, pair.to);
+    const list = splitsByPair.get(key) ?? [];
+    list.push(pair.splitSec);
+    splitsByPair.set(key, list);
   }
 
   const rows: RouteLegRow[] = [];
@@ -376,7 +454,14 @@ export function buildRouteStats(opts: {
     const pointsPerMin =
       pointsAdded > 0 && pair.splitSec > 0 ? pointsAdded / (pair.splitSec / 60) : null;
     const snapshot = scoreAtElapsed(timed, pair.cumSec, startCp, finishCp, opts.rogaine);
-    const place = rankAtElapsed(pair.cumSec, snapshot, allTimed, startCp, finishCp, opts.rogaine);
+    const place = rankAtElapsed(
+      pair.cumSec,
+      snapshot,
+      competitors,
+      startCp,
+      finishCp,
+      opts.rogaine,
+    );
     const placeDelta = prevPlace == null ? null : prevPlace - place;
     prevPlace = place;
     rows.push({
