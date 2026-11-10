@@ -48,8 +48,11 @@ type AwardGroup = {
   name: string;
   course_cps?: number[] | null;
   length_meters?: number | null;
+  lengthMeters?: number | null;
   climb_meters?: number | null;
+  climbMeters?: number | null;
   leg_meters?: Array<number | null> | null;
+  legMeters?: Array<number | null> | null;
 };
 
 type ResultRow = {
@@ -326,9 +329,10 @@ const orientSplitView = computed(() => {
   const start = startCp.value;
   const finish = finishCp.value;
   const controls = courseControls.value;
-  const legs = asOptionalIntList(selectedGroup.value?.leg_meters);
-  const lengthMeters = Number(selectedGroup.value?.length_meters);
-  const length = Number.isFinite(lengthMeters) && lengthMeters > 0 ? lengthMeters : null;
+  const group = selectedGroup.value;
+  const legs = asOptionalIntList(group?.leg_meters ?? group?.legMeters);
+  const lengthRaw = Number(group?.length_meters ?? group?.lengthMeters);
+  const length = Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
   const showPace = hasCourseDistances(length, legs);
   const startPunch = punches.find((row) => row.kind === "start") ?? punches[0];
   const t0 = parseMarkMs(startPunch.mark_time);

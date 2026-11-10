@@ -43,6 +43,7 @@ import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.remapCourseLegMeters
 import ru.rogein.chip.parse.orientCourseLegs
 import ru.rogein.chip.parse.personAwardAge
 import ru.rogein.chip.parse.personAwardCategories
@@ -1042,6 +1043,9 @@ class EventStore(
             val sortOrder: Int,
             val controls: List<Int>,
             val rows: List<ScoredResult>,
+            val lengthMeters: Int? = null,
+            val climbMeters: Int? = null,
+            val legMeters: List<Int?> = emptyList(),
         )
 
         private fun resultBuckets(
@@ -1055,6 +1059,8 @@ class EventStore(
             includeEmptyAwardGroups: Boolean,
             includeUnmatched: Boolean,
             emptyFormatLabel: String = "без дистанции",
+            startCp: Int = CP_START,
+            finishCp: Int = CP_FINISH,
         ): List<ResultBucket> {
             val award = awardGroups
             if (isRogaine(sportKind) && award.isNotEmpty()) {
@@ -1104,6 +1110,7 @@ class EventStore(
                 publishedKeys += key
                 val rows = byCourse[key].orEmpty()
                 if (rows.isEmpty()) return@forEachIndexed
+                val published = filterCourseCps(course.controls, removed)
                 buckets += ResultBucket(
                     id = index + 1,
                     key = key,
@@ -1111,8 +1118,17 @@ class EventStore(
                     genderMode = "any",
                     minAge = null,
                     sortOrder = index,
-                    controls = filterCourseCps(course.controls, removed),
+                    controls = published,
                     rows = rows,
+                    lengthMeters = course.lengthMeters,
+                    climbMeters = course.climbMeters,
+                    legMeters = remapCourseLegMeters(
+                        startCp = startCp,
+                        finishCp = finishCp,
+                        fullControls = course.controls,
+                        publishedControls = published,
+                        legs = course.legMeters,
+                    ),
                 )
             }
             byCourse.entries
@@ -1381,6 +1397,8 @@ class EventStore(
                 removed = removed,
                 includeEmptyAwardGroups = isRogaine(settings.sportKind),
                 includeUnmatched = false,
+                startCp = settings.startCp,
+                finishCp = settings.finishCp,
             )
             fun participantSource(row: ScoredResult): Long {
                 sourceByQueue[row.queueId]?.let { return it }
@@ -1436,7 +1454,10 @@ class EventStore(
                         .put("min_age", bucket.minAge ?: JSONObject.NULL)
                         .put("max_age", bucket.maxAge ?: JSONObject.NULL)
                         .put("sort_order", bucket.sortOrder)
-                        .put("course_cps", JSONArray(bucket.controls)),
+                        .put("course_cps", JSONArray(bucket.controls))
+                        .put("length_meters", bucket.lengthMeters ?: JSONObject.NULL)
+                        .put("climb_meters", bucket.climbMeters ?: JSONObject.NULL)
+                        .put("leg_meters", optionalIntJson(bucket.legMeters)),
                 )
                 for (row in bucket.rows) {
                     results.put(
@@ -1470,6 +1491,14 @@ class EventStore(
                 .put("map_width", settings.mapWidth ?: JSONObject.NULL)
                 .put("map_height", settings.mapHeight ?: JSONObject.NULL)
                 .toString()
+        }
+
+        private fun optionalIntJson(values: List<Int?>): JSONArray {
+            val array = JSONArray()
+            for (value in values) {
+                if (value == null) array.put(JSONObject.NULL) else array.put(value)
+            }
+            return array
         }
 
         /** One finish = one site participant. Same chip on D1 and D2 must not share source_id. */

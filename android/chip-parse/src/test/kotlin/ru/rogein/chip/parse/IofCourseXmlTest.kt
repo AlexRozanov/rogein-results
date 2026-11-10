@@ -74,4 +74,15 @@ class IofCourseXmlTest {
         assertTrue(hasCourseDistances(4820, meters.map { it }))
         assertFalse(hasCourseDistances(null, emptyList()))
     }
+
+    @Test
+    fun remapCourseLegMetersKeepsOfficialAdjacentLegs() {
+        val full = listOf(31, 32, 33)
+        val legs = listOf(100, 200, 150, 80)
+        assertEquals(legs, remapCourseLegMeters(241, 240, full, full, legs))
+        assertEquals(
+            listOf(100, null, 80),
+            remapCourseLegMeters(241, 240, full, listOf(31, 33), legs),
+        )
+    }
 }

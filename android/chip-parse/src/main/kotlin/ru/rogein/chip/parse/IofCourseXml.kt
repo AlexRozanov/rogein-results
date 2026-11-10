@@ -212,6 +212,36 @@ fun buildOrientSplitPrint(
     )
 }
 
+fun remapCourseLegMeters(
+    startCp: Int,
+    finishCp: Int,
+    fullControls: List<Int>,
+    publishedControls: List<Int>,
+    legs: List<Int?>,
+): List<Int?> {
+    if (legs.isEmpty()) return emptyList()
+    val orig = ArrayList<Int>(fullControls.size + 2).apply {
+        add(startCp)
+        addAll(fullControls)
+        add(finishCp)
+    }
+    val published = ArrayList<Int>(publishedControls.size + 2).apply {
+        add(startCp)
+        addAll(publishedControls)
+        add(finishCp)
+    }
+    return (0 until published.lastIndex).map { index ->
+        val from = published[index]
+        val to = published[index + 1]
+        val fromIdx = orig.indexOf(from)
+        if (fromIdx >= 0 && orig.getOrNull(fromIdx + 1) == to) {
+            legs.getOrNull(fromIdx)?.takeIf { it > 0 }
+        } else {
+            null
+        }
+    }
+}
+
 fun courseLegMeters(
     controls: List<Int>,
     legMeters: List<Int?>,
