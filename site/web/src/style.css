@@ -1006,6 +1006,15 @@ th { color: #64748b; font-weight: 600; }
   padding: 5px 6px;
 }
 
+.legs-table th.th-stack {
+  white-space: normal;
+  line-height: 1.15;
+}
+
+.legs-table th.th-stack span {
+  display: block;
+}
+
 .legs-table .col-leg {
   font-weight: 600;
   white-space: nowrap;
@@ -1036,7 +1045,6 @@ th { color: #64748b; font-weight: 600; }
 
 .legs-table .leg-points {
   font-weight: 700;
-  margin-right: 6px;
 }
 
 .legs-table .leg-live-place {

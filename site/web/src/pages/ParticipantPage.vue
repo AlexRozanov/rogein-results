@@ -899,15 +899,25 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
                   <th>Перегон</th>
                   <th>Время</th>
                   <th title="Лучшее время этого перегона в группе">Лучшее</th>
-                  <th title="Отставание от лучшего на этом перегоне">Потери</th>
-                  <th title="Место среди тех, кто бежал этот же перегон">Место</th>
+                  <th title="Отставание от лучшего на этом перегоне">Отставание</th>
+                  <th class="th-stack" title="Место среди тех, кто бежал этот же перегон">
+                    <span>Место на</span>
+                    <span>перегоне</span>
+                  </th>
                   <th v-if="routeStats.hasDistance" title="Длина перегона">Км</th>
-                  <th v-if="routeStats.hasDistance">Км/ч</th>
-                  <th v-if="routeStats.hasDistance">Мин/км</th>
-                  <th title="Баллы за минуту на перегоне">Б/мин</th>
-                  <th>От старта</th>
+                  <th v-if="routeStats.hasDistance">Скорость</th>
+                  <th v-if="routeStats.hasDistance">Темп</th>
+                  <th class="th-stack" title="Баллы за минуту на перегоне">
+                    <span>Баллов</span>
+                    <span>за минуту</span>
+                  </th>
+                  <th class="th-stack">
+                    <span>Общее</span>
+                    <span>время</span>
+                  </th>
                   <th v-if="routeStats.hasDistance">Σ км</th>
-                  <th title="Набранные баллы и место в этот момент">Баллы</th>
+                  <th>Баллы</th>
+                  <th title="Место в этот момент">Место</th>
                 </tr>
               </thead>
               <tbody>
@@ -932,8 +942,8 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
                   <td class="col-geo">{{ formatPointsPerMin(row.pointsPerMin) }}</td>
                   <td class="col-time">{{ formatRaceTime(row.cumSec) }}</td>
                   <td v-if="routeStats.hasDistance" class="col-geo">{{ formatKm(row.cumMeters) }}</td>
+                  <td class="leg-points">{{ row.cumPoints }}</td>
                   <td class="col-score">
-                    <span class="leg-points">{{ row.cumPoints }}</span>
                     <span class="leg-live-place">{{ row.place }}</span>
                     <span v-if="row.placeDelta != null && row.placeDelta > 0" class="place-up">▲{{ row.placeDelta }}</span>
                     <span v-else-if="row.placeDelta != null && row.placeDelta < 0" class="place-down">▼{{ -row.placeDelta }}</span>
