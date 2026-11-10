@@ -246,6 +246,12 @@ pub struct CourseRow {
     pub id: i64,
     pub name: String,
     pub controls: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
+    pub length_meters: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
+    pub climb_meters: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "legMeters")]
+    pub leg_meters: Vec<Option<i64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -754,7 +760,28 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
         "CREATE INDEX IF NOT EXISTS idx_leg_exclusion_rules_course ON leg_exclusion_rules(course_id)",
         [],
     )
-    .map_err(|e| format!("create idx_leg_exclusion_rules_course: {e}"))?;
+        .map_err(|e| format!("create idx_leg_exclusion_rules_course: {e}"))?;
+    if !table_has_column(conn, "courses", "length_meters")? {
+        conn.execute(
+            "ALTER TABLE courses ADD COLUMN length_meters INTEGER NULL",
+            [],
+        )
+        .map_err(|e| format!("add courses.length_meters: {e}"))?;
+    }
+    if !table_has_column(conn, "courses", "climb_meters")? {
+        conn.execute(
+            "ALTER TABLE courses ADD COLUMN climb_meters INTEGER NULL",
+            [],
+        )
+        .map_err(|e| format!("add courses.climb_meters: {e}"))?;
+    }
+    if !table_has_column(conn, "courses", "legs_json")? {
+        conn.execute(
+            "ALTER TABLE courses ADD COLUMN legs_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )
+        .map_err(|e| format!("add courses.legs_json: {e}"))?;
+    }
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS phone_chip_imports (
@@ -1450,8 +1477,9 @@ struct PhoneSnapshotPunch {
 
 /// Чипы из снимка телефона. Очередь на телефоне не меняется.
 /// Повтор того же `id` пропускается. Тот же логический **и** физический чип
-/// обновляет уже загруженный финиш (повторное считывание). Один логический
-/// номер на двух физических чипах не сливается — это ошибка выдачи.
+/// на **той же дистанции** обновляет уже загруженный финиш (повторное считывание).
+/// Тот же чип на другой дистанции — отдельный финиш (ориентирование: две дистанции подряд).
+/// Один логический номер на двух физических чипах одной дистанции не сливается.
 /// Полная замена финиша (CSV reset) сбрасывает эту память.
 pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneImportSummary, String> {
     let snapshot: PhoneSnapshotFile = serde_json::from_str(body)
@@ -1533,7 +1561,9 @@ pub fn import_phone_snapshot(conn: &mut Connection, body: &str) -> Result<PhoneI
     let mut planned = Vec::new();
     for row in prepared {
         let existing = match row.logical_id {
-            Some(logical_id) if logical_id > 0 => find_phone_finish_ids(&tx, &row.uid, logical_id)?,
+            Some(logical_id) if logical_id > 0 => {
+                find_phone_finish_ids(&tx, &row.uid, logical_id, &row.course_name)?
+            }
             _ => Vec::new(),
         };
         planned.push((row, existing));
@@ -1847,13 +1877,17 @@ struct CollapsedPhoneSnapshot {
     superseded_ids: Vec<String>,
 }
 
-fn phone_chip_identity(logical_id: Option<i64>, uid: &str) -> Option<(i64, String)> {
+fn phone_chip_identity(
+    logical_id: Option<i64>,
+    uid: &str,
+    course_name: Option<&str>,
+) -> Option<(i64, String, String)> {
     let logical_id = logical_id.filter(|id| *id > 0)?;
     let uid = normalize_phone_uid(uid);
     if uid.is_empty() {
         None
     } else {
-        Some((logical_id, uid))
+        Some((logical_id, uid, course_key(course_name.unwrap_or(""))))
     }
 }
 
@@ -1864,14 +1898,14 @@ fn normalize_phone_uid(raw: &str) -> String {
 fn collapse_phone_snapshot_items(items: Vec<PhoneSnapshotItem>) -> CollapsedPhoneSnapshot {
     let mut last_idx = HashMap::new();
     for (idx, item) in items.iter().enumerate() {
-        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid) {
+        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid, item.course_name.as_deref()) {
             last_idx.insert(key, idx);
         }
     }
     let mut out = Vec::new();
     let mut superseded_ids = Vec::new();
     for (idx, item) in items.into_iter().enumerate() {
-        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid) {
+        if let Some(key) = phone_chip_identity(item.logical_id, &item.uid, item.course_name.as_deref()) {
             if last_idx.get(&key) != Some(&idx) {
                 let id = item.id.trim().to_string();
                 if !id.is_empty() {
@@ -1892,6 +1926,7 @@ fn find_phone_finish_ids(
     conn: &Connection,
     uid: &str,
     logical_id: i64,
+    course_name: &str,
 ) -> Result<Vec<i64>, String> {
     let uid = normalize_phone_uid(uid);
     if uid.is_empty() || logical_id <= 0 {
@@ -1904,12 +1939,13 @@ fn find_phone_finish_ids(
             FROM participants
             WHERE UPPER(TRIM(IFNULL(chip_raw_id, ''))) = ?
               AND CAST(TRIM(participant_id) AS INTEGER) = ?
+              AND TRIM(IFNULL(course_name, '')) = TRIM(?)
             ORDER BY id
             "#,
         )
         .map_err(|e| format!("prepare phone duplicate lookup: {e}"))?;
     let rows = stmt
-        .query_map(params![uid, logical_id], |r| r.get(0))
+        .query_map(params![uid, logical_id, course_name.trim()], |r| r.get(0))
         .map_err(|e| format!("query phone duplicates: {e}"))?;
     let mut ids = Vec::new();
     for row in rows {
@@ -8083,11 +8119,44 @@ pub fn import_cp_legends_content(
     })
 }
 
+fn encode_leg_meters(legs: &[Option<i64>]) -> String {
+    let parts: Vec<String> = legs
+        .iter()
+        .map(|value| match value {
+            Some(n) => n.to_string(),
+            None => "null".to_string(),
+        })
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn decode_leg_meters(raw: &str) -> Vec<Option<i64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "[]" {
+        return Vec::new();
+    }
+    let inner = trimmed.trim_start_matches('[').trim_end_matches(']');
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() || part.eq_ignore_ascii_case("null") {
+                None
+            } else {
+                part.parse::<i64>().ok().filter(|n| *n > 0)
+            }
+        })
+        .collect()
+}
+
 pub fn list_courses(conn: &Connection) -> Result<Vec<CourseRow>, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT c.id, c.name, cc.seq, cc.cp_number
+            SELECT c.id, c.name, c.length_meters, c.climb_meters, c.legs_json, cc.seq, cc.cp_number
             FROM courses c
             LEFT JOIN course_controls cc ON cc.course_id = c.id
             ORDER BY c.name COLLATE NOCASE ASC, cc.seq ASC
@@ -8101,16 +8170,23 @@ pub fn list_courses(conn: &Connection) -> Result<Vec<CourseRow>, String> {
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<i64>>(2)?,
                 r.get::<_, Option<i64>>(3)?,
+                r.get::<_, String>(4).unwrap_or_else(|_| "[]".to_string()),
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
             ))
         })
         .map_err(|e| format!("query list courses: {e}"))?;
     let mut by_id: BTreeMap<i64, CourseRow> = BTreeMap::new();
     for row in rows {
-        let (id, name, _seq, cp) = row.map_err(|e| format!("read course row: {e}"))?;
+        let (id, name, length_meters, climb_meters, legs_json, _seq, cp) =
+            row.map_err(|e| format!("read course row: {e}"))?;
         let entry = by_id.entry(id).or_insert(CourseRow {
             id,
             name,
             controls: Vec::new(),
+            length_meters,
+            climb_meters,
+            leg_meters: decode_leg_meters(&legs_json),
         });
         if let Some(cp_number) = cp {
             entry.controls.push(cp_number);
@@ -8183,6 +8259,21 @@ pub fn save_course(
             return Err(format!("Дистанция «{name}» уже есть."));
         }
     }
+    let old_controls: Vec<i64> = if let Some(id) = course_id {
+        let mut stmt = tx
+            .prepare("SELECT cp_number FROM course_controls WHERE course_id = ? ORDER BY seq ASC")
+            .map_err(|e| format!("prepare old course controls: {e}"))?;
+        let rows = stmt
+            .query_map(params![id], |r| r.get::<_, i64>(0))
+            .map_err(|e| format!("query old course controls: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("read old course control: {e}"))?);
+        }
+        out
+    } else {
+        Vec::new()
+    };
     let id = if let Some(id) = course_id {
         let changed = tx
             .execute(
@@ -8200,12 +8291,36 @@ pub fn save_course(
         tx.last_insert_rowid()
     };
     replace_course_controls_tx(&tx, id, &name, &controls)?;
+    let keep_geometry = old_controls == controls;
+    if !keep_geometry {
+        tx.execute(
+            "UPDATE courses SET length_meters = NULL, climb_meters = NULL, legs_json = '[]' WHERE id = ?",
+            params![id],
+        )
+        .map_err(|e| format!("clear course geometry: {e}"))?;
+    }
+    let (length_meters, climb_meters, legs_json): (Option<i64>, Option<i64>, String) = tx
+        .query_row(
+            "SELECT length_meters, climb_meters, legs_json FROM courses WHERE id = ?",
+            params![id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get::<_, String>(2).unwrap_or_else(|_| "[]".to_string()),
+                ))
+            },
+        )
+        .map_err(|e| format!("load course geometry: {e}"))?;
     tx.commit()
         .map_err(|e| format!("commit save course: {e}"))?;
     Ok(CourseRow {
         id,
         name,
         controls,
+        length_meters,
+        climb_meters,
+        leg_meters: decode_leg_meters(&legs_json),
     })
 }
 
@@ -8232,6 +8347,31 @@ pub fn delete_course(conn: &Connection, course_id: i64) -> Result<(), String> {
 struct ParsedCourse {
     name: String,
     controls: Vec<i64>,
+    length_meters: Option<i64>,
+    climb_meters: Option<i64>,
+    leg_meters: Vec<Option<i64>>,
+}
+
+impl ParsedCourse {
+    fn from_txt(name: String, controls: Vec<i64>) -> Self {
+        Self {
+            name,
+            controls,
+            length_meters: None,
+            climb_meters: None,
+            leg_meters: Vec::new(),
+        }
+    }
+
+    fn from_iof(course: crate::iof_course::IofCourse) -> Self {
+        Self {
+            name: course.name,
+            controls: course.controls,
+            length_meters: course.length_meters,
+            climb_meters: course.climb_meters,
+            leg_meters: course.leg_meters,
+        }
+    }
 }
 
 fn is_start_or_finish_token(token: &str) -> bool {
@@ -8355,7 +8495,7 @@ fn parse_course_file_rows(csv_content: &str) -> Result<Vec<ParsedCourse>, String
                 "Строка {source_row}: у дистанции «{name}» нет контрольных пунктов"
             ));
         }
-        parsed.push(ParsedCourse { name, controls });
+        parsed.push(ParsedCourse::from_txt(name, controls));
     }
     Ok(parsed)
 }
@@ -8365,10 +8505,59 @@ pub fn import_courses_content(
     csv_content: &str,
     reset: bool,
 ) -> Result<CoursesImportSummary, String> {
-    let parsed = parse_course_file_rows(csv_content)?;
+    let xml = crate::iof_course::looks_like_iof_course_xml(csv_content);
+    let parsed = if xml {
+        crate::iof_course::parse_iof_course_xml(csv_content)?
+            .into_iter()
+            .map(ParsedCourse::from_iof)
+            .collect::<Vec<_>>()
+    } else {
+        parse_course_file_rows(csv_content)?
+    };
 
     if parsed.is_empty() {
         return Err("Файл дистанций пуст".to_string());
+    }
+
+    let existing = list_courses(conn)?;
+    if xml && !reset && !existing.is_empty() {
+        let pairs: Vec<(String, Vec<i64>)> = existing
+            .iter()
+            .map(|row| (row.name.clone(), row.controls.clone()))
+            .collect();
+        let incoming: Vec<crate::iof_course::IofCourse> = parsed
+            .iter()
+            .map(|row| crate::iof_course::IofCourse {
+                name: row.name.clone(),
+                controls: row.controls.clone(),
+                length_meters: row.length_meters,
+                climb_meters: row.climb_meters,
+                leg_meters: row.leg_meters.clone(),
+            })
+            .collect();
+        if crate::iof_course::courses_need_replace(&pairs, &incoming) {
+            return Err(format!(
+                "{}: Порядок КП в XML не совпадает с загруженными дистанциями.",
+                crate::iof_course::IOF_COURSE_MISMATCH
+            ));
+        }
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("courses transaction: {e}"))?;
+        let mut imported_rows = 0_i64;
+        for course in &parsed {
+            upsert_imported_course_tx(&tx, course, false)?;
+            imported_rows += 1;
+        }
+        let total_rows: i64 = tx
+            .query_row("SELECT COUNT(*) FROM courses", [], |r| r.get(0))
+            .map_err(|e| format!("count courses: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit courses import: {e}"))?;
+        return Ok(CoursesImportSummary {
+            imported_rows,
+            total_rows,
+        });
     }
 
     let tx = conn
@@ -8385,22 +8574,7 @@ pub fn import_courses_content(
 
     let mut imported_rows = 0_i64;
     for course in &parsed {
-        tx.execute(
-            r#"
-            INSERT INTO courses(name) VALUES(?)
-            ON CONFLICT(name) DO UPDATE SET name=excluded.name
-            "#,
-            params![course.name],
-        )
-        .map_err(|e| format!("upsert course «{}»: {e}", course.name))?;
-        let course_id: i64 = tx
-            .query_row(
-                "SELECT id FROM courses WHERE name = ? COLLATE NOCASE LIMIT 1",
-                params![course.name],
-                |r| r.get(0),
-            )
-            .map_err(|e| format!("load course id «{}»: {e}", course.name))?;
-        replace_course_controls_tx(&tx, course_id, &course.name, &course.controls)?;
+        upsert_imported_course_tx(&tx, course, true)?;
         imported_rows += 1;
     }
 
@@ -8413,6 +8587,91 @@ pub fn import_courses_content(
         imported_rows,
         total_rows,
     })
+}
+
+fn upsert_imported_course_tx(
+    tx: &rusqlite::Transaction<'_>,
+    course: &ParsedCourse,
+    replace_controls: bool,
+) -> Result<(), String> {
+    let existing_meta = tx
+        .query_row(
+            "SELECT id, length_meters, climb_meters, legs_json FROM courses WHERE name = ? COLLATE NOCASE LIMIT 1",
+            params![course.name],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, String>(3).unwrap_or_else(|_| "[]".to_string()),
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load course «{}»: {e}", course.name))?;
+    let existing = match existing_meta {
+        Some((id, length, climb, legs)) => {
+            Some((id, course_controls_tx(tx, id)?, length, climb, legs))
+        }
+        None => None,
+    };
+
+    tx.execute(
+        r#"
+        INSERT INTO courses(name, length_meters, climb_meters, legs_json)
+        VALUES(?, NULL, NULL, '[]')
+        ON CONFLICT(name) DO UPDATE SET name=excluded.name
+        "#,
+        params![course.name],
+    )
+    .map_err(|e| format!("upsert course «{}»: {e}", course.name))?;
+    let course_id: i64 = tx
+        .query_row(
+            "SELECT id FROM courses WHERE name = ? COLLATE NOCASE LIMIT 1",
+            params![course.name],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("load course id «{}»: {e}", course.name))?;
+    if replace_controls || existing.is_none() {
+        replace_course_controls_tx(tx, course_id, &course.name, &course.controls)?;
+    }
+    let same = existing
+        .as_ref()
+        .map(|row| row.1 == course.controls)
+        .unwrap_or(false);
+    let length = course
+        .length_meters
+        .or(if same { existing.as_ref().and_then(|row| row.2) } else { None });
+    let climb = course
+        .climb_meters
+        .or(if same { existing.as_ref().and_then(|row| row.3) } else { None });
+    let legs = if course.leg_meters.iter().any(Option::is_some) {
+        course.leg_meters.clone()
+    } else if same {
+        decode_leg_meters(&existing.as_ref().map(|row| row.4.clone()).unwrap_or_default())
+    } else {
+        Vec::new()
+    };
+    tx.execute(
+        "UPDATE courses SET length_meters = ?, climb_meters = ?, legs_json = ? WHERE id = ?",
+        params![length, climb, encode_leg_meters(&legs), course_id],
+    )
+    .map_err(|e| format!("update course geometry «{}»: {e}", course.name))?;
+    Ok(())
+}
+
+fn course_controls_tx(tx: &rusqlite::Transaction<'_>, course_id: i64) -> Result<Vec<i64>, String> {
+    let mut stmt = tx
+        .prepare("SELECT cp_number FROM course_controls WHERE course_id = ? ORDER BY seq ASC")
+        .map_err(|e| format!("prepare course controls: {e}"))?;
+    let rows = stmt
+        .query_map(params![course_id], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("query course controls: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read course control: {e}"))?);
+    }
+    Ok(out)
 }
 
 pub fn query_format_cp_type_rules(
@@ -9642,6 +9901,12 @@ pub struct StartPack {
 pub struct StartPackCourse {
     pub name: String,
     pub controls: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
+    pub length_meters: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
+    pub climb_meters: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "legMeters")]
+    pub leg_meters: Vec<Option<i64>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -9660,6 +9925,9 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
         .map(|row| StartPackCourse {
             name: row.name,
             controls: row.controls,
+            length_meters: row.length_meters,
+            climb_meters: row.climb_meters,
+            leg_meters: row.leg_meters,
         })
         .collect::<Vec<_>>();
     let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false, None, None)?;
@@ -9696,6 +9964,9 @@ fn start_pack_revision(sport: &str, courses: &[StartPackCourse], people: &[Start
     for course in courses {
         course.name.hash(&mut hasher);
         course.controls.hash(&mut hasher);
+        course.length_meters.hash(&mut hasher);
+        course.climb_meters.hash(&mut hasher);
+        course.leg_meters.hash(&mut hasher);
     }
     for person in people {
         person.id.hash(&mut hasher);
@@ -12692,6 +12963,66 @@ mod tests {
     }
 
     #[test]
+    fn import_iof_xml_courses_reads_length_and_legs() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        let text = include_str!("fixtures/iof-courses.xml");
+        import_courses_content(&conn, text, true).unwrap();
+        let courses = list_courses(&conn).unwrap();
+        let d1 = courses.iter().find(|c| c.name == "D1").unwrap();
+        let d2 = courses.iter().find(|c| c.name == "D2").unwrap();
+        assert_eq!(d1.length_meters, Some(4820));
+        assert_eq!(d1.controls.len(), 28);
+        assert_eq!(&d1.controls[..3], &[32, 43, 36]);
+        assert_eq!(d1.leg_meters.first().copied().flatten(), Some(133));
+        assert_eq!(d1.leg_meters.last().copied().flatten(), Some(274));
+        assert_eq!(d2.length_meters, Some(2310));
+        assert_eq!(d2.controls.len(), 14);
+    }
+
+    #[test]
+    fn import_iof_xml_merges_geometry_when_controls_match() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        let xml = include_str!("fixtures/iof-courses.xml");
+        let parsed = crate::iof_course::parse_iof_course_xml(xml).unwrap();
+        let d1_cps = parsed[0]
+            .controls
+            .iter()
+            .map(|cp| cp.to_string())
+            .collect::<Vec<_>>()
+            .join(";");
+        import_courses_content(&conn, &format!("D1;{d1_cps}\n"), true).unwrap();
+        import_courses_content(&conn, xml, false).unwrap();
+        let d1 = list_courses(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == "D1")
+            .unwrap();
+        assert_eq!(d1.length_meters, Some(4820));
+        assert_eq!(d1.controls, parsed[0].controls);
+        assert_eq!(d1.leg_meters.first().copied().flatten(), Some(133));
+    }
+
+    #[test]
+    fn import_iof_xml_rejects_mismatched_controls_until_replace() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        import_courses_content(&conn, "D1;31;32;33\n", true).unwrap();
+        let xml = include_str!("fixtures/iof-courses.xml");
+        let err = import_courses_content(&conn, xml, false).unwrap_err();
+        assert!(err.contains(crate::iof_course::IOF_COURSE_MISMATCH));
+        import_courses_content(&conn, xml, true).unwrap();
+        let d1 = list_courses(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == "D1")
+            .unwrap();
+        assert_eq!(d1.controls.first().copied(), Some(32));
+        assert_eq!(d1.length_meters, Some(4820));
+    }
+
+    #[test]
     fn start_pack_revision_is_stable_for_same_protocol() {
         let conn = memory_db();
         set_setting_value(&conn, "sport_kind", "orient").unwrap();
@@ -13089,6 +13420,55 @@ mod tests {
         assert_eq!(again.imported, 0);
         assert_eq!(again.updated, 0);
         assert_eq!(again.already_imported, 2);
+    }
+
+    #[test]
+    fn phone_snapshot_keeps_same_chip_two_courses() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        let body = r#"{
+            "items":[
+                {"id":"q1","uid":"AA","logicalId":8,"courseName":"спринт","punches":[{"cp":241,"time":"10:00:00"},{"cp":240,"time":"10:20:00"}]},
+                {"id":"q2","uid":"AA","logicalId":8,"courseName":"лес","punches":[{"cp":241,"time":"11:00:00"},{"cp":240,"time":"12:00:00"}]}
+            ]
+        }"#;
+        let summary = import_phone_snapshot(&mut conn, body).unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.updated, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        let courses: Vec<String> = conn
+            .prepare("SELECT course_name FROM participants ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(courses, vec!["спринт".to_string(), "лес".to_string()]);
+
+        let again = r#"{
+            "items":[
+                {"id":"q3","uid":"AA","logicalId":8,"courseName":"лес","punches":[{"cp":241,"time":"11:00:00"},{"cp":31,"time":"11:30:00"},{"cp":240,"time":"12:00:00"}]}
+            ]
+        }"#;
+        let updated = import_phone_snapshot(&mut conn, again).unwrap();
+        assert_eq!(updated.imported, 0);
+        assert_eq!(updated.updated, 1);
+        let count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after, 2);
+        let forest_cps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM marks_raw WHERE finish_participant_id = (SELECT id FROM participants WHERE course_name = 'лес')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(forest_cps, 3);
     }
 
     #[test]

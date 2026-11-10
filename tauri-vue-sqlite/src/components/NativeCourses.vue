@@ -41,6 +41,7 @@ const localBusy = ref(false);
 const coursesFile = ref<File | null>(null);
 const importDialogOpen = ref(false);
 const importExistingCount = ref(0);
+const mismatchOpen = ref(false);
 const dragFrom = ref<{ key: string; index: number } | null>(null);
 const dropAt = ref<{ key: string; index: number } | null>(null);
 const skipClick = ref(false);
@@ -344,6 +345,11 @@ async function onImportDialogReplace() {
   await runImport(true);
 }
 
+async function onMismatchReplace() {
+  mismatchOpen.value = false;
+  await runImport(true);
+}
+
 async function runImport(reset: boolean) {
   if (!coursesFile.value) {
     emit("status", "Выберите CSV с дистанциями.");
@@ -366,6 +372,11 @@ async function runImport(reset: boolean) {
     await refresh();
     emit("saved");
   } catch (error) {
+    if (!reset && String(error).includes("IOF_COURSE_MISMATCH")) {
+      mismatchOpen.value = true;
+      emit("status", "Порядок КП в XML не совпадает с загруженными дистанциями.");
+      return;
+    }
     emit("status", `Ошибка импорта дистанций: ${String(error)}`);
   } finally {
     localBusy.value = false;
@@ -386,15 +397,16 @@ defineExpose({ refresh });
       CSV: строка на дистанцию, <code>D1;31;32;33</code> или <code>D1;31 32 33</code>.
       Также файл WinOrient <code>.Courses.txt</code>:
       <code>D1 3,8 30 S1-36-31-…-F1</code> — S1 старт, F1 финиш, между ними порядок КП.
+      IOF XML 3.0 <code>CourseData</code> добавляет длину, набор высоты и длины перегонов.
     </p>
     <p v-if="removedCps.size" class="subtitle">
       Зачёркнутый КП снят в настройках для всех участников — как будто его не было на дистанции.
     </p>
     <div class="native-row">
       <FilePickerButton
-        button-label="Выбрать CSV дистанций"
+        button-label="Выбрать CSV/XML дистанций"
         empty-label="Файл не выбран"
-        accept=".csv,.txt,text/csv,text/plain"
+        accept=".csv,.txt,.xml,text/csv,text/plain,application/xml,text/xml"
         :disabled="isBusy()"
         @file-selected="onFileSelected"
       />
@@ -534,4 +546,22 @@ defineExpose({ refresh });
     @merge="onImportDialogMerge"
     @replace="onImportDialogReplace"
   />
+  <div v-if="mismatchOpen" class="modal-backdrop" @click.self="!isBusy() && (mismatchOpen = false)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Заменить дистанции?">
+      <div class="modal-header">
+        <h3>Заменить дистанции?</h3>
+      </div>
+      <p>Порядок КП в XML не совпадает с загруженными дистанциями. Заменить дистанции из XML?</p>
+      <div class="native-row" style="margin-top: 12px; flex-wrap: wrap">
+        <button type="button" :disabled="isBusy()" @click="mismatchOpen = false">Отменить</button>
+        <button
+          type="button"
+          :disabled="isBusy()"
+          @click="onMismatchReplace"
+        >
+          Заменить
+        </button>
+      </div>
+    </div>
+  </div>
 </template>

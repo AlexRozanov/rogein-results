@@ -3,6 +3,7 @@ package ru.rogein.chip.parse
 data class ReceiptMark(
     val cp: Int,
     val seconds: Int,
+    val added: Boolean = false,
 )
 
 data class SplitReceipt(
@@ -21,6 +22,11 @@ data class SplitReceipt(
     val penaltyPoints: Int = 0,
     val pointsFinal: Int = 0,
     val rogaine: Boolean = false,
+    val diagnostics: List<String> = emptyList(),
+    val courseControls: List<Int> = emptyList(),
+    val requiredControls: List<Int> = emptyList(),
+    val lengthMeters: Int? = null,
+    val legMeters: List<Int?> = emptyList(),
 )
 
 object ReceiptText {
@@ -48,29 +54,44 @@ object ReceiptText {
         lines += ""
         if (data.rogaine) {
             appendRogaineSplits(lines, data)
-        } else if (data.marks.isEmpty()) {
-            lines += "Нет отметок"
-        } else {
-            val t0 = data.marks.firstOrNull { it.cp == data.startCp }?.seconds
-                ?: data.marks.first().seconds
-            data.marks.forEachIndexed { index, mark ->
-                val elapsed = punchLegSeconds(t0, mark.seconds)
-                val leg = if (index == 0) 0 else punchLegSeconds(data.marks[index - 1].seconds, mark.seconds)
-                lines += splitLine(index + 1, mark.cp, elapsed, leg)
-            }
-        }
-        lines += ""
-        if (data.rogaine) {
+            lines += ""
             lines += "Все очки   ${data.pointsRaw}"
             if (data.penaltyPoints > 0) {
                 lines += "Штрафные очки ${data.penaltyPoints}"
             }
             lines += "Очки с учётом штрафных ${data.pointsFinal}"
+            lines += "Результат  ${formatElapsed(data.elapsedSeconds)}"
+            lines += "Отметка    ${receiptStatus(data.status)}"
+        } else {
+            appendOrientSplits(lines, data)
         }
-        lines += "Результат  ${formatElapsed(data.elapsedSeconds)}"
-        lines += "Отметка    ${receiptStatus(data.status)}"
         lines += ""
         return lines.joinToString("\n", postfix = "\n")
+    }
+
+    private fun appendOrientSplits(lines: MutableList<String>, data: SplitReceipt) {
+        val print = buildOrientSplitPrint(
+            punches = data.marks.map { OrientMark(it.cp, it.seconds, added = it.added) },
+            required = data.requiredControls.ifEmpty { data.courseControls },
+            startCp = data.startCp,
+            finishCp = data.finishCp,
+            elapsedSeconds = data.elapsedSeconds,
+            status = data.status,
+            diagnostics = data.diagnostics,
+            courseControls = data.courseControls,
+            lengthMeters = data.lengthMeters,
+            legMeters = data.legMeters,
+        )
+        if (print == null) {
+            lines += "Нет отметок"
+        } else {
+            print.startLine?.let { lines += it }
+            print.rows.forEach { lines += it.text }
+        }
+        lines += ""
+        lines += print?.resultLine ?: "Результат: ${formatRaceTime(data.elapsedSeconds)}"
+        print?.averageLine?.let { lines += it }
+        lines += print?.statusLine ?: "Отметка — ${resultStatusLine(data.status, data.diagnostics)}"
     }
 
     private fun appendRogaineSplits(lines: MutableList<String>, data: SplitReceipt) {
@@ -120,14 +141,6 @@ object ReceiptText {
         STATUS_DNF -> "не финишировал"
         STATUS_ERR -> "ошибка"
         else -> status
-    }
-
-    private fun splitLine(index: Int, cp: Int, elapsed: Int, leg: Int): String {
-        val n = index.toString().padStart(2)
-        val c = cp.toString().padStart(3)
-        val e = formatElapsed(elapsed).padStart(8)
-        val l = formatElapsed(leg).padStart(8)
-        return "$n $c$e$l"
     }
 
     private fun wrap(text: String): List<String> {

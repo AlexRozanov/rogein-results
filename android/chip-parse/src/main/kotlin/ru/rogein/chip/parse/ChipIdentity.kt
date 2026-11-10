@@ -48,7 +48,7 @@ fun classifyFinishEnqueue(
 fun numberConflictIds(rows: List<FinishQueueRef>): Set<String> {
     return rows
         .filter { it.logicalId != null }
-        .groupBy { it.logicalId }
+        .groupBy { it.logicalId to courseKey(it.courseName) }
         .filter { (_, group) ->
             group.map { normalizeChipUid(it.uid) }.filter { it.isNotEmpty() }.toSet().size > 1
         }

@@ -90,6 +90,19 @@ fun resultStatusLine(status: String, diagnostics: List<String> = emptyList()): S
 fun courseKey(name: String): String =
     name.trim().lowercase().replace(Regex("\\s+"), " ")
 
+fun uniqueCourseCopyName(source: String, existing: List<String>): String {
+    val names = existing.map { courseKey(it) }.toSet()
+    val trimmed = source.trim()
+    val base = "$trimmed (копия)"
+    if (courseKey(base) !in names) return base
+    var n = 2
+    while (true) {
+        val candidate = "$trimmed (копия $n)"
+        if (courseKey(candidate) !in names) return candidate
+        n++
+    }
+}
+
 fun parseDaySeconds(time: String): Int? {
     val parts = time.trim().split(':')
     if (parts.size < 2) return null

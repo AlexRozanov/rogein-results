@@ -22,18 +22,23 @@ class ReceiptTextTest {
                 startCp = 241,
                 elapsedSeconds = 72 * 60 + 5,
                 status = STATUS_OK,
+                courseControls = listOf(31),
+                requiredControls = listOf(31),
             ),
         )
         assertTrue(text.contains("27 октября 2026"))
         assertTrue(text.contains("Малахит-спринт"))
         assertTrue(text.contains("Дистанция D1"))
         assertTrue(text.contains("№ 8  Иванов Иван"))
-        assertTrue(text.contains("241"))
-        assertTrue(text.contains(" 31"))
-        assertTrue(text.contains("240"))
-        assertTrue(text.contains("Результат  1:12:05"))
-        assertTrue(text.contains("Отметка    OK"))
+        assertTrue(text.contains("Старт: 10:00:00"))
+        assertTrue(text.contains("( 31)"))
+        assertTrue(text.contains("Финиш:"))
+        assertTrue(!text.contains("241"))
+        assertTrue(!text.contains("240"))
+        assertTrue(text.contains("Результат: 1:12:05"))
+        assertTrue(text.contains("Отметка — OK"))
         assertTrue(!text.contains("/km"))
+        assertTrue(!text.contains("/км"))
     }
 
     @Test
@@ -56,7 +61,7 @@ class ReceiptTextTest {
                 status = STATUS_DQ,
             ),
         )
-        assertTrue(text.contains("Отметка    дискв."))
+        assertTrue(text.contains("Отметка — Дисквалификация: превышение лимита времени"))
         assertTrue(!text.contains("превышение контрольного времени"))
     }
 
@@ -93,5 +98,36 @@ class ReceiptTextTest {
         assertTrue(text.contains("Штрафные очки 3"))
         assertTrue(text.contains("Очки с учётом штрафных 9"))
         assertTrue(text.contains("Отметка    OK"))
+    }
+
+    @Test
+    fun orientReceiptIncludesPaceWhenCourseHasLengths() {
+        val text = ReceiptText.format(
+            SplitReceipt(
+                date = "2026-10-27",
+                title = "",
+                course = "D1",
+                bib = "8",
+                name = "Иванов",
+                marks = listOf(
+                    ReceiptMark(241, 10 * 3600),
+                    ReceiptMark(32, 10 * 3600 + 50),
+                    ReceiptMark(240, 10 * 3600 + 32 * 60 + 46),
+                ),
+                startCp = 241,
+                elapsedSeconds = 32 * 60 + 46,
+                status = STATUS_OK,
+                courseControls = listOf(32),
+                requiredControls = listOf(32),
+                lengthMeters = 4820,
+                legMeters = listOf(133, 274),
+            ),
+        )
+        assertTrue(text.contains("Старт: 10:00:00"))
+        assertTrue(text.contains("( 32)"))
+        assertTrue(text.contains("/км"))
+        assertTrue(text.contains("Средняя скорость"))
+        assertTrue(text.contains("Финиш:"))
+        assertTrue(text.contains("Результат: 0:32:46"))
     }
 }

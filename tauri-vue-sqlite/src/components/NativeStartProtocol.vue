@@ -81,6 +81,7 @@ const importExistingCount = ref(0);
 const coursesFile = ref<File | null>(null);
 const coursesImportDialogOpen = ref(false);
 const coursesImportExistingCount = ref(0);
+const coursesMismatchOpen = ref(false);
 const pageSize = ref(50);
 const pageOffset = ref(0);
 const formatRows = ref<StartProtocolFormatRow[]>([]);
@@ -383,6 +384,11 @@ async function onCoursesImportDialogReplace() {
   await runCoursesImport(true);
 }
 
+async function onCoursesMismatchReplace() {
+  coursesMismatchOpen.value = false;
+  await runCoursesImport(true);
+}
+
 async function runCoursesImport(reset: boolean) {
   if (!coursesFile.value) {
     emit("status", "Выберите CSV порядка КП: D1;31;32;33");
@@ -403,6 +409,11 @@ async function runCoursesImport(reset: boolean) {
         : `Порядок КП обновлён: ${summary.imported_rows} дистанций. Отправьте протокол на телефон.`,
     );
   } catch (error) {
+    if (!reset && String(error).includes("IOF_COURSE_MISMATCH")) {
+      coursesMismatchOpen.value = true;
+      emit("status", "Порядок КП в XML не совпадает с загруженными дистанциями.");
+      return;
+    }
     emit("status", `Ошибка импорта порядка КП: ${String(error)}`);
   }
 }
@@ -857,9 +868,9 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
     </p>
     <div v-if="props.isOrient" class="native-row">
       <FilePickerButton
-        button-label="Выбрать CSV порядка КП"
+        button-label="Выбрать CSV/XML порядка КП"
         empty-label="Файл порядка КП не выбран"
-        accept=".csv,.txt,text/csv,text/plain"
+        accept=".csv,.txt,.xml,text/csv,text/plain,application/xml,text/xml"
         :disabled="props.busy"
         @file-selected="onCoursesFileSelected"
       />
@@ -868,7 +879,7 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
     <p v-if="props.isOrient" class="subtitle">
       CSV порядка КП: <code>D1;31;32;33</code> — строка на дистанцию. Можно
       <code>D1;31 32 33</code> или WinOrient <code>.Courses.txt</code>
-      (<code>D1 3,8 30 S1-36-…-F1</code>, S1 старт, F1 финиш). Старт и финиш станций задаются в настройках.
+      (<code>D1 3,8 30 S1-36-…-F1</code>, S1 старт, F1 финиш) или IOF XML 3.0. Старт и финиш станций задаются в настройках.
       <template v-if="courseRows.length">
         Сейчас:
         {{ courseRows.map((c) => c.name + " (" + c.controls.length + " КП)").join(", ") }}.
@@ -1324,5 +1335,27 @@ async function deleteFormat(formatId: number, name: string, usageCount: number) 
       @merge="onCoursesImportDialogMerge"
       @replace="onCoursesImportDialogReplace"
     />
+    <div
+      v-if="coursesMismatchOpen"
+      class="modal-backdrop"
+      @click.self="!props.busy && (coursesMismatchOpen = false)"
+    >
+      <div class="modal-card" role="dialog" aria-modal="true" aria-label="Заменить дистанции?">
+        <div class="modal-header">
+          <h3>Заменить дистанции?</h3>
+        </div>
+        <p>Порядок КП в XML не совпадает с загруженными дистанциями. Заменить дистанции из XML?</p>
+        <div class="native-row" style="margin-top: 12px; flex-wrap: wrap">
+          <button type="button" :disabled="props.busy" @click="coursesMismatchOpen = false">Отменить</button>
+          <button
+            type="button"
+            :disabled="props.busy"
+            @click="onCoursesMismatchReplace"
+          >
+            Заменить
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>

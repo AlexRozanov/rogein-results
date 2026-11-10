@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -20,6 +22,7 @@ import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.ChipMemoryLog
+import ru.rogein.chip.parse.CourseOrderMismatchException
 import ru.rogein.chip.parse.CsvExport
 import ru.rogein.chip.parse.RogaineResultCsvRow
 import ru.rogein.chip.parse.IssueUidConflict
@@ -224,6 +227,7 @@ class ChipQueueViewModel(
         emptyList(),
     )
 
+    private val courseMutex = Mutex()
     private val _section = MutableStateFlow(AppSection.Chip)
     val section = _section.asStateFlow()
 
@@ -232,6 +236,10 @@ class ChipQueueViewModel(
 
     private val _overwritePrompt = MutableStateFlow(false)
     val overwritePrompt = _overwritePrompt.asStateFlow()
+
+    private val _courseXmlMismatch = MutableStateFlow(false)
+    val courseXmlMismatch = _courseXmlMismatch.asStateFlow()
+    private var pendingXmlCourses: String? = null
 
     private val _finishReplacePrompt = MutableStateFlow<FinishReplacePrompt?>(null)
     val finishReplacePrompt = _finishReplacePrompt.asStateFlow()
@@ -423,6 +431,19 @@ class ChipQueueViewModel(
         pendingCsvReset = reset
     }
 
+    fun confirmCourseXmlReplace() {
+        val text = pendingXmlCourses ?: return
+        pendingXmlCourses = null
+        _courseXmlMismatch.value = false
+        pendingCsvReset = true
+        importCsvText(CsvImportKind.Courses, text)
+    }
+
+    fun cancelCourseXmlReplace() {
+        pendingXmlCourses = null
+        _courseXmlMismatch.value = false
+    }
+
     fun loadUsbProtocol(replace: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
@@ -516,6 +537,10 @@ class ChipQueueViewModel(
                         "Легенды: ${rows.size} КП."
                     }
                 }
+            } catch (e: CourseOrderMismatchException) {
+                pendingXmlCourses = text
+                _courseXmlMismatch.value = true
+                _status.value = e.message ?: "Порядок КП в XML не совпадает с загруженными дистанциями."
             } catch (e: Exception) {
                 _status.value = e.message ?: "Ошибка CSV"
             } finally {
@@ -617,7 +642,9 @@ class ChipQueueViewModel(
     fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                repository.startList.saveCourse(name, controls, previousName)
+                courseMutex.withLock {
+                    repository.startList.saveCourse(name, controls, previousName)
+                }
                 _status.value = "Дистанция «${name.trim()}» сохранена."
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось сохранить дистанцию"
@@ -625,9 +652,24 @@ class ChipQueueViewModel(
         }
     }
 
+    fun copyCourse(sourceName: String, newName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val copied = courseMutex.withLock {
+                    repository.startList.copyCourse(sourceName, newName)
+                }
+                _status.value = "Создана копия «$copied». Переименуйте при необходимости."
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось скопировать дистанцию"
+            }
+        }
+    }
+
     fun deleteCourse(name: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.startList.deleteCourse(name)
+            courseMutex.withLock {
+                repository.startList.deleteCourse(name)
+            }
             _status.value = "Дистанция «$name» удалена."
         }
     }
@@ -944,7 +986,6 @@ class ChipQueueViewModel(
         }
         val person = people.value.find { it.id == id }
         if (person != null) {
-            _selectedId.value = id
             _addingNew.value = false
             _newName.value = person.name
             _newCourse.value = person.currentCourse
@@ -1662,21 +1703,22 @@ class ChipQueueViewModel(
             pointerEnd = 5
             punchCount = 0
             _sessionSummary.value = "№ $id · 0 отметок"
-            val who = name.ifBlank { "№ $id" }
-            val dist = course.ifBlank {
-                if (isRogaine(settings.value.sportKind)) "без формата" else "без дистанции"
+            val issued = if (name.isBlank()) {
+                "№ $id. Чип выдан."
+            } else {
+                "$name № $id. Чип выдан."
             }
             val teamPart = teamNote?.let { " $it." } ?: ""
             if (nextMate != null) {
                 _newNumber.value = nextMate.toString()
                 syncIssueNumber(nextMate.toString())
-                _status.value = "$who · $dist. Чип выдан.$teamPart Далее № $nextMate."
+                _status.value = "$issued$teamPart Далее № $nextMate."
             } else {
                 _selectedId.value = null
                 _addingNew.value = false
                 _newNumber.value = ""
                 _newCourse.value = ""
-                _status.value = "$who · $dist. Чип выдан.$teamPart"
+                _status.value = "$issued$teamPart"
             }
             signalSuccess()
             if (shouldAskIssueFill(name, course) && nextMate == null) {
@@ -2402,6 +2444,11 @@ class ChipQueueViewModel(
         val rogaine = isRogaine(settings.sportKind)
         val startClock = parseDaySeconds(settings.competitionStartTime)
             .takeIf { rogaine && settings.startMode == "time" }
+        val course = courses.value.find { it.name.equals(row.course, true) }
+        val required = filterCourseCps(
+            course?.controls.orEmpty(),
+            EventStore.removedCps(corrections.value),
+        )
         return ReceiptText.format(
             SplitReceipt(
                 date = settings.competitionDate,
@@ -2409,7 +2456,7 @@ class ChipQueueViewModel(
                 course = row.course,
                 bib = row.logicalId?.toString().orEmpty(),
                 name = row.name,
-                marks = receiptMarks(row, settings),
+                marks = receiptMarks(row, settings, required),
                 startCp = settings.startCp,
                 elapsedSeconds = row.calc.elapsedSeconds,
                 status = row.calc.status,
@@ -2419,15 +2466,20 @@ class ChipQueueViewModel(
                 penaltyPoints = row.calc.penaltyPoints,
                 pointsFinal = row.calc.pointsFinal,
                 rogaine = rogaine,
+                diagnostics = row.calc.diagnostics,
+                courseControls = course?.controls.orEmpty(),
+                requiredControls = required,
+                lengthMeters = course?.lengthMeters,
+                legMeters = course?.legMeters.orEmpty(),
             ),
         )
     }
 
-    private fun receiptMarks(row: ScoredResult, settings: EventSettings): List<ReceiptMark> {
-        val required = filterCourseCps(
-            courses.value.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
-            EventStore.removedCps(corrections.value),
-        )
+    private fun receiptMarks(
+        row: ScoredResult,
+        settings: EventSettings,
+        required: List<Int>,
+    ): List<ReceiptMark> {
         val window = orientPunchWindow(row.punches, settings.startCp, settings.finishCp)
         val expanded = applyAddedCps(
             window,
@@ -2436,7 +2488,7 @@ class ChipQueueViewModel(
             settings.startCp,
             settings.finishCp,
         )
-        return expanded.map { ReceiptMark(it.cp, it.seconds) }
+        return expanded.map { ReceiptMark(it.cp, it.seconds, it.added) }
     }
 
     companion object {

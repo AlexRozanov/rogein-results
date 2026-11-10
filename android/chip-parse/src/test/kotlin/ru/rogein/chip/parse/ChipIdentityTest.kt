@@ -62,6 +62,37 @@ class ChipIdentityTest {
     }
 
     @Test
+    fun sameChipTwoCoursesIsNotConflict() {
+        val ids = numberConflictIds(
+            listOf(
+                ref("a", "04AA", 10, "спринт"),
+                ref("b", "04AA", 10, "лес"),
+            ),
+        )
+        assertTrue(ids.isEmpty())
+    }
+
+    @Test
+    fun otherChipOtherCourseIsNotConflict() {
+        val ids = numberConflictIds(
+            listOf(
+                ref("a", "04AA", 10, "спринт"),
+                ref("b", "04BB", 10, "лес"),
+            ),
+        )
+        assertTrue(ids.isEmpty())
+    }
+
+    @Test
+    fun otherUidOtherCourseIsFresh() {
+        val existing = listOf(ref("q1", "04AA", 10, "спринт"))
+        assertEquals(
+            FinishEnqueueKind.Fresh,
+            classifyFinishEnqueue("04BB", 10, "лес", existing),
+        )
+    }
+
+    @Test
     fun issueWarnsWhenNumberBoundToOtherChip() {
         val info = classifyIssueUid(
             10,

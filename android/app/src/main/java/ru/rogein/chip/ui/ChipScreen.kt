@@ -124,6 +124,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val section by viewModel.section.collectAsStateWithLifecycle()
     val morePage by viewModel.morePage.collectAsStateWithLifecycle()
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
+    val courseXmlMismatch by viewModel.courseXmlMismatch.collectAsStateWithLifecycle()
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
     val finishMissingPrompt by viewModel.finishMissingPrompt.collectAsStateWithLifecycle()
     val finishCsvPrompt by viewModel.finishCsvPrompt.collectAsStateWithLifecycle()
@@ -180,11 +181,18 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
         viewModel.consumeCsvExport()
     }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    val protocolPersonEditor = section == AppSection.Protocol &&
+    var protocolPersonEditor by remember { mutableStateOf(false) }
+    val issuePersonEditor = section == AppSection.Chip &&
+        mode == ChipMode.Issue &&
         query.isBlank() &&
-        (addingNew || selected != null)
+        selected != null
+    var resultsPersonEditor by remember { mutableStateOf(false) }
+    val fullscreenEditor = protocolPersonEditor || issuePersonEditor || resultsPersonEditor
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
-    val showStatus = !imeVisible && !protocolPersonEditor && shouldShowStatus(status, section)
+    val showStatus = !imeVisible &&
+        !fullscreenEditor &&
+        shouldShowStatus(status, section) &&
+        !(section == AppSection.Chip && mode == ChipMode.Issue && isChipOperationPrompt(status))
 
     Box {
     Scaffold(
@@ -221,7 +229,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             )
         },
         bottomBar = {
-            if (!imeVisible && !protocolPersonEditor) {
+            if (!imeVisible && !fullscreenEditor) {
                 NavigationBar(containerColor = Color.White) {
                     NavigationBarItem(
                         selected = section == AppSection.Chip,
@@ -351,6 +359,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         csvPicker.pick(CsvImportKind.Legends)
                     },
                     onSaveCourse = viewModel::saveCourse,
+                    onCopyCourse = viewModel::copyCourse,
                     onDeleteCourse = viewModel::deleteCourse,
                     legendCps = EventStore.legendCps(settings),
                     legends = EventStore.legends(settings),
@@ -368,6 +377,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     onClearChip = viewModel::clearMarks,
                     corrections = corrections,
                     onMarkDidNotFinish = viewModel::markDidNotFinish,
+                    onEditorOpen = { protocolPersonEditor = it },
                     modifier = Modifier.weight(1f),
                 )
                 AppSection.Results -> ResultsScreen(
@@ -398,6 +408,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     people = people,
                     awardGroups = EventStore.awardGroups(settings),
                     competitionDate = settings.competitionDate,
+                    onEditorOpen = { resultsPersonEditor = it },
                 )
                 AppSection.More -> when (morePage) {
                     MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage, sportKind = settings.sportKind)
@@ -699,6 +710,21 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             },
         )
     }
+    if (courseXmlMismatch) {
+        AlertDialog(
+            onDismissRequest = viewModel::cancelCourseXmlReplace,
+            title = { Text("Заменить дистанции?") },
+            text = {
+                Text("Порядок КП в XML не совпадает с загруженными дистанциями. Заменить дистанции из XML?")
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmCourseXmlReplace) { Text("Заменить") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelCourseXmlReplace) { Text("Отмена") }
+            },
+        )
+    }
     stationCountdown?.let { StationCountdownOverlay(it) }
     }
 }
@@ -740,7 +766,11 @@ private fun ChipSection(
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
     val newTeamWith by viewModel.newTeamWith.collectAsStateWithLifecycle()
     var confirmDelete by remember { mutableStateOf<QueuedChipEntity?>(null) }
+    val issueFullscreen = mode == ChipMode.Issue &&
+        query.isBlank() &&
+        selected != null
     Column(modifier = modifier.fillMaxSize()) {
+        if (!issueFullscreen) {
         ScrollableTabRow(
             selectedTabIndex = when (mode) {
                 ChipMode.Issue -> 0
@@ -770,6 +800,7 @@ private fun ChipSection(
                 onClick = { viewModel.setMode(ChipMode.Tests) },
                 text = { Text("Тесты") },
             )
+        }
         }
         if (mode == ChipMode.Issue) {
             IssuePanel(
@@ -939,6 +970,39 @@ private fun IssuePanel(
     val usedTeamIds = remember(roster) { roster.map { it.teamId } }
     val nextChipId = nextFreeLogicalId(usedIds)
     val nextTeamId = nextFreeTeamId(usedTeamIds)
+    val rogaine = isRogaine(sportKind)
+    val courseTitle = if (rogaine) "Формат" else "Дистанция"
+    val laterHint = if (rogaine) {
+        "Формат можно указать сейчас или после выдачи."
+    } else {
+        "Дистанцию можно указать сейчас или после выдачи."
+    }
+    val issueEditorOpen = !searching && selected != null
+    if (issueEditorOpen) {
+        IssuePersonEditor(
+            selected = selected,
+            newNumber = newNumber,
+            newName = newName,
+            newCourse = newCourse,
+            extraCourse = extraCourse,
+            newTeamWith = newTeamWith,
+            courses = courses,
+            roster = roster,
+            nextTeamId = nextTeamId,
+            rogaine = rogaine,
+            courseTitle = courseTitle,
+            laterHint = laterHint,
+            onNewName = onNewName,
+            onNewCourse = onNewCourse,
+            onNewTeamWith = onNewTeamWith,
+            onCurrentCourse = onCurrentCourse,
+            onExtraCourse = onExtraCourse,
+            onAddCourse = onAddCourse,
+            onClose = onClearSelection,
+            modifier = modifier,
+        )
+        return
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -979,120 +1043,6 @@ private fun IssuePanel(
                 modifier = Modifier.weight(0.52f),
             )
         }
-        val rogaine = isRogaine(sportKind)
-        val courseTitle = if (rogaine) "Формат" else "Дистанция"
-        val laterHint = if (rogaine) {
-            "Формат можно указать сейчас или после выдачи."
-        } else {
-            "Дистанцию можно указать сейчас или после выдачи."
-        }
-        if (!searching) {
-            if (addingNew && newNumber.isNotBlank()) {
-                EditorCard(
-                    title = "№ $newNumber · нового нет в протоколе",
-                    onClose = onClearSelection,
-                ) {
-                    Text(
-                        if (rogaine) {
-                            "Приложите чип — номер запишется, участник появится в протоколе. ФИО и формат можно указать сейчас или позже."
-                        } else {
-                            "Приложите чип — номер запишется, участник появится в протоколе. ФИО и дистанцию можно указать сейчас или позже."
-                        },
-                        color = Color(0xFF5C5C5C),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    OutlinedTextField(
-                        value = newName,
-                        onValueChange = onNewName,
-                        singleLine = true,
-                        label = { Text("ФИО") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    if (courses.isNotEmpty()) {
-                        CourseChips(courseTitle, courses, newCourse, onNewCourse)
-                    }
-                    if (rogaine) {
-                        IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
-                    }
-                }
-            } else if (selected != null) {
-                EditorCard(
-                    title = "№ ${selected.id} · ${selected.displayName}",
-                    onClose = onClearSelection,
-                ) {
-                    val own = selected.courses.ifEmpty {
-                        listOfNotNull(selected.currentCourse.takeIf { it.isNotBlank() })
-                    }
-                    val extras = courses.filter { name -> own.none { it.equals(name, true) } }
-                    val formatOptions = buildList {
-                        addAll(own)
-                        if (rogaine) {
-                            extras.forEach { name ->
-                                if (none { it.equals(name, true) }) add(name)
-                            }
-                        }
-                    }
-                    if (formatOptions.isNotEmpty()) {
-                        CourseChips(courseTitle, formatOptions, selected.currentCourse, onCurrentCourse)
-                    } else if (courses.isNotEmpty()) {
-                        if (selected.currentCourse.isBlank()) {
-                            Text(
-                                laterHint,
-                                color = Color(0xFF5C5C5C),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        CourseChips(courseTitle, courses, selected.currentCourse, onCurrentCourse)
-                    } else {
-                        Text(
-                            laterHint,
-                            color = Color(0xFF5C5C5C),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        OutlinedTextField(
-                            value = extraCourse,
-                            onValueChange = onExtraCourse,
-                            singleLine = true,
-                            label = { Text(courseTitle) },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        CompactTextButton("Указать", onAddCourse, enabled = extraCourse.isNotBlank())
-                    }
-                    if (rogaine) {
-                        val teamId = selected.teamId
-                        if (teamId > 0) {
-                            val mates = roster
-                                .filter { it.teamId == teamId && it.id != selected.id }
-                                .sortedBy { it.id }
-                                .joinToString(" · ") { "${it.id} ${it.displayName}" }
-                            Text(
-                                if (mates.isEmpty()) "Команда Т$teamId" else "Команда Т$teamId · $mates",
-                                color = Color(0xFF5C5C5C),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
-                    }
-                    if (!rogaine && extras.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                CourseChips("Ещё дистанция", extras, extraCourse, onExtraCourse)
-                            }
-                            CompactTextButton(
-                                "Добавить",
-                                onAddCourse,
-                                enabled = extraCourse.isNotBlank(),
-                            )
-                        }
-                    }
-                }
-            }
-        }
         PersonHits(
             people = people,
             items = items,
@@ -1102,6 +1052,137 @@ private fun IssuePanel(
             onSelect = onSelect,
             modifier = Modifier.weight(1f),
         )
+    }
+}
+
+@Composable
+private fun IssuePersonEditor(
+    selected: StartPerson?,
+    newNumber: String,
+    newName: String,
+    newCourse: String,
+    extraCourse: String,
+    newTeamWith: String,
+    courses: List<String>,
+    roster: List<StartPerson>,
+    nextTeamId: Int,
+    rogaine: Boolean,
+    courseTitle: String,
+    laterHint: String,
+    onNewName: (String) -> Unit,
+    onNewCourse: (String) -> Unit,
+    onNewTeamWith: (String) -> Unit,
+    onCurrentCourse: (String) -> Unit,
+    onExtraCourse: (String) -> Unit,
+    onAddCourse: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val title = if (selected != null) {
+        "№ ${selected.id} · ${selected.displayName}"
+    } else {
+        "№ $newNumber · нового нет в протоколе"
+    }
+    FullscreenEditor(
+        title = title,
+        onClose = onClose,
+        modifier = modifier,
+    ) {
+        if (selected == null) {
+            Text(
+                if (rogaine) {
+                    "Приложите чип — номер запишется, участник появится в протоколе. ФИО и формат можно указать сейчас или позже."
+                } else {
+                    "Приложите чип — номер запишется, участник появится в протоколе. ФИО и дистанцию можно указать сейчас или позже."
+                },
+                color = Color(0xFF5C5C5C),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = newName,
+                onValueChange = onNewName,
+                singleLine = true,
+                label = { Text("ФИО") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (courses.isNotEmpty()) {
+                CourseChips(courseTitle, courses, newCourse, onNewCourse)
+            }
+            if (rogaine) {
+                IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
+            }
+        } else {
+            val own = selected.courses.ifEmpty {
+                listOfNotNull(selected.currentCourse.takeIf { it.isNotBlank() })
+            }
+            val extras = courses.filter { name -> own.none { it.equals(name, true) } }
+            val formatOptions = buildList {
+                addAll(own)
+                if (rogaine) {
+                    extras.forEach { name ->
+                        if (none { it.equals(name, true) }) add(name)
+                    }
+                }
+            }
+            if (formatOptions.isNotEmpty()) {
+                CourseChips(courseTitle, formatOptions, selected.currentCourse, onCurrentCourse)
+            } else if (courses.isNotEmpty()) {
+                if (selected.currentCourse.isBlank()) {
+                    Text(
+                        laterHint,
+                        color = Color(0xFF5C5C5C),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                CourseChips(courseTitle, courses, selected.currentCourse, onCurrentCourse)
+            } else {
+                Text(
+                    laterHint,
+                    color = Color(0xFF5C5C5C),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = extraCourse,
+                    onValueChange = onExtraCourse,
+                    singleLine = true,
+                    label = { Text(courseTitle) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                CompactTextButton("Указать", onAddCourse, enabled = extraCourse.isNotBlank())
+            }
+            if (rogaine) {
+                val teamId = selected.teamId
+                if (teamId > 0) {
+                    val mates = roster
+                        .filter { it.teamId == teamId && it.id != selected.id }
+                        .sortedBy { it.id }
+                        .joinToString(" · ") { "${it.id} ${it.displayName}" }
+                    Text(
+                        if (mates.isEmpty()) "Команда Т$teamId" else "Команда Т$teamId · $mates",
+                        color = Color(0xFF5C5C5C),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                IssueTeamField(newTeamWith, onNewTeamWith, nextTeamId)
+            }
+            if (!rogaine && extras.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        CourseChips("Ещё дистанция", extras, extraCourse, onExtraCourse)
+                    }
+                    CompactTextButton(
+                        "Добавить",
+                        onAddCourse,
+                        enabled = extraCourse.isNotBlank(),
+                    )
+                }
+            }
+        }
     }
 }
 

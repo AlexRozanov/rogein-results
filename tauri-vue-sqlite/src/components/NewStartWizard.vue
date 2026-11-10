@@ -78,7 +78,7 @@ const steps = computed<WizardStep[]>(() => {
       {
         id: "courses",
         title: "Дистанции",
-        hint: "CSV порядка КП: D1;31;32;33 или файл WinOrient .Courses.txt (S1-36-…-F1). Можно пропустить и загрузить позже во вкладке «Дистанции».",
+        hint: "CSV порядка КП: D1;31;32;33, файл WinOrient .Courses.txt (S1-36-…-F1) или IOF XML 3.0. Можно пропустить и загрузить позже во вкладке «Дистанции».",
       },
       finish,
     ];
@@ -412,9 +412,9 @@ async function importFinish() {
 
         <template v-else-if="current.id === 'courses'">
           <FilePickerButton
-            button-label="Выбрать CSV дистанций"
+            button-label="Выбрать CSV/XML дистанций"
             empty-label="Файл не выбран"
-            accept=".csv,.txt,text/csv,text/plain"
+            accept=".csv,.txt,.xml,text/csv,text/plain,application/xml,text/xml"
             :disabled="isBusy"
             @file-selected="coursesFile = $event"
           />

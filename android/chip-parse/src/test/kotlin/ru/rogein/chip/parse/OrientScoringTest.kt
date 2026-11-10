@@ -283,6 +283,13 @@ class OrientScoringTest {
         assertEquals(true, calc.diagnostics.contains("course_incomplete"))
     }
 
+    @Test
+    fun uniqueCourseCopyNameAddsCopySuffix() {
+        assertEquals("D1 (копия)", uniqueCourseCopyName("D1", listOf("D1", "D2")))
+        assertEquals("D1 (копия 2)", uniqueCourseCopyName("D1", listOf("D1", "D1 (копия)")))
+        assertEquals("D1 (копия 3)", uniqueCourseCopyName("D1", listOf("D1", "D1 (копия)", "D1 (копия 2)")))
+    }
+
     private fun mark(cp: Int, hour: Int, minute: Int) =
         OrientMark(cp, hour * 3600 + minute * 60)
 }

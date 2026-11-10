@@ -7,8 +7,14 @@ import android.provider.MediaStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
+import org.json.JSONObject
 import ru.rogein.chip.parse.AwardGroupCsvRow
+import ru.rogein.chip.parse.CourseCsvRow
+import ru.rogein.chip.parse.CourseOrderMismatchException
 import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.coursesNeedReplace
+import ru.rogein.chip.parse.looksLikeIofCourseXml
+import ru.rogein.chip.parse.mergeCourseGeometry
 import ru.rogein.chip.parse.EventPackCpTypeRuleFile
 import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.FormatCsvRow
@@ -34,16 +40,14 @@ class StartListStore(
 ) {
     val people: Flow<List<StartPerson>> = dao.observePeople().map { rows -> rows.map { it.toPerson() } }
     val courses: Flow<List<StartCourse>> = dao.observeCourses().map { rows ->
-        rows.map { StartCourse(it.name, parseInts(it.controlsJson)) }
+        rows.map { it.toStartCourse() }
     }
 
     suspend fun person(id: Int): StartPerson? = dao.person(id)?.toPerson()
 
     suspend fun peopleNow(): List<StartPerson> = dao.listPeople().map { it.toPerson() }
 
-    suspend fun coursesNow(): List<StartCourse> = dao.listCourses().map {
-        StartCourse(it.name, parseInts(it.controlsJson))
-    }
+    suspend fun coursesNow(): List<StartCourse> = dao.listCourses().map { it.toStartCourse() }
 
     suspend fun reloadFromUsb(quiet: Boolean = false, sport: String = SPORT_ORIENT): String? {
         val hasPeople = dao.listPeople().isNotEmpty()
@@ -112,6 +116,9 @@ class StartListStore(
                 StartCourseEntity(
                     name = name,
                     controlsJson = JSONArray(nextControls).toString(),
+                    lengthMeters = existing?.lengthMeters,
+                    climbMeters = existing?.climbMeters,
+                    legsJson = existing?.legsJson ?: "[]",
                 ),
             )
         }
@@ -228,12 +235,8 @@ class StartListStore(
     private suspend fun applyCourses(pack: StartPack, replace: Boolean) {
         if (replace) dao.clearCourses()
         for (course in pack.courses) {
-            dao.upsertCourse(
-                StartCourseEntity(
-                    name = course.name,
-                    controlsJson = JSONArray(course.controls).toString(),
-                ),
-            )
+            val existing = if (replace) null else dao.listCourses().find { it.name.equals(course.name, true) }
+            dao.upsertCourse(courseEntity(course.toCsvRow(), existing))
         }
     }
 
@@ -354,11 +357,27 @@ class StartListStore(
 
     suspend fun importCoursesCsv(text: String, reset: Boolean): String {
         val rows = CsvImport.courses(text)
+        val existing = dao.listCourses()
+        if (looksLikeIofCourseXml(text) && !reset && existing.isNotEmpty()) {
+            val pairs = existing.map { it.name to parseInts(it.controlsJson) }
+            if (coursesNeedReplace(pairs, rows)) {
+                throw CourseOrderMismatchException()
+            }
+            for (row in rows) {
+                val old = existing.find { it.name.equals(row.name, true) }
+                if (old == null) {
+                    dao.upsertCourse(courseEntity(row, null))
+                    continue
+                }
+                val merged = mergeCourseGeometry(old.toCsvRow(), row)
+                dao.upsertCourse(courseEntity(merged, old))
+            }
+            return "Дистанции: длины и перегоны дописаны для ${rows.size}."
+        }
         if (reset) dao.clearCourses()
         for (row in rows) {
-            dao.upsertCourse(
-                StartCourseEntity(name = row.name, controlsJson = JSONArray(row.controls).toString()),
-            )
+            val old = if (reset) null else dao.listCourses().find { it.name.equals(row.name, true) }
+            dao.upsertCourse(courseEntity(row, old))
         }
         return "Дистанции: ${rows.size}, КП загружены."
     }
@@ -372,6 +391,9 @@ class StartListStore(
                 StartCourseEntity(
                     name = row.name,
                     controlsJson = existing?.controlsJson ?: JSONArray().toString(),
+                    lengthMeters = existing?.lengthMeters,
+                    climbMeters = existing?.climbMeters,
+                    legsJson = existing?.legsJson ?: "[]",
                 ),
             )
         }
@@ -405,8 +427,17 @@ class StartListStore(
             val clash = dao.listCourses().any { it.name.equals(trimmed, ignoreCase = true) }
             if (clash) error("Дистанция «$trimmed» уже есть")
         }
+        val lookup = if (previous.isNotEmpty()) previous else trimmed
+        val existing = dao.listCourses().find { it.name.equals(lookup, true) }
+        val sameControls = existing != null && parseInts(existing.controlsJson) == controls
         dao.upsertCourse(
-            StartCourseEntity(name = trimmed, controlsJson = JSONArray(controls).toString()),
+            StartCourseEntity(
+                name = trimmed,
+                controlsJson = JSONArray(controls).toString(),
+                lengthMeters = if (sameControls) existing?.lengthMeters else null,
+                climbMeters = if (sameControls) existing?.climbMeters else null,
+                legsJson = if (sameControls) existing?.legsJson?.ifBlank { "[]" } ?: "[]" else "[]",
+            ),
         )
         if (renaming) {
             for (person in dao.listPeople()) {
@@ -423,6 +454,17 @@ class StartListStore(
             }
             dao.deleteCourse(previous)
         }
+    }
+
+    suspend fun copyCourse(sourceName: String, newName: String): String {
+        val source = dao.listCourses().find { it.name.equals(sourceName.trim(), true) }
+            ?: error("Дистанция «$sourceName» не найдена")
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) error("Укажите название дистанции")
+        val clash = dao.listCourses().any { it.name.equals(trimmed, ignoreCase = true) }
+        if (clash) error("Дистанция «$trimmed» уже есть")
+        dao.upsertCourse(source.copy(name = trimmed))
+        return trimmed
     }
 
     suspend fun deleteCourse(name: String) {
@@ -712,4 +754,68 @@ private fun parseInts(json: String): List<Int> {
     } catch (_: Exception) {
         emptyList()
     }
+}
+
+private fun parseOptionalInts(json: String): List<Int?> {
+    if (json.isBlank()) return emptyList()
+    return try {
+        val array = JSONArray(json)
+        (0 until array.length()).map { index ->
+            if (array.isNull(index)) null else array.optInt(index).takeIf { it > 0 }
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+private fun encodeOptionalInts(values: List<Int?>): String {
+    val array = JSONArray()
+    for (value in values) {
+        if (value == null) array.put(JSONObject.NULL) else array.put(value)
+    }
+    return array.toString()
+}
+
+private fun StartCourseEntity.toStartCourse() = StartCourse(
+    name = name,
+    controls = parseInts(controlsJson),
+    lengthMeters = lengthMeters,
+    climbMeters = climbMeters,
+    legMeters = parseOptionalInts(legsJson),
+)
+
+private fun StartCourseEntity.toCsvRow() = CourseCsvRow(
+    name = name,
+    controls = parseInts(controlsJson),
+    lengthMeters = lengthMeters,
+    climbMeters = climbMeters,
+    legMeters = parseOptionalInts(legsJson),
+)
+
+private fun StartCourse.toCsvRow() = CourseCsvRow(
+    name = name,
+    controls = controls,
+    lengthMeters = lengthMeters,
+    climbMeters = climbMeters,
+    legMeters = legMeters,
+)
+
+private fun courseEntity(row: CourseCsvRow, existing: StartCourseEntity?): StartCourseEntity {
+    val same = existing != null && parseInts(existing.controlsJson) == row.controls
+    val length = row.lengthMeters ?: if (same) existing?.lengthMeters else null
+    val climb = row.climbMeters ?: if (same) existing?.climbMeters else null
+    val legs = if (row.legMeters.any { it != null }) {
+        row.legMeters
+    } else if (same) {
+        parseOptionalInts(existing?.legsJson.orEmpty())
+    } else {
+        emptyList()
+    }
+    return StartCourseEntity(
+        name = row.name,
+        controlsJson = JSONArray(row.controls).toString(),
+        lengthMeters = length,
+        climbMeters = climb,
+        legsJson = encodeOptionalInts(legs),
+    )
 }

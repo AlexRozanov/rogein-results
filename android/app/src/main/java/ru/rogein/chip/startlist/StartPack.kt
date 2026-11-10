@@ -12,6 +12,9 @@ data class StartPack(
 data class StartCourse(
     val name: String,
     val controls: List<Int>,
+    val lengthMeters: Int? = null,
+    val climbMeters: Int? = null,
+    val legMeters: List<Int?> = emptyList(),
 )
 
 data class StartPerson(
@@ -35,7 +38,9 @@ fun parseStartPack(json: String): StartPack {
     return StartPack(
         revision = file.revision,
         sport = file.sport,
-        courses = file.courses.map { StartCourse(it.name, it.controls) },
+        courses = file.courses.map {
+            StartCourse(it.name, it.controls, it.lengthMeters, it.climbMeters, it.legMeters)
+        },
         people = file.people.map { person ->
             StartPerson(
                 id = person.id,

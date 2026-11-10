@@ -13,6 +13,9 @@ data class StartPackFile(
 data class StartPackCourseFile(
     val name: String,
     val controls: List<Int>,
+    val lengthMeters: Int? = null,
+    val climbMeters: Int? = null,
+    val legMeters: List<Int?> = emptyList(),
 )
 
 data class StartPackPersonFile(
@@ -34,6 +37,16 @@ fun parseStartPackJson(text: String): StartPackFile {
                 when (value) {
                     is Number -> value.toInt()
                     is String -> value.toIntOrNull()
+                    else -> null
+                }
+            },
+            lengthMeters = obj.optIntOrNull("lengthMeters"),
+            climbMeters = obj.optIntOrNull("climbMeters"),
+            legMeters = jsonArray(obj.optJSONArray("legMeters")).map { value ->
+                when (value) {
+                    JSONObject.NULL -> null
+                    is Number -> value.toInt().takeIf { it > 0 }
+                    is String -> value.toIntOrNull()?.takeIf { it > 0 }
                     else -> null
                 }
             },
@@ -109,4 +122,10 @@ data class ChipQueuePunchFile(
 private fun jsonArray(array: JSONArray?): List<Any> {
     if (array == null) return emptyList()
     return (0 until array.length()).map { array.get(it) }
+}
+
+private fun JSONObject.optIntOrNull(key: String): Int? {
+    if (!has(key) || isNull(key)) return null
+    val value = optInt(key, Int.MIN_VALUE)
+    return value.takeIf { it != Int.MIN_VALUE && it >= 0 }
 }

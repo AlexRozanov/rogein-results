@@ -488,6 +488,7 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_6_7,
                     ChipQueueDatabase.MIGRATION_7_8,
                     ChipQueueDatabase.MIGRATION_8_9,
+                    ChipQueueDatabase.MIGRATION_9_10,
                 )
                 .build()
             return ChipQueueRepository(

@@ -17,6 +17,9 @@ data class RogaineProtocolCsvRow(
 data class CourseCsvRow(
     val name: String,
     val controls: List<Int>,
+    val lengthMeters: Int? = null,
+    val climbMeters: Int? = null,
+    val legMeters: List<Int?> = emptyList(),
 )
 
 data class FormatCsvRow(
@@ -102,6 +105,7 @@ object CsvImport {
     }
 
     fun courses(text: String): List<CourseCsvRow> {
+        if (looksLikeIofCourseXml(text)) return parseIofCourseXml(text)
         val lines = logicalLines(text)
         if (lines.isEmpty()) error("Файл дистанций пуст")
         val rows = ArrayList<CourseCsvRow>()

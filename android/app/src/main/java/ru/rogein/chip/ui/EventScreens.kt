@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -42,6 +44,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
@@ -50,6 +53,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -138,7 +142,8 @@ import ru.rogein.chip.parse.STATUS_ERR
 import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.addableCourseCps
 import ru.rogein.chip.parse.applyAddedCps
-import ru.rogein.chip.parse.classifyActualPunches
+import ru.rogein.chip.parse.buildOrientSplitPrint
+import ru.rogein.chip.parse.resultStatusLine
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
 import ru.rogein.chip.parse.PunchCopyCandidate
@@ -148,6 +153,7 @@ import ru.rogein.chip.parse.punchCopyCandidateByNumber
 import ru.rogein.chip.parse.punchCopySources
 import ru.rogein.chip.parse.punchCopyTargets
 import ru.rogein.chip.parse.courseKey
+import ru.rogein.chip.parse.uniqueCourseCopyName
 import ru.rogein.chip.parse.courseProgress
 import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.nextFreeTeamId
@@ -174,7 +180,6 @@ import ru.rogein.chip.parse.personAwardCategories
 import ru.rogein.chip.parse.sortByChipKeepingTeams
 import ru.rogein.chip.parse.teamGroupPosAt
 import ru.rogein.chip.parse.TeamGroupPos
-import ru.rogein.chip.parse.punchLegSeconds
 import ru.rogein.chip.queue.AwardGroupView
 import ru.rogein.chip.queue.CorrectionEntity
 import ru.rogein.chip.queue.QueuedChipEntity
@@ -312,6 +317,126 @@ private fun TeamBrace(
 }
 
 @Composable
+internal fun CloseIconButton(onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(52.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Default.Add,
+            contentDescription = "Закрыть",
+            tint = Muted,
+            modifier = Modifier
+                .size(29.dp)
+                .graphicsLayer { rotationZ = 45f },
+        )
+    }
+}
+
+@Composable
+internal fun GrayButton(label: String, onClick: () -> Unit, enabled: Boolean = true) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFFD6D3CC),
+            contentColor = Color(0xFF333333),
+        ),
+    ) {
+        Text(label)
+    }
+}
+
+@Composable
+internal fun DangerButton(label: String, onClick: () -> Unit, enabled: Boolean = true) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Danger,
+            contentColor = Color.White,
+        ),
+    ) {
+        Text(label)
+    }
+}
+
+@Composable
+internal fun EditorActionsRow(
+    primaryLabel: String? = null,
+    onPrimary: (() -> Unit)? = null,
+    primaryEnabled: Boolean = true,
+    onClose: (() -> Unit)? = null,
+    extra: @Composable RowScope.() -> Unit = {},
+    onDelete: (() -> Unit)? = null,
+    deleteLabel: String = "Удалить",
+) {
+    if (onPrimary == null && onClose == null && onDelete == null) return
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (onPrimary != null && primaryLabel != null) {
+            Button(onClick = onPrimary, enabled = primaryEnabled) {
+                Text(primaryLabel)
+            }
+        }
+        if (onClose != null) {
+            GrayButton("Закрыть", onClose)
+        }
+        extra()
+        Spacer(Modifier.weight(1f))
+        if (onDelete != null) {
+            DangerButton(deleteLabel, onDelete)
+        }
+    }
+}
+
+@Composable
+internal fun FullscreenEditor(
+    title: String,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+    showTitle: Boolean = true,
+    footer: @Composable () -> Unit = {},
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(CardWhite)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (showTitle) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                CloseIconButton(onClose)
+            }
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
+        footer()
+    }
+}
+
+@Composable
 internal fun EditorCard(
     title: String? = null,
     primaryLabel: String? = null,
@@ -344,31 +469,18 @@ internal fun EditorCard(
                         modifier = Modifier.weight(1f),
                     )
                     if (onClose != null) {
-                        CompactTextButton("Закрыть", onClose)
+                        CloseIconButton(onClose)
                     }
                 }
             }
             content()
-            if (onPrimary != null || onDelete != null) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (onPrimary != null && primaryLabel != null) {
-                        Button(
-                            onClick = onPrimary,
-                            enabled = primaryEnabled,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp),
-                        ) {
-                            Text(primaryLabel, style = MaterialTheme.typography.labelLarge)
-                        }
-                    }
-                    if (onDelete != null) {
-                        CompactTextButton(deleteLabel, onDelete, Danger)
-                    }
-                }
-            }
+            EditorActionsRow(
+                primaryLabel = primaryLabel,
+                onPrimary = onPrimary,
+                primaryEnabled = primaryEnabled,
+                onDelete = onDelete,
+                deleteLabel = deleteLabel,
+            )
         }
     }
 }
@@ -656,6 +768,7 @@ fun ProtocolScreen(
     onPickGroups: (Boolean) -> Unit = {},
     onPickLegends: (Boolean) -> Unit = {},
     onSaveCourse: (String, List<Int>, String?) -> Unit,
+    onCopyCourse: (String, String) -> Unit = { _, _ -> },
     onDeleteCourse: (String) -> Unit,
     legendCps: List<Int> = emptyList(),
     legends: List<LegendView> = emptyList(),
@@ -672,6 +785,7 @@ fun ProtocolScreen(
     onClearChip: () -> Unit,
     corrections: List<CorrectionEntity> = emptyList(),
     onMarkDidNotFinish: (Int) -> Unit = {},
+    onEditorOpen: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var pane by remember { mutableStateOf(if (courseCheckOn) ProtocolPane.Check else ProtocolPane.People) }
@@ -681,6 +795,14 @@ fun ProtocolScreen(
     var pendingLoad by remember { mutableStateOf<ProtocolLoad?>(null) }
     val searching = query.isNotBlank() && pane == ProtocolPane.People
     val editorOpen = pane == ProtocolPane.People && !searching && (addingNew || selected != null)
+    var courseEditing by remember { mutableStateOf(false) }
+    val courseEditorOpen = courseEditing && pane == ProtocolPane.Courses && !isRogaine(sportKind)
+    LaunchedEffect(editorOpen, courseEditorOpen) {
+        onEditorOpen(editorOpen || courseEditorOpen)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onEditorOpen(false) }
+    }
     val personNumberFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(addingNew, pane) {
@@ -790,6 +912,7 @@ fun ProtocolScreen(
                 numberFocus = personNumberFocus,
             )
         } else {
+        if (!courseEditorOpen) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -953,7 +1076,7 @@ fun ProtocolScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("Дистанции CSV") },
+                            text = { Text("Дистанции CSV/XML") },
                             onClick = {
                                 loadMenu = false
                                 askCourseLoad(courses.isNotEmpty(), courses.size, pending = { pendingLoad = it }, load = onPickCourses)
@@ -966,7 +1089,7 @@ fun ProtocolScreen(
         HorizontalDivider()
         Column(
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .padding(start = 12.dp, end = 12.dp, top = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -1005,7 +1128,9 @@ fun ProtocolScreen(
         }
         if (pane == ProtocolPane.People) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .wrapContentHeight(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1017,13 +1142,15 @@ fun ProtocolScreen(
                 Button(onClick = onNew) { Text("Добавить") }
             }
         }
+        }
+        }
         if (pane == ProtocolPane.People) {
             LazyColumn(
                 verticalArrangement = if (rogaine) Arrangement.Top else Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                contentPadding = PaddingValues(bottom = 16.dp),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp),
             ) {
                 if (filtered.isEmpty()) {
                     item {
@@ -1035,6 +1162,7 @@ fun ProtocolScreen(
                             },
                             color = Muted,
                             style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 12.dp),
                         )
                     }
                 }
@@ -1063,17 +1191,25 @@ fun ProtocolScreen(
                     formatTypeRules = formatTypeRules,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
+                        .weight(1f)
+                        .padding(horizontal = 12.dp),
                 )
             } else {
-                Button(onClick = { requestAddCourse = true }) { Text("Новая") }
+                if (!courseEditorOpen) {
+                    Button(
+                        onClick = { requestAddCourse = true },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    ) { Text("Новая") }
+                }
                 CoursesPanel(
                     courses = courses,
                     query = query,
                     requestAdd = requestAddCourse,
                     onRequestAddConsumed = { requestAddCourse = false },
                     onSave = onSaveCourse,
+                    onCopy = onCopyCourse,
                     onDelete = onDeleteCourse,
+                    onEditingChange = { courseEditing = it },
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -1085,7 +1221,8 @@ fun ProtocolScreen(
                 query = query,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .padding(horizontal = 12.dp),
             )
         } else if (pane == ProtocolPane.Groups) {
             AwardGroupsPanel(
@@ -1093,7 +1230,8 @@ fun ProtocolScreen(
                 query = query,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .padding(horizontal = 12.dp),
             )
         } else {
             CourseStationCheckPanel(
@@ -1106,9 +1244,9 @@ fun ProtocolScreen(
                 onClearChip = onClearChip,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .padding(horizontal = 12.dp),
             )
-        }
         }
         }
     }
@@ -1301,7 +1439,7 @@ private fun ProtocolPersonEditor(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            CompactTextButton("Закрыть", onClose)
+            CloseIconButton(onClose)
         }
         Column(
             modifier = Modifier
@@ -1436,21 +1574,17 @@ private fun ProtocolPersonEditor(
                 }
             }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(onClick = onSavePerson) {
-                Text(if (addingNew) "Сохранить" else "Обновить")
-            }
-            if (onMarkDidNotFinish != null) {
-                CompactTextButton("Не финишировал", onMarkDidNotFinish, Warn)
-            }
-            if (onDelete != null) {
-                CompactTextButton("Удалить", onDelete, Danger)
-            }
-        }
+        EditorActionsRow(
+            primaryLabel = if (addingNew) "Сохранить" else "Обновить",
+            onPrimary = onSavePerson,
+            onClose = onClose,
+            extra = {
+                if (onMarkDidNotFinish != null) {
+                    CompactTextButton("Не финишировал", onMarkDidNotFinish, Warn)
+                }
+            },
+            onDelete = onDelete,
+        )
     }
 }
 
@@ -1553,13 +1687,17 @@ private fun CoursesPanel(
     requestAdd: Boolean,
     onRequestAddConsumed: () -> Unit,
     onSave: (String, List<Int>, String?) -> Unit,
+    onCopy: (String, String) -> Unit = { _, _ -> },
     onDelete: (String) -> Unit,
+    onEditingChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    var expanded by remember { mutableStateOf<String?>(courses.firstOrNull()?.name) }
+    var expanded by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf<String?>(null) }
+    var pendingCopy by remember { mutableStateOf<StartCourse?>(null) }
+    var focusCopiedName by remember { mutableStateOf(false) }
     val newCourseFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(requestAdd) {
@@ -1580,22 +1718,43 @@ private fun CoursesPanel(
     val visible = if (q.isEmpty()) courses else courses.filter { it.name.lowercase().replace('ё', 'е').contains(q) }
     val listState = rememberLazyListState()
     var listCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val openCourse = expanded?.let { name ->
+        courses.find { it.name.equals(name, true) }
+            ?: pendingCopy?.takeIf { it.name.equals(name, true) }
+    }
+    LaunchedEffect(courses, pendingCopy) {
+        val pending = pendingCopy ?: return@LaunchedEffect
+        if (courses.any { it.name.equals(pending.name, true) }) {
+            pendingCopy = null
+        }
+    }
+    val editing = adding || openCourse != null
+    LaunchedEffect(editing) {
+        onEditingChange(editing)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onEditingChange(false) }
+    }
     Column(modifier = modifier.fillMaxSize()) {
         if (adding) {
-            EditorCard(
+            FullscreenEditor(
                 title = "Новая дистанция",
-                primaryLabel = "Создать",
-                primaryEnabled = newName.isNotBlank(),
-                onPrimary = {
-                    val name = newName.trim()
-                    if (name.isNotEmpty()) {
-                        onSave(name, emptyList(), null)
-                        expanded = name
-                        adding = false
-                        newName = ""
-                    }
-                },
                 onClose = { adding = false },
+                footer = {
+                    EditorActionsRow(
+                        primaryLabel = "Создать",
+                        onPrimary = {
+                            val name = newName.trim()
+                            if (name.isNotEmpty()) {
+                                onSave(name, emptyList(), null)
+                                expanded = name
+                                adding = false
+                                newName = ""
+                            }
+                        },
+                        primaryEnabled = newName.isNotBlank(),
+                    )
+                },
             ) {
                 OutlinedTextField(
                     value = newName,
@@ -1618,7 +1777,30 @@ private fun CoursesPanel(
                         .focusRequester(newCourseFocus),
                 )
             }
-        }
+        } else if (openCourse != null) {
+            CourseEditorCard(
+                course = openCourse,
+                expanded = true,
+                fillScreen = true,
+                listState = listState,
+                listCoordinates = { listCoords },
+                onToggle = {
+                    expanded = null
+                    focusCopiedName = false
+                },
+                onSave = onSave,
+                onCopy = {
+                    val taken = courses.map { it.name } + listOfNotNull(pendingCopy?.name)
+                    val copyName = uniqueCourseCopyName(openCourse.name, taken)
+                    pendingCopy = openCourse.copy(name = copyName)
+                    onCopy(openCourse.name, copyName)
+                    expanded = copyName
+                    focusCopiedName = true
+                },
+                onDelete = { confirmDelete = openCourse.name },
+                focusName = focusCopiedName,
+            )
+        } else {
         LazyColumn(
             state = listState,
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1626,7 +1808,7 @@ private fun CoursesPanel(
                 .fillMaxWidth()
                 .weight(1f)
                 .onGloballyPositioned { listCoords = it },
-            contentPadding = PaddingValues(bottom = 16.dp),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp),
         ) {
             if (visible.isEmpty()) {
                 item {
@@ -1648,6 +1830,7 @@ private fun CoursesPanel(
                     onDelete = { confirmDelete = course.name },
                 )
             }
+        }
         }
     }
     confirmDelete?.let { name ->
@@ -1957,15 +2140,130 @@ private fun awardGenderLabel(mode: String): String =
 private fun CourseEditorCard(
     course: StartCourse,
     expanded: Boolean,
+    fillScreen: Boolean = false,
     listState: LazyListState,
     listCoordinates: () -> LayoutCoordinates?,
     onToggle: () -> Unit,
     onSave: (String, List<Int>, String?) -> Unit,
+    onCopy: (() -> Unit)? = null,
     onDelete: () -> Unit,
+    focusName: Boolean = false,
 ) {
     var name by remember(course.name) { mutableStateOf(course.name) }
     var addCp by remember(course.name) { mutableStateOf("") }
     val addBottomFocus = remember { FocusRequester() }
+    val nameFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(focusName, course.name) {
+        if (focusName) {
+            delay(40)
+            runCatching { nameFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    val editorBody: @Composable ColumnScope.() -> Unit = {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            singleLine = true,
+            label = { Text("Название") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(nameFocus),
+        )
+        if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
+            TextButton(onClick = { onSave(name.trim(), course.controls, course.name) }) {
+                Text("Переименовать")
+            }
+        }
+        if (course.controls.isEmpty()) {
+            Text(
+                "КП нет. Добавьте номера в порядке дистанции.",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        ReorderableCpList(
+            cps = course.controls,
+            listState = listState,
+            listCoordinates = listCoordinates,
+            onMove = { from, to ->
+                if (from == to) return@ReorderableCpList
+                val next = course.controls.toMutableList()
+                val item = next.removeAt(from)
+                next.add(to, item)
+                onSave(course.name, next, course.name)
+            },
+            onChange = { index, cp ->
+                if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
+                val next = course.controls.toMutableList()
+                next[index] = cp
+                onSave(course.name, next, course.name)
+            },
+            onInsertAfter = { index, cp ->
+                val next = course.controls.toMutableList()
+                next.add((index + 1).coerceIn(0, next.size), cp)
+                onSave(course.name, next, course.name)
+            },
+            onDelete = { index ->
+                onSave(course.name, course.controls.filterIndexed { i, _ -> i != index }, course.name)
+            },
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = addCp,
+                onValueChange = { addCp = it.filter { ch -> ch.isDigit() }.take(3) },
+                singleLine = true,
+                label = { Text("Добавить КП") },
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done,
+                ),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        val cp = addCp.toIntOrNull() ?: return@KeyboardActions
+                        onSave(course.name, course.controls + cp, course.name)
+                        addCp = ""
+                    },
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(addBottomFocus),
+            )
+            TextButton(
+                enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
+                onClick = {
+                    val cp = addCp.toIntOrNull() ?: return@TextButton
+                    onSave(course.name, course.controls + cp, course.name)
+                    addCp = ""
+                    runCatching { addBottomFocus.requestFocus() }
+                },
+            ) { Text("Добавить") }
+        }
+    }
+    if (fillScreen) {
+        FullscreenEditor(
+            title = "${course.name}  ${course.controls.size} КП",
+            onClose = onToggle,
+            footer = {
+                EditorActionsRow(
+                    extra = {
+                        if (onCopy != null) {
+                            CompactTextButton("Копировать", onCopy)
+                        }
+                    },
+                    onDelete = onDelete,
+                    deleteLabel = "Удалить",
+                )
+            },
+            content = editorBody,
+        )
+        return
+    }
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -1982,94 +2280,6 @@ private fun CourseEditorCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(if (expanded) "▾" else "▸", color = Muted)
-        }
-        if (expanded) {
-            EditorCard(
-                onClose = onToggle,
-                onDelete = onDelete,
-                deleteLabel = "Удалить дистанцию",
-            ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    singleLine = true,
-                    label = { Text("Название") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
-                    TextButton(onClick = { onSave(name.trim(), course.controls, course.name) }) {
-                        Text("Переименовать")
-                    }
-                }
-                if (course.controls.isEmpty()) {
-                    Text(
-                        "КП нет. Добавьте номера в порядке дистанции.",
-                        color = Muted,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                ReorderableCpList(
-                    cps = course.controls,
-                    listState = listState,
-                    listCoordinates = listCoordinates,
-                    onMove = { from, to ->
-                        if (from == to) return@ReorderableCpList
-                        val next = course.controls.toMutableList()
-                        val item = next.removeAt(from)
-                        next.add(to, item)
-                        onSave(course.name, next, course.name)
-                    },
-                    onChange = { index, cp ->
-                        if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
-                        val next = course.controls.toMutableList()
-                        next[index] = cp
-                        onSave(course.name, next, course.name)
-                    },
-                    onInsertAfter = { index, cp ->
-                        val next = course.controls.toMutableList()
-                        next.add((index + 1).coerceIn(0, next.size), cp)
-                        onSave(course.name, next, course.name)
-                    },
-                    onDelete = { index ->
-                        onSave(course.name, course.controls.filterIndexed { i, _ -> i != index }, course.name)
-                    },
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = addCp,
-                        onValueChange = { addCp = it.filter { ch -> ch.isDigit() }.take(3) },
-                        singleLine = true,
-                        label = { Text("Добавить КП") },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Done,
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onDone = {
-                                val cp = addCp.toIntOrNull() ?: return@KeyboardActions
-                                onSave(course.name, course.controls + cp, course.name)
-                                addCp = ""
-                            },
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(addBottomFocus),
-                    )
-                    TextButton(
-                        enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
-                        onClick = {
-                            val cp = addCp.toIntOrNull() ?: return@TextButton
-                            onSave(course.name, course.controls + cp, course.name)
-                            addCp = ""
-                            runCatching { addBottomFocus.requestFocus() }
-                        },
-                    ) { Text("Добавить") }
-                }
-            }
         }
         HorizontalDivider()
     }
@@ -2431,6 +2641,7 @@ fun ResultsScreen(
     people: List<StartPerson> = emptyList(),
     awardGroups: List<AwardGroupView> = emptyList(),
     competitionDate: String = "",
+    onEditorOpen: (Boolean) -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
@@ -2460,9 +2671,50 @@ fun ResultsScreen(
         )
     }
     val removedCps = remember(corrections) { EventStore.removedCps(corrections) }
+    val expandedRow = expandedId?.let { id -> results.find { it.queueId == id } }
     LaunchedEffect(q) {
         if (q.isNotBlank()) collapsed = emptySet()
     }
+    LaunchedEffect(expandedRow != null) {
+        onEditorOpen(expandedRow != null)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onEditorOpen(false) }
+    }
+    if (expandedRow != null) {
+        ResultRowDetails(
+            row = expandedRow,
+            courses = courses,
+            corrections = corrections.filter { it.logicalId == expandedRow.logicalId },
+            removedCps = removedCps,
+            startCp = startCp,
+            finishCp = finishCp,
+            onClose = { expandedId = null },
+            onAddCp = onAddCp,
+            onRemoveCp = onRemoveCp,
+            onAssignCourse = onAssignCourse,
+            onDeleteCorrection = onDeleteCorrection,
+            onDeleteFinish = { confirmDelete = expandedRow },
+            canChangeNumber = canChangeFinishNumber(
+                expandedRow.logicalId,
+                expandedRow.uid,
+                results.count { it.logicalId != null && it.logicalId == expandedRow.logicalId },
+                people.find { it.id == expandedRow.logicalId }?.issuedUid,
+            ),
+            onChangeNumber = {
+                reassignRow = expandedRow
+                reassignText = ""
+            },
+            onCopyTeamPunches = onCopyTeamPunches,
+            allResults = results,
+            people = people,
+            canPrint = canPrint,
+            onPrint = onPrint,
+            rogaine = rogaine,
+            startClockSeconds = startClockSeconds,
+            legendCps = legendCps,
+        )
+    } else {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -2547,44 +2799,15 @@ fun ResultsScreen(
                         val live = results.find { it.queueId == row.queueId } ?: row
                         ResultProtocolRow(
                             row = live,
-                            expanded = expandedId == live.queueId,
-                            courses = courses,
-                            corrections = corrections.filter { it.logicalId == live.logicalId },
-                            removedCps = removedCps,
-                            startCp = startCp,
-                            finishCp = finishCp,
-                            onToggle = {
-                                expandedId = if (expandedId == live.queueId) null else live.queueId
-                            },
-                            onAddCp = onAddCp,
-                            onRemoveCp = onRemoveCp,
-                            onAssignCourse = onAssignCourse,
-                            onDeleteCorrection = onDeleteCorrection,
-                            onDeleteFinish = { confirmDelete = live },
-                            canChangeNumber = canChangeFinishNumber(
-                                live.logicalId,
-                                live.uid,
-                                results.count { it.logicalId != null && it.logicalId == live.logicalId },
-                                people.find { it.id == live.logicalId }?.issuedUid,
-                            ),
-                            onChangeNumber = {
-                                reassignRow = live
-                                reassignText = ""
-                            },
-                            onCopyTeamPunches = onCopyTeamPunches,
-                            allResults = results,
-                            people = people,
-                            canPrint = canPrint,
-                            onPrint = onPrint,
+                            onOpen = { expandedId = live.queueId },
                             rogaine = rogaine,
-                            startClockSeconds = startClockSeconds,
-                            legendCps = legendCps,
                             teamPos = if (rogaine) teamGroupPosAt(teamIds, index) else TeamGroupPos.None,
                         )
                     }
                 }
             }
         }
+    }
     }
     confirmDelete?.let { row ->
         val who = buildString {
@@ -2707,28 +2930,8 @@ private fun CourseGroupHeader(
 @Composable
 private fun ResultProtocolRow(
     row: ScoredResult,
-    expanded: Boolean,
-    courses: List<StartCourse>,
-    corrections: List<CorrectionEntity>,
-    removedCps: Set<Int>,
-    startCp: Int,
-    finishCp: Int,
-    onToggle: () -> Unit,
-    onAddCp: (Int, String, Int) -> Unit,
-    onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
-    canPrint: Boolean = false,
-    onPrint: (ScoredResult) -> Unit = {},
-    onAssignCourse: (Int, String, String) -> Unit,
-    onDeleteCorrection: (Long) -> Unit,
-    onDeleteFinish: () -> Unit = {},
-    canChangeNumber: Boolean = false,
-    onChangeNumber: () -> Unit = {},
-    onCopyTeamPunches: (String, Int) -> Unit = { _, _ -> },
-    allResults: List<ScoredResult> = emptyList(),
-    people: List<StartPerson> = emptyList(),
+    onOpen: () -> Unit,
     rogaine: Boolean = false,
-    startClockSeconds: Int? = null,
-    legendCps: List<Int> = emptyList(),
     teamPos: TeamGroupPos = TeamGroupPos.None,
 ) {
     val dq = row.calc.status == STATUS_DQ
@@ -2739,7 +2942,7 @@ private fun ResultProtocolRow(
                 .fillMaxWidth()
                 .height(IntrinsicSize.Min)
                 .background(if (dq) Danger.copy(alpha = 0.12f) else Color.Transparent)
-                .clickable(onClick = onToggle)
+                .clickable(onClick = onOpen)
                 .padding(
                     start = if (rogaine) 4.dp else 12.dp,
                     end = 12.dp,
@@ -2825,32 +3028,6 @@ private fun ResultProtocolRow(
                 )
             }
         }
-        if (expanded) {
-            ResultRowDetails(
-                row = row,
-                courses = courses,
-                corrections = corrections,
-                removedCps = removedCps,
-                startCp = startCp,
-                finishCp = finishCp,
-                onClose = onToggle,
-                onAddCp = onAddCp,
-                onRemoveCp = onRemoveCp,
-                onAssignCourse = onAssignCourse,
-                onDeleteCorrection = onDeleteCorrection,
-                onDeleteFinish = onDeleteFinish,
-                canChangeNumber = canChangeNumber,
-                onChangeNumber = onChangeNumber,
-                onCopyTeamPunches = onCopyTeamPunches,
-                allResults = allResults,
-                people = people,
-                canPrint = canPrint,
-                onPrint = onPrint,
-                rogaine = rogaine,
-                startClockSeconds = startClockSeconds,
-                legendCps = legendCps,
-            )
-        }
         HorizontalDivider()
     }
 }
@@ -2908,9 +3085,26 @@ private fun ResultRowDetails(
         else punchCopyTargets(row.logicalId, row.teamId, copyPeople, copyFinishes)
     }
     val copiedFrom = EventStore.copiedFromLogicalId(row.logicalId, corrections)
-    EditorCard(
+    val course = courses.find { it.name.equals(row.course, true) }
+    val title = buildString {
+        append("№ ${row.logicalId ?: "—"}")
+        if (row.name.isNotBlank()) append(" · ${row.name}")
+    }
+    FullscreenEditor(
+        title = title,
         onClose = onClose,
-        modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+        footer = {
+            EditorActionsRow(
+                onClose = onClose,
+                extra = {
+                    if (canChangeNumber) {
+                        CompactTextButton("Сменить номер", onChangeNumber, Warn)
+                    }
+                },
+                onDelete = onDeleteFinish,
+                deleteLabel = "Удалить",
+            )
+        },
     ) {
         Text(
             if (rogaine) {
@@ -3010,10 +3204,6 @@ private fun ResultRowDetails(
                 }
             }
         }
-        if (canChangeNumber) {
-            CompactTextButton("Сменить номер", onChangeNumber, Warn)
-        }
-        CompactTextButton("Удалить из финиша", onDeleteFinish, Danger)
         if (id == null) {
             Text("Нет номера в протоколе — персональные корректировки недоступны.", color = Muted)
         } else if (!row.numberConflict) {
@@ -3077,6 +3267,14 @@ private fun ResultRowDetails(
             penaltyPoints = row.calc.penaltyPoints,
             pointsFinal = row.calc.pointsFinal,
             startClockSeconds = startClockSeconds,
+            personName = row.name,
+            courseName = row.course,
+            status = row.calc.status,
+            diagnostics = row.calc.diagnostics,
+            elapsedSeconds = row.calc.elapsedSeconds,
+            lengthMeters = course?.lengthMeters,
+            courseControls = course?.controls.orEmpty(),
+            legMeters = course?.legMeters.orEmpty(),
         )
     }
     if (courseChangeOpen && id != null) {
@@ -3157,6 +3355,14 @@ private fun UsedMarksDialog(
     penaltyPoints: Int = 0,
     pointsFinal: Int = 0,
     startClockSeconds: Int? = null,
+    personName: String = "",
+    courseName: String = "",
+    status: String = "",
+    diagnostics: List<String> = emptyList(),
+    elapsedSeconds: Int = 0,
+    lengthMeters: Int? = null,
+    courseControls: List<Int> = emptyList(),
+    legMeters: List<Int?> = emptyList(),
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3166,6 +3372,16 @@ private fun UsedMarksDialog(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
+                Text(
+                    personName.ifBlank { "без ФИО" },
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    courseName.ifBlank { if (rogaine) "без формата" else "без дистанции" },
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 if (rogaine) {
                     RogaineMarksList(
                         punches = punches,
@@ -3177,48 +3393,49 @@ private fun UsedMarksDialog(
                         pointsFinal = pointsFinal,
                     )
                 } else {
-                    val classified = classifyActualPunches(punches, required, startCp, finishCp)
-                    if (classified.isEmpty()) {
+                    val print = buildOrientSplitPrint(
+                        punches = punches,
+                        required = required,
+                        startCp = startCp,
+                        finishCp = finishCp,
+                        elapsedSeconds = elapsedSeconds,
+                        status = status,
+                        diagnostics = diagnostics,
+                        courseControls = courseControls,
+                        lengthMeters = lengthMeters,
+                        legMeters = legMeters,
+                    )
+                    if (print == null) {
                         Text("Нет отметок", color = Muted)
                     } else {
-                        classified.forEachIndexed { index, item ->
-                            val mark = item.mark
-                            val color = if (item.wrong) Danger else Color.Unspecified
-                            val leg = if (index == 0) {
-                                "—"
-                            } else {
-                                formatDayClock(punchLegSeconds(classified[index - 1].mark.seconds, mark.seconds))
-                            }
-                            Row(modifier = Modifier.fillMaxWidth()) {
+                        print.startLine?.let { line ->
+                            Text(
+                                line,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Column(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                            print.rows.forEach { row ->
                                 Text(
-                                    "${index + 1}",
-                                    modifier = Modifier.width(28.dp),
+                                    row.text,
                                     fontFamily = FontFamily.Monospace,
-                                    color = color,
+                                    color = if (row.wrong) Danger else Color.Unspecified,
                                     style = MaterialTheme.typography.bodySmall,
-                                )
-                                Text(
-                                    if (mark.added) "${mark.cp}*" else mark.cp.toString(),
-                                    modifier = Modifier.width(44.dp),
-                                    fontFamily = FontFamily.Monospace,
-                                    color = color,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Text(
-                                    formatDayClock(mark.seconds),
-                                    modifier = Modifier.weight(1f),
-                                    fontFamily = FontFamily.Monospace,
-                                    color = color,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Text(
-                                    leg,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = color,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
                         }
+                        Text(print.resultLine, style = MaterialTheme.typography.bodySmall)
+                        print.averageLine?.let { line ->
+                            Text(line, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(
+                            print.statusLine,
+                            color = statusColor(status),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 }
             }
@@ -4192,7 +4409,9 @@ private fun StatusFilterMenu(
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = it },
-        modifier = modifier,
+        modifier = modifier
+            .wrapContentHeight()
+            .heightIn(max = 72.dp),
     ) {
         OutlinedTextField(
             value = label,

@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod archive_orient;
 pub mod domain;
+pub mod iof_course;
 pub mod phone_sync;
 pub mod site_publish;
 
