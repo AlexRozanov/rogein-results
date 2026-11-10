@@ -756,7 +756,12 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       <section v-if="!isOrient" class="person-map">
         <h2>Путь на карте</h2>
         <div v-if="event.map_url" class="card map-card">
-          <CourseMapView :map-url="event.map_url" :path="pathPoints" @size="onMapSize" />
+          <CourseMapView
+            :map-url="event.map_url"
+            :path="pathPoints"
+            :download-name="[person.bib, person.name].filter(Boolean).join(' ') || 'karta'"
+            @size="onMapSize"
+          />
         </div>
         <p v-else class="muted">Карта для этого старта не опубликована.</p>
       </section>

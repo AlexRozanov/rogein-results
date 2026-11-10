@@ -11,6 +11,7 @@ export type PathPoint = {
 const props = defineProps<{
   mapUrl: string;
   path: PathPoint[];
+  downloadName?: string;
 }>();
 
 const emit = defineEmits<{
@@ -36,6 +37,7 @@ const MIN_SCALE = 0.125;
 const MAX_SCALE = 4;
 const WHEEL_ZOOM_FACTOR = 1.08;
 
+const rootRef = ref<HTMLElement | null>(null);
 const viewportRef = ref<HTMLElement | null>(null);
 const imageRef = ref<HTMLImageElement | null>(null);
 const scaleChoice = ref("fit");
@@ -159,14 +161,184 @@ function zoomOut() {
   scaleChoice.value = String(nearestPreset(effectiveScale.value, "down"));
 }
 
-function toggleFullscreen() {
-  isFullscreen.value = !isFullscreen.value;
+function fullscreenElement(): Element | null {
+  const doc = document as Document & { webkitFullscreenElement?: Element | null };
+  return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
+function requestNativeFullscreen(el: HTMLElement): Promise<void> {
+  const anyEl = el as HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void> | void;
+  };
+  const fn = el.requestFullscreen?.bind(el) ?? anyEl.webkitRequestFullscreen?.bind(el);
+  if (!fn) return Promise.reject(new Error("fullscreen unavailable"));
+  return Promise.resolve(fn());
+}
+
+function exitNativeFullscreen(): Promise<void> {
+  const doc = document as Document & { webkitExitFullscreen?: () => Promise<void> | void };
+  const fn = document.exitFullscreen?.bind(document) ?? doc.webkitExitFullscreen?.bind(document);
+  if (!fn) return Promise.resolve();
+  return Promise.resolve(fn());
+}
+
+function syncFullscreenFlag() {
+  isFullscreen.value = fullscreenElement() === rootRef.value;
+}
+
+async function toggleFullscreen() {
+  const el = rootRef.value;
+  if (!el) return;
+  if (fullscreenElement() === el) {
+    await exitNativeFullscreen().catch(() => {
+      isFullscreen.value = false;
+    });
+    return;
+  }
+  if (isFullscreen.value) {
+    isFullscreen.value = false;
+    return;
+  }
+  try {
+    await requestNativeFullscreen(el);
+    isFullscreen.value = true;
+  } catch {
+    isFullscreen.value = true;
+  }
+}
+
+function safeDownloadStem(raw: string) {
+  const cleaned = raw
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || "karta").slice(0, 80);
+}
+
+function drawArrow(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  size: number,
+  fill: string,
+) {
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.save();
+  ctx.translate(x2, y2);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-size, size / 2);
+  ctx.lineTo(-size, -size / 2);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPathOnCanvas(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const pts = props.path;
+  if (pts.length === 0) return;
+  const mapped = pts.map((pt) => ({ x: pt.x * width, y: pt.y * height }));
+  const stroke = Math.max(1.2, width * 0.0025);
+  const outline = stroke * 1.7;
+  const dot = stroke * 0.85;
+  const arrow = Math.max(6, width * 0.008);
+  const arrowOutline = arrow * 1.35;
+
+  const strokeLine = (widthPx: number, color: string) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = widthPx;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    mapped.forEach((pt, i) => {
+      if (i === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    });
+    ctx.stroke();
+  };
+
+  if (mapped.length > 1) {
+    strokeLine(outline, "#000");
+    drawArrow(ctx, mapped[0].x, mapped[0].y, mapped[1].x, mapped[1].y, arrowOutline, "#000");
+    strokeLine(stroke, "rgba(3, 255, 0, 1)");
+    drawArrow(ctx, mapped[0].x, mapped[0].y, mapped[1].x, mapped[1].y, arrow, "rgba(3, 255, 0, 1)");
+  }
+  for (const pt of mapped) {
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, dot, 0, Math.PI * 2);
+    ctx.fillStyle = "#111";
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, stroke * 0.35);
+    ctx.strokeStyle = "#fff";
+    ctx.stroke();
+  }
+}
+
+async function loadMapBitmap(): Promise<CanvasImageSource> {
+  const img = imageRef.value;
+  if (img && img.naturalWidth > 0) return img;
+  const response = await fetch(props.mapUrl);
+  if (!response.ok) throw new Error("Не удалось загрузить карту");
+  return createImageBitmap(await response.blob());
+}
+
+function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("tainted"));
+    }, "image/png");
+  });
+}
+
+async function downloadMapWithPath() {
+  const width = naturalWidth.value;
+  const height = naturalHeight.value;
+  if (!width || !height) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const paint = async (source: CanvasImageSource) => {
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0, width, height);
+    drawPathOnCanvas(ctx, width, height);
+    return canvasToPngBlob(canvas);
+  };
+  let blob: Blob;
+  try {
+    blob = await paint(await loadMapBitmap());
+  } catch {
+    try {
+      const response = await fetch(props.mapUrl);
+      if (!response.ok) throw new Error("fetch");
+      blob = await paint(await createImageBitmap(await response.blob()));
+    } catch {
+      window.alert("Не удалось подготовить карту для скачивания.");
+      return;
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeDownloadStem(props.downloadName || "karta")}.png`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape" && isFullscreen.value) {
+  if (event.key === "Escape" && isFullscreen.value && !fullscreenElement()) {
     isFullscreen.value = false;
   }
+}
+
+function onFullscreenChange() {
+  syncFullscreenFlag();
 }
 
 function onViewportWheel(event: WheelEvent) {
@@ -212,12 +384,19 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => recomputeFitScale());
   if (viewportRef.value) resizeObserver.observe(viewportRef.value);
   window.addEventListener("keydown", onKeydown);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+  document.addEventListener("webkitfullscreenchange" as "fullscreenchange", onFullscreenChange);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
   window.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("fullscreenchange", onFullscreenChange);
+  document.removeEventListener("webkitfullscreenchange" as "fullscreenchange", onFullscreenChange);
+  if (fullscreenElement() === rootRef.value) {
+    void exitNativeFullscreen();
+  }
   document.body.style.overflow = "";
 });
 
@@ -241,7 +420,7 @@ watch(
 </script>
 
 <template>
-  <div class="course-map" :class="{ 'is-fullscreen': isFullscreen }">
+  <div ref="rootRef" class="course-map" :class="{ 'is-fullscreen': isFullscreen }">
     <div class="course-map-toolbar">
       <label>
         Масштаб
@@ -256,9 +435,30 @@ watch(
       <button type="button" title="Уменьшить" @click="zoomOut">−</button>
       <span class="muted">{{ scalePercentLabel }}</span>
       <button type="button" title="Увеличить" @click="zoomIn">+</button>
-      <button type="button" class="course-map-fullscreen-btn" @click="toggleFullscreen">
-        {{ isFullscreen ? "Свернуть" : "На весь экран" }}
-      </button>
+      <div class="course-map-toolbar-actions">
+        <button
+          type="button"
+          class="course-map-icon-btn"
+          title="Скачать карту с путём"
+          aria-label="Скачать карту с путём"
+          :disabled="!naturalWidth || !naturalHeight"
+          @click="downloadMapWithPath"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button type="button" class="course-map-fullscreen-btn" @click="toggleFullscreen">
+          {{ isFullscreen ? "Свернуть" : "На весь экран" }}
+        </button>
+      </div>
     </div>
 
     <div
