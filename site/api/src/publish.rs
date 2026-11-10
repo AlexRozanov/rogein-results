@@ -209,10 +209,14 @@ async fn insert_event_rows(
         }
         let gender = group.gender_mode.as_deref().unwrap_or("any");
         let course_cps = serde_json::to_value(&group.course_cps)?;
+        let leg_meters = serde_json::to_value(&group.leg_meters)?;
         let id: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO award_groups (event_id, source_id, name, gender_mode, min_age, max_age, sort_order, course_cps)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO award_groups (
+                event_id, source_id, name, gender_mode, min_age, max_age, sort_order,
+                course_cps, length_meters, climb_meters, leg_meters
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
             "#,
         )
@@ -224,6 +228,9 @@ async fn insert_event_rows(
         .bind(group.max_age)
         .bind(group.sort_order.unwrap_or(idx as i32))
         .bind(course_cps)
+        .bind(group.length_meters.filter(|v| *v > 0))
+        .bind(group.climb_meters.filter(|v| *v >= 0))
+        .bind(leg_meters)
         .fetch_one(&mut **tx)
         .await?;
         group_ids.insert(group.source_id, id);

@@ -940,7 +940,8 @@ async fn load_event_detail(
 
     let groups = sqlx::query_as::<_, AwardGroupPublic>(
         r#"
-        SELECT id, source_id, name, gender_mode, min_age, max_age, sort_order, course_cps
+        SELECT id, source_id, name, gender_mode, min_age, max_age, sort_order, course_cps,
+               length_meters, climb_meters, leg_meters
         FROM award_groups
         WHERE event_id = $1
         ORDER BY sort_order ASC, name ASC
