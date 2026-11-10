@@ -91,19 +91,49 @@ function lookupXy(
   return null;
 }
 
-function mapMeters(
-  fromCp: number,
-  toCp: number,
+function segmentMeters(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  map: MapMetric,
+): number | null {
+  const meters =
+    Math.hypot((to.x - from.x) * map.width, (to.y - from.y) * map.height) * map.metersPerPixel;
+  return Number.isFinite(meters) && meters >= 0 ? meters : null;
+}
+
+function punchVertices(
+  timed: Array<{ cp: number }>,
   startCp: number | null,
   finishCp: number | null,
   map: MapMetric | null,
-): number | null {
-  if (!map) return null;
-  const a = lookupXy(fromCp, startCp, finishCp, map);
-  const b = lookupXy(toCp, startCp, finishCp, map);
-  if (!a || !b) return null;
-  const meters = Math.hypot((b.x - a.x) * map.width, (b.y - a.y) * map.height) * map.metersPerPixel;
-  return Number.isFinite(meters) && meters > 0 ? meters : null;
+): Array<{ x: number; y: number } | null> {
+  return timed.map((mark) => lookupXy(mark.cp, startCp, finishCp, map));
+}
+
+/** One segment per punch pair, so the legs sum to the same path length as the map. */
+function legMetersList(
+  vertices: Array<{ x: number; y: number } | null>,
+  map: MapMetric | null,
+): Array<number | null> {
+  if (!map || vertices.length < 2) return vertices.slice(1).map(() => null);
+  const out: Array<number | null> = [];
+  let lastMapped = vertices[0];
+  for (let i = 1; i < vertices.length; i += 1) {
+    const to = vertices[i];
+    if (to == null) {
+      out.push(lastMapped != null ? 0 : null);
+      continue;
+    }
+    const from = vertices[i - 1] ?? lastMapped;
+    if (from == null) {
+      out.push(null);
+      lastMapped = to;
+      continue;
+    }
+    out.push(segmentMeters(from, to, map));
+    lastMapped = to;
+  }
+  return out;
 }
 
 function pointsOf(cp: number, startCp: number | null, finishCp: number | null): number {
@@ -166,12 +196,12 @@ function rankAtElapsed(
 }
 
 function collectPairs(timed: Array<{ cp: number; ms: number }>) {
-  const out: Array<{ from: number; to: number; splitSec: number; cumSec: number }> = [];
+  const out: Array<{ from: number; to: number; splitSec: number; cumSec: number; at: number }> = [];
   for (let i = 1; i < timed.length; i += 1) {
     const split = wrapDeltaSec(timed[i - 1].ms, timed[i].ms);
     const cum = wrapDeltaSec(timed[0].ms, timed[i].ms);
     if (split == null || cum == null) continue;
-    out.push({ from: timed[i - 1].cp, to: timed[i].cp, splitSec: split, cumSec: cum });
+    out.push({ from: timed[i - 1].cp, to: timed[i].cp, splitSec: split, cumSec: cum, at: i });
   }
   return out;
 }
@@ -213,6 +243,9 @@ export function buildRouteStats(opts: {
   let prevPlace: number | null = null;
   const startCp = opts.startCp;
   const finishCp = opts.finishCp;
+  const selfVertices = punchVertices(timed, startCp, finishCp, opts.map);
+  const selfLegMeters = legMetersList(selfVertices, opts.map);
+  let prevAt = 0;
 
   pairs.forEach((pair, index) => {
     const key = pairKey(pair.from, pair.to);
@@ -230,8 +263,22 @@ export function buildRouteStats(opts: {
             finishCp ?? 0,
           )
         : null;
-    const meters = xmlMeters ?? mapMeters(pair.from, pair.to, startCp, finishCp, opts.map);
+    let meters = xmlMeters;
+    if (meters == null) {
+      let sum: number | null = 0;
+      for (let i = prevAt; i < pair.at; i += 1) {
+        const part = selfLegMeters[i];
+        if (part == null) {
+          sum = null;
+          break;
+        }
+        sum += part;
+      }
+      meters = sum;
+    }
+    prevAt = pair.at;
     if (meters != null) {
+      meters = Math.round(meters / 10) * 10;
       cumMeters += meters;
       hasCumMeters = true;
     }
@@ -287,7 +334,7 @@ export function formatLoss(seconds: number | null | undefined): string {
 }
 
 export function formatKm(meters: number | null | undefined): string {
-  if (meters == null || !Number.isFinite(meters) || meters <= 0) return "—";
+  if (meters == null || !Number.isFinite(meters) || meters < 0) return "—";
   return (meters / 1000).toFixed(2);
 }
 

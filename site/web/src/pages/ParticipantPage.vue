@@ -235,8 +235,8 @@ const firstMissedCp = computed(() => courseProgress.value.find((item) => item.bl
 const routeStats = computed(() => {
   if (isOrient.value || !person.value || !event.value) return null;
   const group = selectedGroup.value;
-  const width = mapImageSize.value?.width ?? event.value.map_width ?? null;
-  const height = mapImageSize.value?.height ?? event.value.map_height ?? null;
+  const width = event.value.map_width ?? mapImageSize.value?.width ?? null;
+  const height = event.value.map_height ?? mapImageSize.value?.height ?? null;
   const mpp = event.value.meters_per_pixel ?? null;
   const map =
     width != null &&
@@ -289,6 +289,8 @@ const courseError = computed(() => {
 });
 
 const resolvedDistanceM = computed(() => {
+  const fromLegs = routeStats.value?.rows.at(-1)?.cumMeters;
+  if (fromLegs != null && Number.isFinite(fromLegs) && fromLegs > 0) return fromLegs;
   const stored = person.value?.distance_m;
   if (stored != null && Number.isFinite(stored) && stored > 0) return stored;
   return pathDistanceM(pathPoints.value, event.value, mapImageSize.value);
@@ -788,7 +790,7 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       </div>
       <div v-if="!isOrient" class="stat">
         <span class="stat-label">Расстояние</span>
-        <span class="stat-value">{{ metrics.km != null ? `${fmtNum(metrics.km, 1)} км` : "—" }}</span>
+        <span class="stat-value">{{ metrics.km != null ? `${fmtNum(metrics.km, 2)} км` : "—" }}</span>
       </div>
       <div v-if="isOrient" class="stat">
         <span class="stat-label">Старт</span>
@@ -862,6 +864,18 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
     </section>
 
     <div class="person-main" :class="{ 'is-simple': isOrient }">
+      <section v-if="!isOrient" class="person-map">
+        <h2>Путь на карте</h2>
+        <div v-if="event.map_url" class="card map-card">
+          <CourseMapView
+            :map-url="event.map_url"
+            :path="pathPoints"
+            :download-name="[person.bib, person.name].filter(Boolean).join(' ') || 'karta'"
+            @size="onMapSize"
+          />
+        </div>
+        <p v-else class="muted">Карта для этого старта не опубликована.</p>
+      </section>
       <section v-if="routeStats" class="person-legs">
         <h2>Перегоны</h2>
         <div class="card marks-card legs-card">
@@ -922,99 +936,52 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
         </div>
       </section>
 
-      <div class="person-side">
-        <section v-if="!isOrient" class="person-map">
-          <h2>Путь на карте</h2>
-          <div v-if="event.map_url" class="card map-card">
-            <CourseMapView
-              :map-url="event.map_url"
-              :path="pathPoints"
-              :download-name="[person.bib, person.name].filter(Boolean).join(' ') || 'karta'"
-              @size="onMapSize"
-            />
-          </div>
-          <p v-else class="muted">Карта для этого старта не опубликована.</p>
-        </section>
-        <section class="person-marks">
+      <section v-if="isOrient" class="person-marks">
         <h2>Финишные отметки</h2>
         <div class="card marks-card">
-          <template v-if="isOrient">
-            <p v-if="!orientSplitView" class="muted">Отметок нет</p>
-            <template v-else>
-              <table class="marks-table is-orient" :class="{ 'has-pace': orientSplitView.showPace }">
-                <thead>
-                  <tr>
-                    <th class="col-n">№</th>
-                    <th>КП</th>
-                    <th>От старта</th>
-                    <th>Сплит</th>
-                    <th v-if="orientSplitView.showPace">Скорость</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="mark in orientSplitView.rows"
-                    :key="mark.key"
-                    :class="{
-                      'is-wrong': mark.wrong,
-                      'is-start': mark.role === 'start',
-                      'is-finish': mark.role === 'finish',
-                    }"
-                  >
-                    <td class="col-n">{{ mark.n ?? "" }}</td>
-                    <td class="col-cp">
-                      {{ mark.label }}
-                      <span v-if="mark.note" class="mark-note">{{ mark.note }}</span>
-                    </td>
-                    <td class="col-time">{{ mark.time }}</td>
-                    <td class="col-split">{{ mark.split }}</td>
-                    <td v-if="orientSplitView.showPace" class="col-pace">{{ mark.pace || "" }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div class="marks-footer">
-                <p>{{ orientSplitView.resultLine }}</p>
-                <p v-if="orientSplitView.averageLine">{{ orientSplitView.averageLine }}</p>
-                <p class="marks-status" :class="{ ok: orientSplitView.statusOk, bad: !orientSplitView.statusOk }">
-                  {{ orientSplitView.statusLine }}
-                </p>
-              </div>
-            </template>
-          </template>
+          <p v-if="!orientSplitView" class="muted">Отметок нет</p>
           <template v-else>
-            <p v-if="!markView.rows.length" class="muted">Отметок нет</p>
-            <table v-else class="marks-table">
+            <table class="marks-table is-orient" :class="{ 'has-pace': orientSplitView.showPace }">
               <thead>
                 <tr>
                   <th class="col-n">№</th>
                   <th>КП</th>
                   <th>От старта</th>
-                  <th>От предыдущего КП</th>
+                  <th>Сплит</th>
+                  <th v-if="orientSplitView.showPace">Скорость</th>
                 </tr>
               </thead>
               <tbody>
                 <tr
-                  v-for="mark in markView.rows"
+                  v-for="mark in orientSplitView.rows"
                   :key="mark.key"
                   :class="{
-                    'is-wrong': mark.kind === 'extra' || mark.kind === 'out_of_order',
-                    'is-missed': mark.kind === 'missed',
+                    'is-wrong': mark.wrong,
+                    'is-start': mark.role === 'start',
+                    'is-finish': mark.role === 'finish',
                   }"
                 >
                   <td class="col-n">{{ mark.n ?? "" }}</td>
                   <td class="col-cp">
-                    КП {{ mark.cp }}
-                    <span v-if="punchKindNote(mark.kind)" class="mark-note">{{ punchKindNote(mark.kind) }}</span>
+                    {{ mark.label }}
+                    <span v-if="mark.note" class="mark-note">{{ mark.note }}</span>
                   </td>
-                  <td>{{ mark.kind === "missed" ? "—" : fmtHms(mark.fromStartSec) }}</td>
-                  <td>{{ mark.kind === "missed" || mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
+                  <td class="col-time">{{ mark.time }}</td>
+                  <td class="col-split">{{ mark.split }}</td>
+                  <td v-if="orientSplitView.showPace" class="col-pace">{{ mark.pace || "" }}</td>
                 </tr>
               </tbody>
             </table>
+            <div class="marks-footer">
+              <p>{{ orientSplitView.resultLine }}</p>
+              <p v-if="orientSplitView.averageLine">{{ orientSplitView.averageLine }}</p>
+              <p class="marks-status" :class="{ ok: orientSplitView.statusOk, bad: !orientSplitView.statusOk }">
+                {{ orientSplitView.statusLine }}
+              </p>
+            </div>
           </template>
         </div>
-        </section>
-      </div>
+      </section>
     </div>
   </template>
 </template>
