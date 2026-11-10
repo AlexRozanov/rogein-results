@@ -16,7 +16,7 @@ export type SplitCell = {
   cumPlace: number | null;
 };
 
-function asMarks(raw: unknown): SplitMark[] {
+export function asMarks(raw: unknown): SplitMark[] {
   if (!Array.isArray(raw)) return [];
   const out: SplitMark[] = [];
   for (const item of raw) {
@@ -52,7 +52,7 @@ export function wrapDeltaSec(fromMs: number, toMs: number): number | null {
 
 export { parseMarkMs };
 
-function punchWindow(marks: SplitMark[], startCp: number | null, finishCp: number | null) {
+export function punchWindow(marks: SplitMark[], startCp: number | null, finishCp: number | null) {
   if (!marks.length) return [] as SplitMark[];
   let startIdx = startCp != null ? marks.findIndex((mark) => mark.cp_number === startCp) : 0;
   if (startIdx < 0) startIdx = 0;

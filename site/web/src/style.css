@@ -987,8 +987,79 @@ th { color: #64748b; font-weight: 600; }
 }
 
 .person-marks h2,
-.person-map h2 {
+.person-map h2,
+.person-legs h2 {
   margin-bottom: 8px;
+}
+
+.person-side {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.legs-scroll {
+  overflow-x: auto;
+}
+
+.legs-table {
+  min-width: 42rem;
+  font-size: 0.86em;
+}
+
+.legs-table th,
+.legs-table td {
+  padding: 5px 6px;
+}
+
+.legs-table .col-leg {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.legs-table .leg-arrow {
+  color: #94a3b8;
+  font-weight: 500;
+  padding: 0 4px;
+}
+
+.legs-table .col-loss {
+  color: #b45309;
+}
+
+.legs-table tr.is-best .col-loss {
+  color: #94a3b8;
+}
+
+.legs-table .col-leg-place,
+.legs-table .col-geo {
+  font-variant-numeric: tabular-nums;
+}
+
+.legs-table .col-score {
+  white-space: nowrap;
+}
+
+.legs-table .leg-points {
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.legs-table .leg-live-place {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.legs-table .place-up {
+  color: #15803d;
+  font-size: 0.85em;
+  margin-left: 4px;
+}
+
+.legs-table .place-down {
+  color: #b91c1c;
+  font-size: 0.85em;
+  margin-left: 4px;
 }
 
 .marks-card {
@@ -1385,22 +1456,34 @@ th { color: #64748b; font-weight: 600; }
   }
 
   .person-main:not(.is-simple) {
-    grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+    grid-template-columns: minmax(28rem, 1.05fr) minmax(22rem, 0.95fr);
     align-items: stretch;
     min-height: calc(100dvh - 16rem);
   }
 
-  .person-main:not(.is-simple) .person-marks {
+  .person-main:not(.is-simple) .person-legs {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
 
-  .person-main:not(.is-simple) .person-marks .marks-card {
+  .person-main:not(.is-simple) .person-legs .legs-card {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
+    overflow: auto;
+  }
+
+  .person-main:not(.is-simple) .person-side {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .person-main:not(.is-simple) .person-map {
+    flex: 1 1 auto;
+    min-height: 18rem;
   }
 
   .person-map {

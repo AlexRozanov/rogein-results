@@ -18,6 +18,13 @@ import {
   asOptionalIntList,
   formatCpParen,
 } from "../orientSplits";
+import {
+  buildRouteStats,
+  formatKm,
+  formatKmh,
+  formatLoss,
+  formatPointsPerMin,
+} from "../routeStats";
 
 type PathPoint = {
   x: number;
@@ -224,6 +231,43 @@ const courseProgress = computed(() => {
 
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
+
+const routeStats = computed(() => {
+  if (isOrient.value || !person.value || !event.value) return null;
+  const group = selectedGroup.value;
+  const width = mapImageSize.value?.width ?? event.value.map_width ?? null;
+  const height = mapImageSize.value?.height ?? event.value.map_height ?? null;
+  const mpp = event.value.meters_per_pixel ?? null;
+  const map =
+    width != null &&
+    height != null &&
+    mpp != null &&
+    Number(width) > 0 &&
+    Number(height) > 0 &&
+    Number(mpp) > 0
+      ? {
+          width: Number(width),
+          height: Number(height),
+          metersPerPixel: Number(mpp),
+          points: mapPointCoords(event.value.map_points),
+        }
+      : null;
+  const peers = event.value.results.filter(
+    (row) => group != null && row.award_group_id === group.id,
+  );
+  return buildRouteStats({
+    selfMarks: person.value.marks,
+    peers: peers.map((row) => ({
+      sourceId: String(row.participant_source_id),
+      marks: row.marks,
+    })),
+    selfSourceId: String(person.value.source_id),
+    startCp: startCp.value,
+    finishCp: finishCp.value,
+    rogaine: true,
+    map,
+  });
+});
 
 const actualOrder = computed(() =>
   classifiedPunches.value.filter((row) => row.kind !== "missed"),
@@ -433,8 +477,8 @@ function mapPointCoords(raw: unknown): Array<{ x: number; y: number; cp: number 
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
-    const x = Number(row.map_x ?? row.mapX);
-    const y = Number(row.map_y ?? row.mapY);
+    const x = Number(row.map_x ?? row.mapX ?? row.x);
+    const y = Number(row.map_y ?? row.mapY ?? row.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     const cpRaw = row.cp_number ?? row.cp;
     const cp = cpRaw == null || cpRaw === "" ? NaN : Number(cpRaw);
@@ -818,7 +862,80 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
     </section>
 
     <div class="person-main" :class="{ 'is-simple': isOrient }">
-      <section class="person-marks">
+      <section v-if="routeStats" class="person-legs">
+        <h2>Перегоны</h2>
+        <div class="card marks-card legs-card">
+          <div class="legs-scroll">
+            <table
+              class="marks-table legs-table"
+              :class="{ 'has-geo': routeStats.hasDistance, 'has-points': routeStats.hasPoints }"
+            >
+              <thead>
+                <tr>
+                  <th class="col-n">№</th>
+                  <th>Перегон</th>
+                  <th>Время</th>
+                  <th title="Лучшее время этого перегона в группе">Лучшее</th>
+                  <th title="Отставание от лучшего на этом перегоне">Потери</th>
+                  <th title="Место среди тех, кто бежал этот же перегон">Место</th>
+                  <th v-if="routeStats.hasDistance" title="Длина перегона">Км</th>
+                  <th v-if="routeStats.hasDistance">Км/ч</th>
+                  <th v-if="routeStats.hasDistance">Мин/км</th>
+                  <th title="Баллы за минуту на перегоне">Б/мин</th>
+                  <th>От старта</th>
+                  <th v-if="routeStats.hasDistance">Σ км</th>
+                  <th title="Набранные баллы и место в этот момент">Баллы</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in routeStats.rows"
+                  :key="row.n"
+                  :class="{ 'is-best': row.lossSec == null, 'has-loss': row.lossSec != null }"
+                >
+                  <td class="col-n">{{ row.n }}</td>
+                  <td class="col-leg">
+                    <span class="leg-from">{{ row.fromLabel }}</span>
+                    <span class="leg-arrow">→</span>
+                    <span class="leg-to">{{ row.toLabel }}</span>
+                  </td>
+                  <td class="col-time">{{ formatSplitMmSs(row.splitSec) }}</td>
+                  <td class="col-time">{{ formatSplitMmSs(row.bestSec) }}</td>
+                  <td class="col-loss">{{ formatLoss(row.lossSec) }}</td>
+                  <td class="col-leg-place">{{ row.legPlace }}/{{ row.legCount }}</td>
+                  <td v-if="routeStats.hasDistance" class="col-geo">{{ formatKm(row.meters) }}</td>
+                  <td v-if="routeStats.hasDistance" class="col-geo">{{ formatKmh(row.kmh) }}</td>
+                  <td v-if="routeStats.hasDistance" class="col-pace">{{ row.pace || "—" }}</td>
+                  <td class="col-geo">{{ formatPointsPerMin(row.pointsPerMin) }}</td>
+                  <td class="col-time">{{ formatRaceTime(row.cumSec) }}</td>
+                  <td v-if="routeStats.hasDistance" class="col-geo">{{ formatKm(row.cumMeters) }}</td>
+                  <td class="col-score">
+                    <span class="leg-points">{{ row.cumPoints }}</span>
+                    <span class="leg-live-place">{{ row.place }}</span>
+                    <span v-if="row.placeDelta != null && row.placeDelta > 0" class="place-up">▲{{ row.placeDelta }}</span>
+                    <span v-else-if="row.placeDelta != null && row.placeDelta < 0" class="place-down">▼{{ -row.placeDelta }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <div class="person-side">
+        <section v-if="!isOrient" class="person-map">
+          <h2>Путь на карте</h2>
+          <div v-if="event.map_url" class="card map-card">
+            <CourseMapView
+              :map-url="event.map_url"
+              :path="pathPoints"
+              :download-name="[person.bib, person.name].filter(Boolean).join(' ') || 'karta'"
+              @size="onMapSize"
+            />
+          </div>
+          <p v-else class="muted">Карта для этого старта не опубликована.</p>
+        </section>
+        <section class="person-marks">
         <h2>Финишные отметки</h2>
         <div class="card marks-card">
           <template v-if="isOrient">
@@ -896,20 +1013,8 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
             </table>
           </template>
         </div>
-      </section>
-
-      <section v-if="!isOrient" class="person-map">
-        <h2>Путь на карте</h2>
-        <div v-if="event.map_url" class="card map-card">
-          <CourseMapView
-            :map-url="event.map_url"
-            :path="pathPoints"
-            :download-name="[person.bib, person.name].filter(Boolean).join(' ') || 'karta'"
-            @size="onMapSize"
-          />
-        </div>
-        <p v-else class="muted">Карта для этого старта не опубликована.</p>
-      </section>
+        </section>
+      </div>
     </div>
   </template>
 </template>
