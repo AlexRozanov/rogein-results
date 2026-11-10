@@ -15,6 +15,12 @@ export type MapMetric = {
   points: Array<{ x: number; y: number; cp: number | null; kind: string | null }>;
 };
 
+export type PathVertex = {
+  x: number;
+  y: number;
+  cp?: number | null;
+};
+
 export type RoutePeer = {
   sourceId: string;
   marks: unknown;
@@ -110,8 +116,7 @@ function punchVertices(
   return timed.map((mark) => lookupXy(mark.cp, startCp, finishCp, map));
 }
 
-/** One segment per punch pair, so the legs sum to the same path length as the map. */
-function legMetersList(
+function hypotLegMeters(
   vertices: Array<{ x: number; y: number } | null>,
   map: MapMetric | null,
 ): Array<number | null> {
@@ -134,6 +139,79 @@ function legMetersList(
     lastMapped = to;
   }
   return out;
+}
+
+function pathIndexOfCp(path: PathVertex[], cp: number, from: number): number {
+  for (let i = from; i < path.length; i += 1) {
+    if (path[i].cp === cp) return i;
+  }
+  return -1;
+}
+
+function alongPathMeters(path: PathVertex[], fromIdx: number, toIdx: number, map: MapMetric): number | null {
+  if (toIdx < fromIdx) return null;
+  if (toIdx === fromIdx) return 0;
+  let meters = 0;
+  for (let i = fromIdx; i < toIdx; i += 1) {
+    const part = segmentMeters(path[i], path[i + 1], map);
+    if (part == null) return null;
+    meters += part;
+  }
+  return meters;
+}
+
+/** Split the published path at punch CPs so legs add up to the same total as the map. */
+function pathLegMeters(
+  punches: Array<{ cp: number }>,
+  path: PathVertex[] | undefined,
+  map: MapMetric | null,
+): Array<number | null> | null {
+  if (!map || !path?.length || punches.length < 2) return null;
+  const tagged = path.some((point) => point.cp != null);
+  if (!tagged) return null;
+  const idx: Array<number | null> = [];
+  let searchFrom = 0;
+  for (const punch of punches) {
+    const found = pathIndexOfCp(path, punch.cp, searchFrom);
+    if (found < 0) {
+      idx.push(null);
+      continue;
+    }
+    idx.push(found);
+    searchFrom = found + 1;
+  }
+  if (idx.every((value) => value == null)) return null;
+  const out: Array<number | null> = [];
+  let lastIdx = idx[0];
+  for (let i = 1; i < punches.length; i += 1) {
+    const toIdx = idx[i];
+    if (toIdx == null) {
+      out.push(lastIdx != null ? 0 : null);
+      continue;
+    }
+    if (lastIdx == null) {
+      out.push(null);
+      lastIdx = toIdx;
+      continue;
+    }
+    out.push(alongPathMeters(path, lastIdx, toIdx, map));
+    lastIdx = toIdx;
+  }
+  return out;
+}
+
+function scaleLegsToTotal(legs: Array<number | null>, totalMeters: number | null | undefined): Array<number | null> {
+  if (totalMeters == null || !Number.isFinite(totalMeters) || totalMeters <= 0) return legs;
+  let raw = 0;
+  let counted = 0;
+  for (const part of legs) {
+    if (part == null) continue;
+    raw += part;
+    counted += 1;
+  }
+  if (counted === 0 || !(raw > 0)) return legs;
+  const k = totalMeters / raw;
+  return legs.map((part) => (part == null ? null : part * k));
 }
 
 function pointsOf(cp: number, startCp: number | null, finishCp: number | null): number {
@@ -214,6 +292,8 @@ export function buildRouteStats(opts: {
   finishCp: number | null;
   rogaine: boolean;
   map: MapMetric | null;
+  path?: PathVertex[];
+  totalMeters?: number | null;
   courseControls?: number[];
   legMeters?: Array<number | null>;
 }): RouteStats | null {
@@ -244,7 +324,10 @@ export function buildRouteStats(opts: {
   const startCp = opts.startCp;
   const finishCp = opts.finishCp;
   const selfVertices = punchVertices(timed, startCp, finishCp, opts.map);
-  const selfLegMeters = legMetersList(selfVertices, opts.map);
+  const selfLegMeters = scaleLegsToTotal(
+    pathLegMeters(timed, opts.path, opts.map) ?? hypotLegMeters(selfVertices, opts.map),
+    opts.totalMeters,
+  );
   let prevAt = 0;
 
   pairs.forEach((pair, index) => {
@@ -278,7 +361,6 @@ export function buildRouteStats(opts: {
     }
     prevAt = pair.at;
     if (meters != null) {
-      meters = Math.round(meters / 10) * 10;
       cumMeters += meters;
       hasCumMeters = true;
     }

@@ -255,6 +255,11 @@ const routeStats = computed(() => {
   const peers = event.value.results.filter(
     (row) => group != null && row.award_group_id === group.id,
   );
+  const stored = person.value.distance_m;
+  const totalMeters =
+    stored != null && Number.isFinite(stored) && stored > 0
+      ? stored
+      : pathDistanceM(pathPoints.value, event.value, mapImageSize.value);
   return buildRouteStats({
     selfMarks: person.value.marks,
     peers: peers.map((row) => ({
@@ -266,6 +271,12 @@ const routeStats = computed(() => {
     finishCp: finishCp.value,
     rogaine: true,
     map,
+    path: pathPoints.value.map((point) => ({
+      x: point.x,
+      y: point.y,
+      cp: point.cp_number ?? null,
+    })),
+    totalMeters,
   });
 });
 
@@ -289,8 +300,6 @@ const courseError = computed(() => {
 });
 
 const resolvedDistanceM = computed(() => {
-  const fromLegs = routeStats.value?.rows.at(-1)?.cumMeters;
-  if (fromLegs != null && Number.isFinite(fromLegs) && fromLegs > 0) return fromLegs;
   const stored = person.value?.distance_m;
   if (stored != null && Number.isFinite(stored) && stored > 0) return stored;
   return pathDistanceM(pathPoints.value, event.value, mapImageSize.value);
@@ -790,7 +799,7 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       </div>
       <div v-if="!isOrient" class="stat">
         <span class="stat-label">Расстояние</span>
-        <span class="stat-value">{{ metrics.km != null ? `${fmtNum(metrics.km, 2)} км` : "—" }}</span>
+        <span class="stat-value">{{ metrics.km != null ? `${fmtNum(metrics.km, 1)} км` : "—" }}</span>
       </div>
       <div v-if="isOrient" class="stat">
         <span class="stat-label">Старт</span>
