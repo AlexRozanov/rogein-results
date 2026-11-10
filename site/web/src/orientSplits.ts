@@ -263,6 +263,107 @@ function rankTimes(values: Array<number | null>): Array<number | null> {
   return places;
 }
 
+export function formatRaceTime(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+export function formatSplitMmSs(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+export function formatPaceMinPerKm(meters: number | null | undefined, seconds: number | null | undefined): string | null {
+  if (meters == null || meters <= 0 || seconds == null || seconds <= 0) return null;
+  const secPerKm = Math.max(0, Math.round((seconds * 1000) / meters));
+  const min = Math.floor(secPerKm / 60);
+  const sec = secPerKm % 60;
+  return `${min}:${String(sec).padStart(2, "0")}/км`;
+}
+
+export function courseLegMeters(
+  controls: number[],
+  legMeters: Array<number | null | undefined>,
+  fromCp: number,
+  toCp: number,
+  startCp: number,
+  finishCp: number,
+): number | null {
+  if (!legMeters.length) return null;
+  const seq = [startCp, ...controls, finishCp];
+  const fromIdx = seq.indexOf(fromCp);
+  const toIdx = seq.indexOf(toCp);
+  if (fromIdx < 0 || toIdx !== fromIdx + 1) return null;
+  const meters = Number(legMeters[fromIdx]);
+  return Number.isFinite(meters) && meters > 0 ? meters : null;
+}
+
+export function hasCourseDistances(
+  lengthMeters: number | null | undefined,
+  legMeters: Array<number | null | undefined>,
+): boolean {
+  if (lengthMeters != null && lengthMeters > 0) return true;
+  return legMeters.some((m) => m != null && Number(m) > 0);
+}
+
+function orientDiagnosticLabel(code: string): string {
+  if (code === "missing_course") return "нет дистанции";
+  if (code === "course_empty") return "дистанция без КП";
+  if (code === "course_unknown") return "дистанция не найдена";
+  if (code === "start_cp_not_configured") return "не задана стартовая станция";
+  if (code === "start_time_not_configured") return "не задано общее время старта";
+  if (code === "no_marks") return "нет отметок";
+  if (code === "start_missing") return "нет отметки старта";
+  if (code === "finish_missing") return "нет отметки финиша";
+  if (code === "finish_not_last") return "финиш не последняя отметка";
+  if (code === "course_incomplete") return "дистанция пройдена не полностью";
+  if (code === "overtime") return "превышение контрольного времени";
+  if (code === "did_not_finish") return "не финишировал";
+  return code;
+}
+
+export function resultStatusLine(status: string, diagnostics: string[] = []): string {
+  const reasons = [...new Set(diagnostics.map(orientDiagnosticLabel).filter(Boolean))];
+  const s = status.trim();
+  if (s === "OK") return "OK";
+  if (s === "Дисквалификация" || s === "DSQ") {
+    const reason = reasons.length ? reasons : ["превышение лимита времени"];
+    return `Дисквалификация: ${reason.join(", ")}`;
+  }
+  if (s === "Не стартовал" || s === "DNS") {
+    const reason = reasons.length ? reasons : ["не стартовал"];
+    return `Не стартовал: ${reason.join(", ")}`;
+  }
+  if (s === "DNF" || s === "Не финишировал") return "Не финишировал";
+  if (s === "Ошибка") {
+    const reason = reasons.length ? reasons : ["ошибка"];
+    return `Ошибка: ${reason.join(", ")}`;
+  }
+  return reasons.length ? `${s}: ${reasons.join(", ")}` : s;
+}
+
+export function asOptionalIntList(raw: unknown): Array<number | null> {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((value) => {
+    if (value == null || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  });
+}
+
+export function formatCpParen(cp: number): string {
+  return cp < 100 ? `( ${cp})` : `(${cp})`;
+}
+
 export function buildSplitCells(
   rows: { marks?: unknown }[],
   cols: SplitCol[],

@@ -85,6 +85,12 @@ pub struct PublishAwardGroup {
     pub sort_order: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub course_cps: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_meters: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub climb_meters: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub leg_meters: Vec<Option<i32>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -671,6 +677,9 @@ fn collect_rogaine_publish(
             max_age: group.max_age.map(|v| v as i32),
             sort_order: group.sort_order as i32,
             course_cps: Vec::new(),
+            length_meters: None,
+            climb_meters: None,
+            leg_meters: Vec::new(),
         });
         let rows = load_group_rows(conn, group)?;
         let places = assign_places(&rows);
@@ -746,6 +755,13 @@ fn collect_orient_publish(
                 .filter(|cp| !removed_cps.contains(cp))
                 .map(|cp| cp as i32)
                 .collect(),
+            length_meters: course.length_meters.map(|v| v as i32),
+            climb_meters: course.climb_meters.map(|v| v as i32),
+            leg_meters: course
+                .leg_meters
+                .iter()
+                .map(|v| v.filter(|m| *m > 0).map(|m| m as i32))
+                .collect(),
         });
         let places = orient_places(&rows);
         append_publish_rows(
@@ -782,6 +798,9 @@ fn collect_orient_publish(
             max_age: None,
             sort_order: 10_000 + extra_idx as i32,
             course_cps: Vec::new(),
+            length_meters: None,
+            climb_meters: None,
+            leg_meters: Vec::new(),
         });
         let places = orient_places(&rows);
         append_publish_rows(

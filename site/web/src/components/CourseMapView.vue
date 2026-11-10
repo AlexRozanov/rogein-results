@@ -455,8 +455,33 @@ watch(
             />
           </svg>
         </button>
-        <button type="button" class="course-map-fullscreen-btn" @click="toggleFullscreen">
-          {{ isFullscreen ? "Свернуть" : "На весь экран" }}
+        <button
+          type="button"
+          class="course-map-icon-btn"
+          :title="isFullscreen ? 'Свернуть' : 'На весь экран'"
+          :aria-label="isFullscreen ? 'Свернуть' : 'На весь экран'"
+          @click="toggleFullscreen"
+        >
+          <svg v-if="!isFullscreen" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M8 4H4v4M16 4h4v4M4 16v4h4M20 16v4h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M8 4v4H4M16 4v4h4M4 16h4v4M20 16h-4v4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
         </button>
       </div>
     </div>

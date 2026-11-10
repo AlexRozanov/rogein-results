@@ -4,7 +4,20 @@ import { useRoute, useRouter } from "vue-router";
 import CourseMapView from "../components/CourseMapView.vue";
 import PageLoading from "../components/PageLoading.vue";
 import { isPublishedGone, replaceWithPublished } from "../liveToPublished";
-import { parseMarkMs, wrapDeltaSec, inferCourseCps, classifyCoursePunches } from "../orientSplits";
+import {
+  parseMarkMs,
+  wrapDeltaSec,
+  inferCourseCps,
+  classifyCoursePunches,
+  formatRaceTime,
+  formatSplitMmSs,
+  formatPaceMinPerKm,
+  courseLegMeters,
+  hasCourseDistances,
+  resultStatusLine,
+  asOptionalIntList,
+  formatCpParen,
+} from "../orientSplits";
 
 type PathPoint = {
   x: number;
@@ -34,6 +47,9 @@ type AwardGroup = {
   id: number;
   name: string;
   course_cps?: number[] | null;
+  length_meters?: number | null;
+  climb_meters?: number | null;
+  leg_meters?: Array<number | null> | null;
 };
 
 type ResultRow = {
@@ -300,6 +316,86 @@ const markView = computed(() => {
     startClock: marks[startIdx] ? fmtMarkTime(marks[startIdx].mark_time) : null,
     finishClock: finishIdx >= 0 && marks[finishIdx] ? fmtMarkTime(marks[finishIdx].mark_time) : null,
     rows,
+  };
+});
+
+const orientSplitView = computed(() => {
+  if (!isOrient.value) return null;
+  const punches = classifiedPunches.value.filter((row) => row.kind !== "missed");
+  if (!punches.length) return null;
+  const start = startCp.value;
+  const finish = finishCp.value;
+  const controls = courseControls.value;
+  const legs = asOptionalIntList(selectedGroup.value?.leg_meters);
+  const lengthMeters = Number(selectedGroup.value?.length_meters);
+  const length = Number.isFinite(lengthMeters) && lengthMeters > 0 ? lengthMeters : null;
+  const showPace = hasCourseDistances(length, legs);
+  const startPunch = punches.find((row) => row.kind === "start") ?? punches[0];
+  const t0 = parseMarkMs(startPunch.mark_time);
+  const rows: Array<{
+    key: string;
+    role: "start" | "cp" | "finish";
+    n: number | null;
+    label: string;
+    time: string;
+    split: string;
+    pace: string | null;
+    wrong: boolean;
+    note: string;
+  }> = [];
+  let cpOrder = 1;
+  punches.forEach((row, index) => {
+    const prev = index > 0 ? punches[index - 1] : null;
+    const ms = parseMarkMs(row.mark_time);
+    const elapsedSec = t0 != null && ms != null ? wrapDeltaSec(t0, ms) : null;
+    const splitSec =
+      prev != null ? (() => {
+        const prevMs = parseMarkMs(prev.mark_time);
+        return prevMs != null && ms != null ? wrapDeltaSec(prevMs, ms) : null;
+      })() : null;
+    const pace =
+      showPace && splitSec != null && prev != null
+        ? formatPaceMinPerKm(
+            courseLegMeters(controls, legs, prev.cp, row.cp, start ?? 0, finish ?? 0),
+            splitSec,
+          )
+        : null;
+    if (row.kind === "start") {
+      rows.push({
+        key: row.seq != null ? `s-${row.seq}` : `start-${index}`,
+        role: "start",
+        n: null,
+        label: "Старт",
+        time: fmtMarkTime(row.mark_time) || "—",
+        split: "",
+        pace: null,
+        wrong: false,
+        note: "",
+      });
+      return;
+    }
+    const finishRow = row.kind === "finish";
+    rows.push({
+      key: row.seq != null ? `s-${row.seq}` : `p-${index}-${row.cp}`,
+      role: finishRow ? "finish" : "cp",
+      n: finishRow ? null : cpOrder++,
+      label: finishRow ? "Финиш" : formatCpParen(row.cp),
+      time: formatRaceTime(elapsedSec),
+      split: splitSec == null ? "" : formatSplitMmSs(splitSec),
+      pace,
+      wrong: row.kind === "extra" || row.kind === "out_of_order",
+      note: punchKindNote(row.kind),
+    });
+  });
+  const elapsed = selectedResult.value?.elapsed_seconds ?? person.value?.elapsed_seconds ?? null;
+  const average = formatPaceMinPerKm(length, elapsed);
+  return {
+    rows,
+    showPace,
+    resultLine: `Результат: ${formatRaceTime(elapsed)}`,
+    averageLine: average ? `Средняя скорость  ${average}` : null,
+    statusLine: `Отметка — ${resultStatusLine(selectedStatus.value, diagnostics.value)}`,
+    statusOk: selectedStatus.value === "OK",
   };
 });
 
@@ -721,35 +817,80 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       <section class="person-marks">
         <h2>Финишные отметки</h2>
         <div class="card marks-card">
-          <p v-if="!markView.rows.length" class="muted">Отметок нет</p>
-          <table v-else class="marks-table">
-            <thead>
-              <tr>
-                <th class="col-n">№</th>
-                <th>КП</th>
-                <th>От старта</th>
-                <th>От предыдущего КП</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="mark in markView.rows"
-                :key="mark.key"
-                :class="{
-                  'is-wrong': mark.kind === 'extra' || mark.kind === 'out_of_order',
-                  'is-missed': mark.kind === 'missed',
-                }"
-              >
-                <td class="col-n">{{ mark.n ?? "" }}</td>
-                <td class="col-cp">
-                  КП {{ mark.cp }}
-                  <span v-if="punchKindNote(mark.kind)" class="mark-note">{{ punchKindNote(mark.kind) }}</span>
-                </td>
-                <td>{{ mark.kind === "missed" ? "—" : fmtHms(mark.fromStartSec) }}</td>
-                <td>{{ mark.kind === "missed" || mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <template v-if="isOrient">
+            <p v-if="!orientSplitView" class="muted">Отметок нет</p>
+            <template v-else>
+              <table class="marks-table is-orient" :class="{ 'has-pace': orientSplitView.showPace }">
+                <thead>
+                  <tr>
+                    <th class="col-n">№</th>
+                    <th>КП</th>
+                    <th>От старта</th>
+                    <th>Сплит</th>
+                    <th v-if="orientSplitView.showPace">Скорость</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="mark in orientSplitView.rows"
+                    :key="mark.key"
+                    :class="{
+                      'is-wrong': mark.wrong,
+                      'is-start': mark.role === 'start',
+                      'is-finish': mark.role === 'finish',
+                    }"
+                  >
+                    <td class="col-n">{{ mark.n ?? "" }}</td>
+                    <td class="col-cp">
+                      {{ mark.label }}
+                      <span v-if="mark.note" class="mark-note">{{ mark.note }}</span>
+                    </td>
+                    <td class="col-time">{{ mark.time }}</td>
+                    <td class="col-split">{{ mark.split }}</td>
+                    <td v-if="orientSplitView.showPace" class="col-pace">{{ mark.pace || "" }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="marks-footer">
+                <p>{{ orientSplitView.resultLine }}</p>
+                <p v-if="orientSplitView.averageLine">{{ orientSplitView.averageLine }}</p>
+                <p class="marks-status" :class="{ ok: orientSplitView.statusOk, bad: !orientSplitView.statusOk }">
+                  {{ orientSplitView.statusLine }}
+                </p>
+              </div>
+            </template>
+          </template>
+          <template v-else>
+            <p v-if="!markView.rows.length" class="muted">Отметок нет</p>
+            <table v-else class="marks-table">
+              <thead>
+                <tr>
+                  <th class="col-n">№</th>
+                  <th>КП</th>
+                  <th>От старта</th>
+                  <th>От предыдущего КП</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="mark in markView.rows"
+                  :key="mark.key"
+                  :class="{
+                    'is-wrong': mark.kind === 'extra' || mark.kind === 'out_of_order',
+                    'is-missed': mark.kind === 'missed',
+                  }"
+                >
+                  <td class="col-n">{{ mark.n ?? "" }}</td>
+                  <td class="col-cp">
+                    КП {{ mark.cp }}
+                    <span v-if="punchKindNote(mark.kind)" class="mark-note">{{ punchKindNote(mark.kind) }}</span>
+                  </td>
+                  <td>{{ mark.kind === "missed" ? "—" : fmtHms(mark.fromStartSec) }}</td>
+                  <td>{{ mark.kind === "missed" || mark.fromPrevSec == null ? "—" : fmtHms(mark.fromPrevSec) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
         </div>
       </section>
 
