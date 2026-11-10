@@ -232,14 +232,7 @@ const courseProgress = computed(() => {
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
 
-const compareAll = computed(() => String(route.query.cmp) === "all");
-
-function setCompare(mode: "group" | "all") {
-  const query = { ...route.query };
-  if (mode === "all") query.cmp = "all";
-  else delete query.cmp;
-  void router.replace({ query });
-}
+const compareAll = ref(true);
 
 const routeStats = computed(() => {
   if (isOrient.value || !person.value || !event.value) return null;
@@ -900,11 +893,21 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
         <div class="legs-head">
           <h2>Перегоны</h2>
           <div class="legs-compare" role="group" aria-label="Сравнение">
-            <button type="button" :class="{ 'is-on': !compareAll }" @click="setCompare('group')">
-              В группе
-            </button>
-            <button type="button" :class="{ 'is-on': compareAll }" @click="setCompare('all')">
+            <button
+              type="button"
+              class="group-nav-item"
+              :class="{ active: compareAll }"
+              @click="compareAll = true"
+            >
               Все участники
+            </button>
+            <button
+              type="button"
+              class="group-nav-item"
+              :class="{ active: !compareAll }"
+              @click="compareAll = false"
+            >
+              В группе
             </button>
           </div>
         </div>
