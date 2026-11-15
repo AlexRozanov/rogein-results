@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, State};
-use axum::http::header::{self, HeaderMap, HeaderValue};
+use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use axum::http::Uri;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -44,17 +45,79 @@ pub fn check_origin(
     allowed: &[String],
 ) -> Result<(), (StatusCode, String)> {
     if let Some(origin) = header_text(headers, header::ORIGIN) {
-        if allowed.iter().any(|item| item == origin) {
+        if origin_is_allowed(origin, headers, allowed) {
             return Ok(());
         }
-        return Err((StatusCode::FORBIDDEN, "Неверный Origin".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Запрос не с этого сайта".into(),
+        ));
     }
     if let Some(referer) = header_text(headers, header::REFERER) {
         if allowed.iter().any(|item| referer.starts_with(item.as_str())) {
             return Ok(());
         }
+        if referer_host_matches_request(referer, headers) {
+            return Ok(());
+        }
     }
-    Err((StatusCode::FORBIDDEN, "Нужен Origin".into()))
+    Err((StatusCode::FORBIDDEN, "Запрос не с этого сайта".into()))
+}
+
+fn origin_is_allowed(origin: &str, headers: &HeaderMap, allowed: &[String]) -> bool {
+    let origin = origin.trim().trim_end_matches('/');
+    if allowed.iter().any(|item| item == origin) {
+        return true;
+    }
+    let Some(origin_host) = host_of_url(origin) else {
+        return false;
+    };
+    request_hosts(headers).iter().any(|host| host == &origin_host)
+}
+
+fn referer_host_matches_request(referer: &str, headers: &HeaderMap) -> bool {
+    let Some(referer_host) = host_of_url(referer) else {
+        return false;
+    };
+    request_hosts(headers).iter().any(|host| host == &referer_host)
+}
+
+fn host_of_url(raw: &str) -> Option<String> {
+    let uri: Uri = raw.parse().ok()?;
+    let host = uri.host()?.trim().trim_matches(|c| c == '[' || c == ']');
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn request_hosts(headers: &HeaderMap) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Some(value) = header_text(headers, header::HOST) {
+        if let Some(host) = host_header_name(value) {
+            hosts.push(host);
+        }
+    }
+    if let Some(value) = header_text(headers, HeaderName::from_static("x-forwarded-host")) {
+        if let Some(first) = value.split(',').next() {
+            if let Some(host) = host_header_name(first.trim()) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts
+}
+
+fn host_header_name(raw: &str) -> Option<String> {
+    let raw = raw.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_string());
+    }
+    Some(raw.split(':').next()?.to_string())
 }
 
 fn header_text<'a>(headers: &'a HeaderMap, name: header::HeaderName) -> Option<&'a str> {
@@ -288,7 +351,28 @@ mod tests {
     fn origin_rejects_other() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ORIGIN, HeaderValue::from_static("http://evil.example"));
+        headers.insert(header::HOST, HeaderValue::from_static("malahit-sprint.ru"));
         assert!(check_origin(&headers, &["http://127.0.0.1:5174".into()]).is_err());
+    }
+
+    #[test]
+    fn origin_allows_same_host_as_forwarded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://malahit-sprint.ru"));
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:18790"));
+        headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            HeaderValue::from_static("malahit-sprint.ru"),
+        );
+        assert!(check_origin(&headers, &[]).is_ok());
+    }
+
+    #[test]
+    fn origin_allows_host_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://malahit-sprint.ru"));
+        headers.insert(header::HOST, HeaderValue::from_static("malahit-sprint.ru"));
+        assert!(check_origin(&headers, &[]).is_ok());
     }
 
     #[test]
