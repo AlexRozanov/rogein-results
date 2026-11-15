@@ -252,10 +252,20 @@ const RICH_TAGS = new Set([
   "OL",
   "LI",
   "A",
+  "MARK",
+  "SPAN",
 ]);
 
+const SAFE_COLOR =
+  /^(#[0-9a-f]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(0|0?\.\d+|1)\s*\))$/i;
+
 function looksLikeHtml(value: string): boolean {
-  return /<\/?(p|br|strong|b|em|i|u|ul|ol|li|a)\b/i.test(value);
+  return /<\/?(p|br|strong|b|em|i|u|ul|ol|li|a|mark|span)\b/i.test(value);
+}
+
+function safeColor(value: string | null | undefined): string {
+  const color = (value || "").trim();
+  return SAFE_COLOR.test(color) ? color : "";
 }
 
 /** Legacy plain text → HTML TipTap can load; pass through existing HTML. */
@@ -304,6 +314,27 @@ export function sanitizeHtml(html: string): string {
             el.setAttribute("href", href);
             el.setAttribute("target", "_blank");
             el.setAttribute("rel", "noreferrer");
+          }
+        } else if (tag === "MARK") {
+          const bg =
+            safeColor(el.getAttribute("data-color")) ||
+            safeColor(el.style.backgroundColor);
+          [...el.attributes].forEach((attr) => el.removeAttribute(attr.name));
+          if (bg) {
+            el.setAttribute("data-color", bg);
+            el.style.backgroundColor = bg;
+          }
+        } else if (tag === "SPAN") {
+          const color = safeColor(el.style.color);
+          [...el.attributes].forEach((attr) => el.removeAttribute(attr.name));
+          if (color) {
+            el.style.color = color;
+          } else {
+            while (el.firstChild) {
+              node.insertBefore(el.firstChild, el);
+            }
+            node.removeChild(el);
+            continue;
           }
         } else {
           [...el.attributes].forEach((attr) => el.removeAttribute(attr.name));

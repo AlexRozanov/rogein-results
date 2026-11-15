@@ -1679,10 +1679,14 @@ th { color: #64748b; font-weight: 600; }
 }
 
 .rte-btn {
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  padding: 4px 8px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -1704,6 +1708,73 @@ th { color: #64748b; font-weight: 600; }
 .rte-btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.rte-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--line);
+}
+
+.rte-swatch {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 3px;
+  height: 3px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.rte-color-wrap {
+  position: relative;
+}
+
+.rte-palette {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
+}
+
+.rte-palette-swatch {
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgb(0 0 0 / 18%);
+  border-radius: 999px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.rte-palette-swatch.active {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
+}
+
+.rte-palette-clear {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.rte-body .tiptap mark {
+  border-radius: 2px;
+  padding: 0 0.1em;
 }
 
 .rte-body .tiptap {
@@ -1900,6 +1971,11 @@ th { color: #64748b; font-weight: 600; }
 
 .bulletin-text p {
   margin: 0 0 10px;
+}
+
+.bulletin-text mark {
+  border-radius: 2px;
+  padding: 0 0.1em;
 }
 
 .bulletin-register-wrap {
