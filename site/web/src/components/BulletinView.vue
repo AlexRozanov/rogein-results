@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   bulletinPlaceLine,
   emptyCourse,
@@ -31,8 +31,17 @@ const uploading = ref("");
 const dropTarget = ref<"scheme" | "map" | "">("");
 const activeField = ref("");
 const rootEl = ref<HTMLElement | null>(null);
+const schemeMediaEl = ref<HTMLElement | null>(null);
+const mapsMediaEl = ref<HTMLElement | null>(null);
 
 const canEdit = computed(() => Boolean(props.editable && !props.preview));
+
+const mediaSlot = computed<"scheme" | "map" | null>(() => {
+  if (!canEdit.value) return null;
+  if (activeField.value === "scheme") return "scheme";
+  if (activeField.value === "maps") return "map";
+  return null;
+});
 
 watch(
   () => props.preview,
@@ -40,6 +49,13 @@ watch(
     if (preview) activeField.value = "";
   },
 );
+
+watch(activeField, async (field) => {
+  if (field !== "scheme" && field !== "maps") return;
+  await nextTick();
+  const el = field === "scheme" ? schemeMediaEl.value : mapsMediaEl.value;
+  el?.focus({ preventScroll: true });
+});
 
 function hasText(value: string | undefined): boolean {
   return Boolean(value?.replace(/<[^>]+>/g, "").trim());
@@ -58,30 +74,51 @@ function stopEdit() {
   activeField.value = "";
 }
 
-function imageFromClipboard(event: ClipboardEvent): File | null {
-  const items = event.clipboardData?.items;
-  if (!items) return null;
-  for (const item of items) {
-    if (!item.type.startsWith("image/")) continue;
-    const blob = item.getAsFile();
-    if (!blob) continue;
-    const ext =
-      item.type === "image/png"
-        ? "png"
-        : item.type === "image/webp"
-          ? "webp"
-          : "jpg";
-    return new File([blob], `paste.${ext}`, { type: item.type || "image/png" });
-  }
-  return null;
+function fileFromImageBlob(blob: Blob, mimeHint = ""): File {
+  const type = blob.type || mimeHint || "image/png";
+  const ext =
+    type === "image/jpeg" || type === "image/jpg"
+      ? "jpg"
+      : type === "image/webp"
+        ? "webp"
+        : type === "image/gif"
+          ? "gif"
+          : "png";
+  return new File([blob], `paste.${ext}`, { type });
 }
 
 function imageFromDataTransfer(data: DataTransfer | null): File | null {
   if (!data) return null;
+
   for (const file of Array.from(data.files || [])) {
-    if (file.type.startsWith("image/")) return file;
+    if (file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+      return file;
+    }
   }
+
+  const items = data.items;
+  if (items) {
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (blob) return fileFromImageBlob(blob, item.type);
+      }
+    }
+    for (const item of Array.from(items)) {
+      if (item.kind === "file") {
+        const blob = item.getAsFile();
+        if (blob && (blob.type.startsWith("image/") || !blob.type)) {
+          return fileFromImageBlob(blob, item.type || "image/png");
+        }
+      }
+    }
+  }
+
   return null;
+}
+
+function imageFromClipboard(event: ClipboardEvent): File | null {
+  return imageFromDataTransfer(event.clipboardData);
 }
 
 const registrationUrl = computed(() => {
@@ -207,6 +244,17 @@ function onMediaPaste(slot: "scheme" | "map", event: ClipboardEvent) {
   const file = imageFromClipboard(event);
   if (!file) return;
   event.preventDefault();
+  event.stopPropagation();
+  void upload(slot, file);
+}
+
+function onDocPaste(event: ClipboardEvent) {
+  const slot = mediaSlot.value;
+  if (!slot || uploading.value) return;
+  const file = imageFromClipboard(event);
+  if (!file) return;
+  event.preventDefault();
+  event.stopPropagation();
   void upload(slot, file);
 }
 
@@ -249,7 +297,9 @@ function onDocPointerDown(event: PointerEvent) {
   if (!activeField.value || !rootEl.value) return;
   const target = event.target as Node | null;
   if (target && rootEl.value.contains(target)) {
-    const active = rootEl.value.querySelector(".bulletin-zone-active, .bulletin-field-active");
+    const active = rootEl.value.querySelector(
+      ".bulletin-zone-active, .bulletin-field-active, .bulletin-media-editing",
+    );
     if (active?.contains(target)) return;
   }
   stopEdit();
@@ -257,10 +307,12 @@ function onDocPointerDown(event: PointerEvent) {
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocPointerDown, true);
+  document.addEventListener("paste", onDocPaste, true);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocPointerDown, true);
+  document.removeEventListener("paste", onDocPaste, true);
 });
 </script>
 
@@ -499,9 +551,12 @@ onBeforeUnmount(() => {
 
       <div
         v-if="canEdit || bulletin.scheme_url"
+        ref="schemeMediaEl"
         class="bulletin-media"
         :class="{
           'bulletin-media-active': dropTarget === 'scheme' || isActive('scheme'),
+          'bulletin-media-editing': isActive('scheme'),
+          'bulletin-zone-active': isActive('scheme'),
           'bulletin-zone-hit': canEdit && !isActive('scheme'),
         }"
         :tabindex="canEdit ? 0 : undefined"
@@ -523,9 +578,9 @@ onBeforeUnmount(() => {
           {{
             uploading === "scheme"
               ? "Загрузка…"
-              : bulletin.scheme_url
-                ? "Ctrl+V или drag-and-drop — заменить"
-                : "Нажмите, затем Ctrl+V / drag-and-drop / загрузка"
+              : isActive("scheme")
+                ? "Вставьте картинку: Ctrl+V (или Cmd+V), либо перетащите файл"
+                : "Нажмите, чтобы вставить или загрузить схему"
           }}
         </div>
         <div v-if="canEdit && isActive('scheme')" class="admin-row-actions">
@@ -843,9 +898,12 @@ onBeforeUnmount(() => {
 
       <div
         v-if="canEdit || bulletin.map_urls.length"
+        ref="mapsMediaEl"
         class="bulletin-media"
         :class="{
           'bulletin-media-active': dropTarget === 'map' || isActive('maps'),
+          'bulletin-media-editing': isActive('maps'),
+          'bulletin-zone-active': isActive('maps'),
           'bulletin-zone-hit': canEdit && !isActive('maps'),
         }"
         :tabindex="canEdit ? 0 : undefined"
@@ -877,7 +935,9 @@ onBeforeUnmount(() => {
           {{
             uploading === "map"
               ? "Загрузка…"
-              : "Нажмите, затем Ctrl+V / drag-and-drop / загрузка"
+              : isActive("maps")
+                ? "Вставьте картинку: Ctrl+V (или Cmd+V), либо перетащите файл"
+                : "Нажмите, чтобы вставить или загрузить фрагмент"
           }}
         </div>
         <div v-if="canEdit && isActive('maps')" class="admin-row-actions">
