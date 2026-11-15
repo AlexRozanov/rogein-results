@@ -1,6 +1,11 @@
+mod admin;
+mod auth;
 mod map_image;
 mod models;
+mod password;
 mod publish;
+mod rbac;
+mod userctl;
 
 use std::convert::Infallible;
 use std::fs;
@@ -12,12 +17,13 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::Context;
+use clap::{Parser, Subcommand};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_core::Stream;
 use sqlx::postgres::PgPoolOptions;
@@ -44,34 +50,48 @@ struct LiveTick {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     pool: PgPool,
     media_dir: PathBuf,
     publish_token: String,
     live_tx: broadcast::Sender<LiveTick>,
+    cookie_secure: bool,
+    allowed_origins: Vec<String>,
+}
+
+#[derive(Parser)]
+#[command(name = "rogein-site-api", about = "Сайт СК Малахит: API и userctl")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// HTTP API (это же действие, если подкоманду не указать)
+    Serve,
+    /// Пользователи с терминала сервера, не через сайт
+    Userctl {
+        #[command(subcommand)]
+        command: userctl::UserctlCommand,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rogein_site_api=info,tower_http=info".into()),
-        )
-        .init();
+    match Cli::parse().command {
+        Some(Command::Userctl { command }) => {
+            let pool = connect_pool().await?;
+            userctl::run(command, pool).await
+        }
+        None | Some(Command::Serve) => serve().await,
+    }
+}
 
+async fn connect_pool() -> anyhow::Result<PgPool> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://rogain:rogain@127.0.0.1:5432/rogain".into());
-    let media_dir = PathBuf::from(
-        std::env::var("MEDIA_DIR").unwrap_or_else(|_| "../media".into()),
-    );
-    let publish_token =
-        std::env::var("PUBLISH_TOKEN").unwrap_or_else(|_| "dev-token".into());
-    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:18790".into());
-
-    std::fs::create_dir_all(&media_dir).context("create media dir")?;
-
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
@@ -81,6 +101,27 @@ async fn main() -> anyhow::Result<()> {
         .run(&pool)
         .await
         .context("run migrations")?;
+    Ok(pool)
+}
+
+async fn serve() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "rogein_site_api=info,tower_http=info".into()),
+        )
+        .init();
+
+    let media_dir = PathBuf::from(
+        std::env::var("MEDIA_DIR").unwrap_or_else(|_| "../media".into()),
+    );
+    let publish_token =
+        std::env::var("PUBLISH_TOKEN").unwrap_or_else(|_| "dev-token".into());
+    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:18790".into());
+
+    std::fs::create_dir_all(&media_dir).context("create media dir")?;
+
+    let pool = connect_pool().await?;
 
     let media_service = ServeDir::new(&media_dir);
     let (live_tx, _) = broadcast::channel(64);
@@ -89,9 +130,22 @@ async fn main() -> anyhow::Result<()> {
         media_dir,
         publish_token,
         live_tx,
+        cookie_secure: auth::cookie_secure_from_env(),
+        allowed_origins: auth::parse_allowed_origins(),
     });
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/me", get(auth::me))
+        .route(
+            "/api/admin/upcoming",
+            get(admin::list_upcoming).post(admin::create_upcoming),
+        )
+        .route(
+            "/api/admin/upcoming/{id}",
+            get(admin::get_upcoming).patch(admin::update_upcoming),
+        )
         .route("/api/events", get(list_events))
         .route("/api/upcoming", get(list_upcoming))
         .route("/api/events/{slug}", get(get_event).put(put_event))
@@ -159,7 +213,7 @@ struct EventListQuery {
     per_page: Option<i64>,
 }
 
-fn sport_kind_filter(raw: Option<&str>) -> Option<String> {
+pub(crate) fn sport_kind_filter(raw: Option<&str>) -> Option<String> {
     match raw.map(str::trim) {
         Some("orient") => Some("orient".into()),
         Some("rogaine") => Some("rogaine".into()),
@@ -167,7 +221,7 @@ fn sport_kind_filter(raw: Option<&str>) -> Option<String> {
     }
 }
 
-fn parse_date_param(
+pub(crate) fn parse_date_param(
     raw: Option<&str>,
     name: &str,
 ) -> Result<Option<NaiveDate>, (StatusCode, String)> {
@@ -278,7 +332,7 @@ async fn get_event(
     Ok(Json(event))
 }
 
-fn normalize_slug(raw: &str) -> Result<String, (StatusCode, String)> {
+pub(crate) fn normalize_slug(raw: &str) -> Result<String, (StatusCode, String)> {
     let slug = raw.trim().to_lowercase();
     if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err((StatusCode::BAD_REQUEST, "Invalid slug".into()));
@@ -1313,7 +1367,7 @@ fn safe_pack_map_name(raw: &str) -> String {
     }
 }
 
-fn internal(err: sqlx::Error) -> (StatusCode, String) {
+pub(crate) fn internal(err: sqlx::Error) -> (StatusCode, String) {
     tracing::error!(?err, "database error");
     (StatusCode::INTERNAL_SERVER_ERROR, "Database error".into())
 }

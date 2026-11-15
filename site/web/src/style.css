@@ -1531,6 +1531,154 @@ th { color: #64748b; font-weight: 600; }
   }
 }
 
+.admin {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+
+.admin-header {
+  background: var(--ink);
+  color: #e7f3ea;
+}
+
+.admin-header-inner {
+  width: min(100%, 64rem);
+  margin-inline: auto;
+  padding: 12px var(--shell-pad);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.admin-brand {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.admin-nav {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+
+.admin-nav-link {
+  color: inherit;
+  text-decoration: none;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.admin-nav-link:hover,
+.admin-nav-link.router-link-active {
+  background: #2a5440;
+}
+
+.admin-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.admin-user .muted {
+  color: #b7c7be;
+}
+
+.admin-main {
+  width: min(100%, 64rem);
+  margin-inline: auto;
+  padding: var(--shell-pad);
+  flex: 1;
+}
+
+.admin-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.admin-page-head h1 {
+  margin: 0;
+}
+
+.admin-form {
+  display: grid;
+  gap: 12px;
+  max-width: 36rem;
+}
+
+.admin-form label {
+  display: grid;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.admin-form input,
+.admin-form textarea,
+.admin-form select {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.admin-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  text-decoration: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--green);
+  border-color: var(--green-dark);
+  color: #fff;
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: #4a6b58;
+  color: inherit;
+}
+
+.admin-login {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--shell-pad);
+}
+
+.admin-login .admin-form {
+  width: min(100%, 24rem);
+}
+
 @media (min-width: 2560px) {
   .shell {
     width: min(100%, 150rem);
