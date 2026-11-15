@@ -63,8 +63,21 @@ onMounted(reload);
           · {{ item.slug }}
         </p>
         <p v-if="item.summary">{{ item.summary }}</p>
-        <p v-if="item.status !== 'completed'" class="admin-row-actions">
-          <router-link class="btn" :to="`/admin/calendar/${item.id}`">Править</router-link>
+        <p class="admin-row-actions">
+          <router-link
+            v-if="item.status !== 'completed'"
+            class="btn"
+            :to="`/admin/calendar/${item.id}`"
+          >
+            Править
+          </router-link>
+          <router-link
+            v-if="item.status === 'announced'"
+            class="btn"
+            :to="`/calendar/${item.slug}`"
+          >
+            Бюллетень
+          </router-link>
         </p>
       </article>
     </div>

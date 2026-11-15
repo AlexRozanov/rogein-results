@@ -883,6 +883,7 @@ th { color: #64748b; font-weight: 600; }
 .map-wrap { position: relative; overflow: auto; max-height: 70vh; border-radius: 8px; background: #0f172a; }
 .map-wrap img { display: block; max-width: 100%; }
 .err { color: #b91c1c; overflow-wrap: anywhere; }
+.ok { color: var(--green-dark); overflow-wrap: anywhere; }
 
 .page-loading {
   display: flex;
@@ -1614,6 +1615,70 @@ th { color: #64748b; font-weight: 600; }
   max-width: 36rem;
 }
 
+.admin-form-wide {
+  max-width: 52rem;
+}
+
+.admin-block-title {
+  margin: 12px 0 0;
+  font-size: 1.15rem;
+}
+
+.admin-form fieldset {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.admin-form legend {
+  font-weight: 700;
+  padding: 0 6px;
+}
+
+.admin-pair {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.admin-form table.admin-courses {
+  width: 100%;
+  min-width: 0;
+}
+
+.admin-courses input {
+  width: 100%;
+}
+
+.bulletin-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.bulletin-upload {
+  display: grid;
+  gap: 8px;
+}
+
+.bulletin-upload img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.bulletin-preview {
+  margin-top: 28px;
+}
+
+.bulletin-preview > h2 {
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+}
+
 .admin-form label {
   display: grid;
   gap: 4px;
@@ -1682,6 +1747,114 @@ th { color: #64748b; font-weight: 600; }
   background: transparent;
   border-color: #4a6b58;
   color: inherit;
+}
+
+.bulletin {
+  max-width: 48rem;
+  margin: 0 auto 24px;
+  padding: 28px 22px 48px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: #1a1a1a;
+}
+
+.bulletin-head {
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.bulletin-logo {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  margin-bottom: 12px;
+}
+
+.bulletin-kicker,
+.bulletin-place,
+.bulletin-discipline {
+  margin: 0 0 6px;
+}
+
+.bulletin-place {
+  font-weight: 700;
+}
+
+.bulletin-doc-title {
+  margin: 18px 0 8px;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.bulletin h2 {
+  margin: 1.6em 0 0.7em;
+  font-size: 1.05rem;
+  text-align: center;
+}
+
+.bulletin p {
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+
+.bulletin-text {
+  white-space: pre-wrap;
+}
+
+.bulletin-map-links {
+  display: flex;
+  gap: 16px;
+}
+
+.bulletin-map-links a,
+.bulletin a {
+  color: #1d4ed8;
+}
+
+.bulletin-table {
+  width: auto;
+  min-width: 0;
+  margin: 12px auto 16px;
+  border-collapse: collapse;
+}
+
+.bulletin-table th,
+.bulletin-table td {
+  border: 1px solid #333;
+  padding: 6px 14px;
+  text-align: left;
+}
+
+.bulletin-figure {
+  margin: 12px 0 16px;
+}
+
+.bulletin-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+}
+
+.bulletin-maps {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  margin: 12px 0 16px;
+}
+
+@media print {
+  .site-header,
+  .site-footer {
+    display: none !important;
+  }
+
+  .bulletin {
+    border: 0;
+    max-width: none;
+    padding: 0;
+  }
 }
 
 .admin-login {

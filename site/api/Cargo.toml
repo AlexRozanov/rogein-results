@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
-axum = { version = "0.8", features = ["json", "macros"] }
+axum = { version = "0.8", features = ["json", "macros", "multipart"] }
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.22"

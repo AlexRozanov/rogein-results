@@ -8,6 +8,7 @@ import AdminHomePage from "./pages/admin/AdminHomePage.vue";
 import CalendarEditPage from "./pages/admin/CalendarEditPage.vue";
 import CalendarListPage from "./pages/admin/CalendarListPage.vue";
 import LoginPage from "./pages/admin/LoginPage.vue";
+import BulletinPage from "./pages/BulletinPage.vue";
 import CalendarPage from "./pages/CalendarPage.vue";
 import ComingSoonPage from "./pages/ComingSoonPage.vue";
 import EventListPage from "./pages/EventListPage.vue";
@@ -33,6 +34,7 @@ const router = createRouter({
         { path: "", component: HomePage },
         { path: "results", component: EventListPage },
         { path: "calendar", component: CalendarPage },
+        { path: "calendar/:slug", component: BulletinPage },
         { path: "soon/calendar", redirect: "/calendar" },
         { path: "soon/:section?", component: ComingSoonPage },
         { path: "events", redirect: "/results" },

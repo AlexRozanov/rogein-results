@@ -34,16 +34,17 @@ onMounted(async () => {
   <p v-if="error" class="err">{{ error }}</p>
   <PageLoading v-else-if="loading" label="Загрузка календаря…" />
   <div v-else-if="items.length" class="event-list">
-    <article
+    <router-link
       v-for="item in items"
       :id="item.slug"
       :key="item.slug"
-      class="card"
+      class="card event-link"
+      :to="`/calendar/${item.slug}`"
     >
       <p class="kind-pill">{{ sportKindLabel(item.sport_kind) }}</p>
       <h2>{{ item.title }}</h2>
       <p class="muted">{{ item.competition_date || "дата уточняется" }}</p>
       <p v-if="item.summary">{{ item.summary }}</p>
-    </article>
+    </router-link>
   </div>
 </template>

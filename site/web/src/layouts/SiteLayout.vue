@@ -24,7 +24,7 @@ function navActive(to: string) {
     return route.path === "/results" || route.path.startsWith("/events/");
   }
   if (to === "/calendar") {
-    return route.path === "/calendar" || route.path.startsWith("/soon/calendar");
+    return route.path === "/calendar" || route.path.startsWith("/calendar/");
   }
   return route.path === to;
 }

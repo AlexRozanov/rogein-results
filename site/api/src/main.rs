@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod bulletin;
 mod map_image;
 mod models;
 mod password;
@@ -173,8 +174,13 @@ async fn serve() -> anyhow::Result<()> {
             "/api/admin/upcoming/{id}",
             get(admin::get_upcoming).patch(admin::update_upcoming),
         )
+        .route(
+            "/api/admin/upcoming/{id}/bulletin-image",
+            post(admin::upload_bulletin_image),
+        )
         .route("/api/events", get(list_events))
         .route("/api/upcoming", get(list_upcoming))
+        .route("/api/upcoming/{slug}", get(bulletin::get_public_upcoming))
         .route("/api/events/{slug}", get(get_event).put(put_event))
         .route("/api/events/{slug}/map", put(put_event_map))
         .route(
