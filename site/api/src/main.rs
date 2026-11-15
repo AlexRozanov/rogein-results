@@ -77,9 +77,31 @@ enum Command {
     },
 }
 
+fn load_env() {
+    let _ = dotenvy::dotenv();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = dotenvy::from_path(dir.join(".env"));
+        }
+    }
+}
+
+fn redact_db_url(url: &str) -> String {
+    let Some(scheme_at) = url.find("://") else {
+        return url.to_string();
+    };
+    let Some(at) = url[scheme_at + 3..].find('@') else {
+        return url.to_string();
+    };
+    let start = scheme_at + 3;
+    let userinfo = &url[start..start + at];
+    let user = userinfo.split(':').next().unwrap_or("?");
+    format!("{}{user}:***{}", &url[..start], &url[start + at..])
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    load_env();
     match Cli::parse().command {
         Some(Command::Userctl { command }) => {
             let pool = connect_pool().await?;
@@ -96,7 +118,12 @@ async fn connect_pool() -> anyhow::Result<PgPool> {
         .max_connections(5)
         .connect(&database_url)
         .await
-        .context("connect postgres")?;
+        .with_context(|| {
+            format!(
+                "connect postgres ({}); на проде запускайте бинарник из каталога с .env сервиса, не cargo run с паролем из .env.example",
+                redact_db_url(&database_url)
+            )
+        })?;
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await

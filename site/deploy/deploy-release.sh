@@ -103,6 +103,7 @@ if [[ ! -f "${RUN}/.env" ]]; then
   echo "Нет ${RUN}/.env — создайте до запуска сервиса" >&2
   exit 1
 fi
+# Людей: sudo -u malahit bash -lc "cd ${RUN} && ./rogein-site-api userctl create --email … --role owner"
 
 stage "6/6 Рестарт ${SERVICE} и проверка health"
 systemctl restart "${SERVICE}"
