@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   bulletinPlaceLine,
   emptyCourse,
@@ -8,11 +8,10 @@ import {
   googleMapsUrl,
   hasCoords,
   isHttpUrl,
-  richTextHtml,
   yandexMapsUrl,
   type Bulletin,
 } from "../bulletin";
-import RichTextEditor from "./RichTextEditor.vue";
+import BulletinField from "./BulletinField.vue";
 
 const bulletin = defineModel<Bulletin>({ required: true });
 
@@ -20,6 +19,7 @@ const props = defineProps<{
   title: string;
   date: string | null;
   editable?: boolean;
+  preview?: boolean;
   upcomingId?: number | null;
 }>();
 
@@ -29,9 +29,33 @@ const emit = defineEmits<{
 
 const uploading = ref("");
 const dropTarget = ref<"scheme" | "map" | "">("");
+const activeField = ref("");
+const rootEl = ref<HTMLElement | null>(null);
 
-function textHtml(value: string): string {
-  return richTextHtml(value);
+const canEdit = computed(() => Boolean(props.editable && !props.preview));
+
+watch(
+  () => props.preview,
+  (preview) => {
+    if (preview) activeField.value = "";
+  },
+);
+
+function hasText(value: string | undefined): boolean {
+  return Boolean(value?.replace(/<[^>]+>/g, "").trim());
+}
+
+function isActive(field: string): boolean {
+  return canEdit.value && activeField.value === field;
+}
+
+function startEdit(field: string) {
+  if (!canEdit.value) return;
+  activeField.value = field;
+}
+
+function stopEdit() {
+  activeField.value = "";
 }
 
 function imageFromClipboard(event: ClipboardEvent): File | null {
@@ -58,10 +82,6 @@ function imageFromDataTransfer(data: DataTransfer | null): File | null {
     if (file.type.startsWith("image/")) return file;
   }
   return null;
-}
-
-function hasText(value: string | undefined): boolean {
-  return Boolean(value?.replace(/<[^>]+>/g, "").trim());
 }
 
 const registrationUrl = computed(() => {
@@ -95,12 +115,14 @@ const mapScaleLine = computed(() => {
 });
 
 const courses = computed(() =>
-  props.editable ? bulletin.value.courses : filledCourses(bulletin.value),
+  canEdit.value || isActive("courses")
+    ? bulletin.value.courses
+    : filledCourses(bulletin.value),
 );
 
 const showProgram = computed(
   () =>
-    props.editable ||
+    canEdit.value ||
     hasText(bulletin.value.intro) ||
     hasCoords(bulletin.value) ||
     startHoursLine.value ||
@@ -111,13 +133,13 @@ const showProgram = computed(
 
 const showTech = computed(
   () =>
-    props.editable ||
+    canEdit.value ||
     hasText(bulletin.value.rules) ||
     bulletin.value.time_limit_minutes ||
     bulletin.value.punching ||
     hasText(bulletin.value.stations) ||
     hasText(bulletin.value.course_intro) ||
-    courses.value.length ||
+    filledCourses(bulletin.value).length ||
     hasText(bulletin.value.extra_course_notes) ||
     hasText(bulletin.value.terrain) ||
     hasText(bulletin.value.relief) ||
@@ -133,7 +155,7 @@ const showTech = computed(
 
 const showEntry = computed(
   () =>
-    props.editable ||
+    canEdit.value ||
     bulletin.value.entry_kind ||
     hasText(bulletin.value.entry_details) ||
     registrationUrl.value,
@@ -181,7 +203,7 @@ function onMap(event: Event) {
 }
 
 function onMediaPaste(slot: "scheme" | "map", event: ClipboardEvent) {
-  if (!props.editable || uploading.value) return;
+  if (!canEdit.value || uploading.value) return;
   const file = imageFromClipboard(event);
   if (!file) return;
   event.preventDefault();
@@ -189,7 +211,7 @@ function onMediaPaste(slot: "scheme" | "map", event: ClipboardEvent) {
 }
 
 function onMediaDragOver(slot: "scheme" | "map", event: DragEvent) {
-  if (!props.editable || uploading.value) return;
+  if (!canEdit.value || uploading.value) return;
   if (![...Array.from(event.dataTransfer?.types || [])].includes("Files")) return;
   event.preventDefault();
   dropTarget.value = slot;
@@ -200,7 +222,7 @@ function onMediaDragLeave(slot: "scheme" | "map") {
 }
 
 function onMediaDrop(slot: "scheme" | "map", event: DragEvent) {
-  if (!props.editable || uploading.value) return;
+  if (!canEdit.value || uploading.value) return;
   event.preventDefault();
   dropTarget.value = "";
   const file = imageFromDataTransfer(event.dataTransfer);
@@ -222,10 +244,32 @@ function removeMap(index: number) {
 function clearScheme() {
   bulletin.value.scheme_url = "";
 }
+
+function onDocPointerDown(event: PointerEvent) {
+  if (!activeField.value || !rootEl.value) return;
+  const target = event.target as Node | null;
+  if (target && rootEl.value.contains(target)) {
+    const active = rootEl.value.querySelector(".bulletin-zone-active, .bulletin-field-active");
+    if (active?.contains(target)) return;
+  }
+  stopEdit();
+}
+
+onMounted(() => {
+  document.addEventListener("pointerdown", onDocPointerDown, true);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocPointerDown, true);
+});
 </script>
 
 <template>
-  <article class="bulletin" :class="{ 'bulletin-editable': editable }">
+  <article
+    ref="rootEl"
+    class="bulletin"
+    :class="{ 'bulletin-editable': canEdit, 'bulletin-previewing': preview }"
+  >
     <header class="bulletin-hero">
       <div class="bulletin-hero-brand">
         <img
@@ -237,12 +281,19 @@ function clearScheme() {
         />
         <div class="bulletin-hero-copy">
           <p class="bulletin-eyebrow">Информационный бюллетень</p>
-          <template v-if="editable">
-            <input
-              v-model="bulletin.event_kind"
-              class="bulletin-inline-input bulletin-inline-kicker"
-              placeholder="Тип старта"
-            />
+
+          <div
+            v-if="isActive('hero')"
+            class="bulletin-zone bulletin-zone-active"
+          >
+            <label class="bulletin-field-label">
+              Тип старта
+              <input
+                v-model="bulletin.event_kind"
+                class="bulletin-inline-input"
+                placeholder="Открытая тренировка."
+              />
+            </label>
             <h1 class="bulletin-title">{{ title || "Название старта" }}</h1>
             <div class="bulletin-hero-meta-edit">
               <input
@@ -261,7 +312,27 @@ function clearScheme() {
                 placeholder="Дисциплина"
               />
             </div>
-          </template>
+            <div class="bulletin-field-actions">
+              <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+            </div>
+          </div>
+
+          <button
+            v-else-if="canEdit"
+            type="button"
+            class="bulletin-zone bulletin-zone-hit"
+            @click="startEdit('hero')"
+          >
+            <p v-if="bulletin.event_kind" class="bulletin-kicker">{{ bulletin.event_kind }}</p>
+            <p v-else class="bulletin-placeholder-inline">Тип старта</p>
+            <h1 class="bulletin-title">{{ placeLine }}</h1>
+            <div class="bulletin-pills">
+              <span v-if="date" class="bulletin-pill">{{ formatDateRu(date) }}</span>
+              <span v-if="bulletin.discipline" class="bulletin-pill">{{ bulletin.discipline }}</span>
+              <span v-else class="bulletin-pill bulletin-pill-muted">Дисциплина</span>
+            </div>
+          </button>
+
           <template v-else>
             <p v-if="bulletin.event_kind" class="bulletin-kicker">{{ bulletin.event_kind }}</p>
             <h1 class="bulletin-title">{{ placeLine }}</h1>
@@ -273,8 +344,11 @@ function clearScheme() {
         </div>
       </div>
 
-      <div v-if="editable || registrationUrl" class="bulletin-hero-cta">
-        <template v-if="editable">
+      <div
+        v-if="canEdit || registrationUrl"
+        class="bulletin-hero-cta"
+      >
+        <div v-if="isActive('registration')" class="bulletin-zone bulletin-zone-active">
           <label class="bulletin-field-label">
             Ссылка на регистрацию
             <input
@@ -284,49 +358,92 @@ function clearScheme() {
               placeholder="https://…"
             />
           </label>
-        </template>
+          <div class="bulletin-field-actions">
+            <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+          </div>
+        </div>
+        <button
+          v-else-if="canEdit"
+          type="button"
+          class="bulletin-zone bulletin-zone-hit"
+          @click="startEdit('registration')"
+        >
+          <a
+            v-if="registrationUrl"
+            class="bulletin-register-btn"
+            :href="registrationUrl"
+            tabindex="-1"
+            @click.prevent
+          >
+            Зарегистрироваться
+          </a>
+          <span v-else class="bulletin-placeholder-inline">Добавить ссылку на регистрацию</span>
+        </button>
         <a
-          v-if="registrationUrl"
+          v-else-if="registrationUrl"
           class="bulletin-register-btn"
           :href="registrationUrl"
           target="_blank"
           rel="noreferrer"
-          :tabindex="editable ? -1 : undefined"
-          @click="editable ? $event.preventDefault() : undefined"
         >
           Зарегистрироваться
         </a>
-        <p v-else-if="editable" class="muted bulletin-cta-hint">
-          Кнопка появится после сохранения ссылки.
-        </p>
       </div>
     </header>
 
     <section v-if="showProgram" class="bulletin-section">
       <h2>Дата, место и программа</h2>
 
-      <div v-if="editable" class="bulletin-facts bulletin-facts-edit">
-        <label>
-          Старт с
-          <input v-model="bulletin.start_from" class="bulletin-inline-input" placeholder="12:00" />
-        </label>
-        <label>
-          Старт до
-          <input v-model="bulletin.start_to" class="bulletin-inline-input" placeholder="14:00" />
-        </label>
-        <label>
-          Финиш до
-          <input v-model="bulletin.finish_until" class="bulletin-inline-input" placeholder="15:30" />
-        </label>
-        <label>
-          Широта
-          <input v-model="bulletin.lat" class="bulletin-inline-input" placeholder="55.784728" />
-        </label>
-        <label>
-          Долгота
-          <input v-model="bulletin.lon" class="bulletin-inline-input" placeholder="37.516126" />
-        </label>
+      <div
+        v-if="isActive('schedule')"
+        class="bulletin-zone bulletin-zone-active"
+      >
+        <div class="bulletin-facts bulletin-facts-edit">
+          <label>
+            Старт с
+            <input v-model="bulletin.start_from" class="bulletin-inline-input" placeholder="12:00" />
+          </label>
+          <label>
+            Старт до
+            <input v-model="bulletin.start_to" class="bulletin-inline-input" placeholder="14:00" />
+          </label>
+          <label>
+            Финиш до
+            <input v-model="bulletin.finish_until" class="bulletin-inline-input" placeholder="15:30" />
+          </label>
+          <label>
+            Широта
+            <input v-model="bulletin.lat" class="bulletin-inline-input" placeholder="55.784728" />
+          </label>
+          <label>
+            Долгота
+            <input v-model="bulletin.lon" class="bulletin-inline-input" placeholder="37.516126" />
+          </label>
+        </div>
+        <div class="bulletin-field-actions">
+          <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+        </div>
       </div>
+
+      <button
+        v-else-if="canEdit"
+        type="button"
+        class="bulletin-zone bulletin-zone-hit"
+        @click="startEdit('schedule')"
+      >
+        <div v-if="startHoursLine || hasCoords(bulletin)" class="bulletin-facts">
+          <div v-if="startHoursLine" class="bulletin-fact">
+            <span class="bulletin-fact-label">Время</span>
+            <span>{{ startHoursLine }}</span>
+          </div>
+          <div v-if="hasCoords(bulletin)" class="bulletin-fact">
+            <span class="bulletin-fact-label">Координаты</span>
+            <span>{{ bulletin.lat }}, {{ bulletin.lon }}</span>
+          </div>
+        </div>
+        <span v-else class="bulletin-placeholder">Время старта и координаты</span>
+      </button>
+
       <div v-else-if="startHoursLine || hasCoords(bulletin)" class="bulletin-facts">
         <div v-if="startHoursLine" class="bulletin-fact">
           <span class="bulletin-fact-label">Время</span>
@@ -346,55 +463,60 @@ function clearScheme() {
         </div>
       </div>
 
-      <div v-if="editable || hasText(bulletin.intro)" class="bulletin-block">
-        <p v-if="editable" class="bulletin-field-label">Вводный абзац</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.intro"
-          placeholder="Коротко о старте…"
-          min-height="4.5rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.intro)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.intro"
+        field="intro"
+        :active="isActive('intro')"
+        :can-edit="canEdit"
+        placeholder="Вводный абзац — нажмите, чтобы заполнить"
+        :min-height="'4.5rem'"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.location)" class="bulletin-block">
-        <p class="bulletin-field-label">{{ editable ? "Где старт и как добраться" : "Место" }}</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.location"
-          placeholder="Как добраться, размещение…"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.location)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.location"
+        field="location"
+        label="Место"
+        :active="isActive('location')"
+        :can-edit="canEdit"
+        placeholder="Где старт и как добраться"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.parking)" class="bulletin-block">
-        <p class="bulletin-field-label">Парковка</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.parking"
-          placeholder="Где парковаться…"
-          min-height="4rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.parking)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.parking"
+        field="parking"
+        label="Парковка"
+        :active="isActive('parking')"
+        :can-edit="canEdit"
+        placeholder="Парковка"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
       <div
-        v-if="editable || bulletin.scheme_url"
+        v-if="canEdit || bulletin.scheme_url"
         class="bulletin-media"
-        :class="{ 'bulletin-media-active': dropTarget === 'scheme' }"
-        :tabindex="editable ? 0 : undefined"
-        @click="editable ? ($event.currentTarget as HTMLElement).focus() : undefined"
+        :class="{
+          'bulletin-media-active': dropTarget === 'scheme' || isActive('scheme'),
+          'bulletin-zone-hit': canEdit && !isActive('scheme'),
+        }"
+        :tabindex="canEdit ? 0 : undefined"
+        @click="canEdit && !isActive('scheme') ? startEdit('scheme') : undefined"
         @paste="onMediaPaste('scheme', $event)"
         @dragover="onMediaDragOver('scheme', $event)"
         @dragleave="onMediaDragLeave('scheme')"
         @drop="onMediaDrop('scheme', $event)"
       >
-        <p class="bulletin-field-label">Схема старта</p>
+        <p v-if="canEdit || bulletin.scheme_url" class="bulletin-field-label">Схема старта</p>
         <figure v-if="bulletin.scheme_url" class="bulletin-figure">
           <img :src="bulletin.scheme_url" alt="Схема расположения старта" />
         </figure>
         <div
-          v-if="editable"
+          v-if="canEdit && (isActive('scheme') || !bulletin.scheme_url)"
           class="bulletin-dropzone"
           :class="{ busy: uploading === 'scheme' }"
         >
@@ -402,13 +524,13 @@ function clearScheme() {
             uploading === "scheme"
               ? "Загрузка…"
               : bulletin.scheme_url
-                ? "Ctrl+V или drag-and-drop — заменить схему"
-                : "Вставьте картинку (Ctrl+V) или перетащите файл сюда"
+                ? "Ctrl+V или drag-and-drop — заменить"
+                : "Нажмите, затем Ctrl+V / drag-and-drop / загрузка"
           }}
         </div>
-        <div v-if="editable" class="admin-row-actions">
-          <label class="btn">
-            {{ uploading === "scheme" ? "Загрузка…" : "Загрузить схему" }}
+        <div v-if="canEdit && isActive('scheme')" class="admin-row-actions">
+          <label class="btn" @click.stop>
+            {{ uploading === "scheme" ? "Загрузка…" : "Загрузить файл" }}
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp"
@@ -421,10 +543,11 @@ function clearScheme() {
             v-if="bulletin.scheme_url"
             class="btn"
             type="button"
-            @click="clearScheme"
+            @click.stop="clearScheme"
           >
             Убрать
           </button>
+          <button class="btn btn-primary" type="button" @click.stop="stopEdit">Готово</button>
           <p v-if="!upcomingId" class="muted">Сначала сохраните старт.</p>
         </div>
       </div>
@@ -433,7 +556,71 @@ function clearScheme() {
     <section v-if="showTech" class="bulletin-section">
       <h2>Техническая информация</h2>
 
-      <div v-if="!editable && (bulletin.time_limit_minutes || bulletin.punching)" class="bulletin-facts">
+      <div
+        v-if="isActive('tech_facts')"
+        class="bulletin-zone bulletin-zone-active"
+      >
+        <div class="bulletin-facts bulletin-facts-edit">
+          <label>
+            Контрольное время, мин
+            <input v-model="bulletin.time_limit_minutes" class="bulletin-inline-input" />
+          </label>
+          <label>
+            Система отметки
+            <input v-model="bulletin.punching" class="bulletin-inline-input" />
+          </label>
+          <label>
+            Аварийный азимут
+            <input v-model="bulletin.emergency_azimuth" class="bulletin-inline-input" />
+          </label>
+          <label>
+            Масштаб
+            <input v-model="bulletin.map_scale" class="bulletin-inline-input" placeholder="1:4000" />
+          </label>
+          <label>
+            Сечение
+            <input v-model="bulletin.contour" class="bulletin-inline-input" placeholder="2,5м" />
+          </label>
+        </div>
+        <div class="bulletin-field-actions">
+          <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+        </div>
+      </div>
+
+      <button
+        v-else-if="canEdit"
+        type="button"
+        class="bulletin-zone bulletin-zone-hit"
+        @click="startEdit('tech_facts')"
+      >
+        <div
+          v-if="bulletin.time_limit_minutes || bulletin.punching || mapScaleLine || bulletin.emergency_azimuth"
+          class="bulletin-facts"
+        >
+          <div v-if="bulletin.time_limit_minutes" class="bulletin-fact">
+            <span class="bulletin-fact-label">Контрольное время</span>
+            <span>{{ bulletin.time_limit_minutes }} мин</span>
+          </div>
+          <div v-if="bulletin.punching" class="bulletin-fact">
+            <span class="bulletin-fact-label">Отметка</span>
+            <span>{{ bulletin.punching }}</span>
+          </div>
+          <div v-if="mapScaleLine" class="bulletin-fact">
+            <span class="bulletin-fact-label">Карта</span>
+            <span>{{ mapScaleLine }}</span>
+          </div>
+          <div v-if="bulletin.emergency_azimuth" class="bulletin-fact">
+            <span class="bulletin-fact-label">Азимут</span>
+            <span>{{ bulletin.emergency_azimuth }}</span>
+          </div>
+        </div>
+        <span v-else class="bulletin-placeholder">Контрольное время, отметка, масштаб…</span>
+      </button>
+
+      <div
+        v-else-if="bulletin.time_limit_minutes || bulletin.punching"
+        class="bulletin-facts"
+      >
         <div v-if="bulletin.time_limit_minutes" class="bulletin-fact">
           <span class="bulletin-fact-label">Контрольное время</span>
           <span>{{ bulletin.time_limit_minutes }} мин</span>
@@ -444,178 +631,225 @@ function clearScheme() {
         </div>
       </div>
 
-      <div v-if="editable" class="bulletin-facts bulletin-facts-edit">
-        <label>
-          Контрольное время, мин
-          <input v-model="bulletin.time_limit_minutes" class="bulletin-inline-input" />
-        </label>
-        <label>
-          Система отметки
-          <input v-model="bulletin.punching" class="bulletin-inline-input" />
-        </label>
-        <label>
-          Аварийный азимут
-          <input v-model="bulletin.emergency_azimuth" class="bulletin-inline-input" />
-        </label>
-        <label>
-          Масштаб
-          <input v-model="bulletin.map_scale" class="bulletin-inline-input" placeholder="1:4000" />
-        </label>
-        <label>
-          Сечение
-          <input v-model="bulletin.contour" class="bulletin-inline-input" placeholder="2,5м" />
-        </label>
-      </div>
+      <BulletinField
+        v-model="bulletin.rules"
+        field="rules"
+        label="Правила и дисциплина"
+        :active="isActive('rules')"
+        :can-edit="canEdit"
+        placeholder="Правила и дисциплина"
+        min-height="4.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.rules)" class="bulletin-block">
-        <p class="bulletin-field-label">Правила и дисциплина</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.rules"
-          min-height="4.5rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.rules)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.stations"
+        field="stations"
+        label="Станции"
+        :active="isActive('stations')"
+        :can-edit="canEdit"
+        placeholder="Станции"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.stations)" class="bulletin-block">
-        <p class="bulletin-field-label">Станции</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.stations"
-          min-height="4rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.stations)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.course_intro"
+        field="course_intro"
+        label="Предварительные параметры"
+        :active="isActive('course_intro')"
+        :can-edit="canEdit"
+        placeholder="Предварительные параметры дистанций"
+        min-height="4.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.course_intro)" class="bulletin-block">
-        <p class="bulletin-field-label">Предварительные параметры</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.course_intro"
-          min-height="4.5rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.course_intro)" />
-      </div>
-
-      <div v-if="editable || courses.length" class="bulletin-block">
+      <div
+        v-if="canEdit || courses.length"
+        class="bulletin-block"
+        :class="{ 'bulletin-zone-active': isActive('courses') }"
+      >
         <p class="bulletin-field-label">Дистанции</p>
-        <div class="table-wrap">
-          <table class="bulletin-table">
+        <div
+          v-if="isActive('courses')"
+          class="bulletin-zone"
+        >
+          <div class="table-wrap">
+            <table class="bulletin-table">
+              <thead>
+                <tr>
+                  <th>Дистанция</th>
+                  <th>длина</th>
+                  <th>кол-во КП</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, index) in bulletin.courses" :key="index">
+                  <td><input v-model="row.name" class="bulletin-inline-input" /></td>
+                  <td><input v-model="row.length" class="bulletin-inline-input" /></td>
+                  <td><input v-model="row.controls" class="bulletin-inline-input" /></td>
+                  <td>
+                    <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="admin-row-actions">
+            <button class="btn" type="button" @click="addCourse">Добавить дистанцию</button>
+            <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+          </div>
+        </div>
+        <button
+          v-else-if="canEdit"
+          type="button"
+          class="bulletin-zone bulletin-zone-hit"
+          @click="startEdit('courses')"
+        >
+          <table v-if="filledCourses(bulletin).length" class="bulletin-table">
             <thead>
               <tr>
                 <th>Дистанция</th>
                 <th>длина</th>
                 <th>кол-во КП</th>
-                <th v-if="editable"></th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, index) in courses" :key="index">
-                <td>
-                  <input
-                    v-if="editable"
-                    v-model="row.name"
-                    class="bulletin-inline-input"
-                  />
-                  <template v-else>{{ row.name }}</template>
-                </td>
-                <td>
-                  <input
-                    v-if="editable"
-                    v-model="row.length"
-                    class="bulletin-inline-input"
-                  />
-                  <template v-else>{{ row.length }}</template>
-                </td>
-                <td>
-                  <input
-                    v-if="editable"
-                    v-model="row.controls"
-                    class="bulletin-inline-input"
-                  />
-                  <template v-else>{{ row.controls }}</template>
-                </td>
-                <td v-if="editable">
-                  <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
-                </td>
+              <tr v-for="(row, index) in filledCourses(bulletin)" :key="index">
+                <td>{{ row.name }}</td>
+                <td>{{ row.length }}</td>
+                <td>{{ row.controls }}</td>
               </tr>
             </tbody>
           </table>
-        </div>
-        <button v-if="editable" class="btn" type="button" @click="addCourse">
-          Добавить дистанцию
+          <span v-else class="bulletin-placeholder">Таблица дистанций</span>
         </button>
+        <table v-else-if="filledCourses(bulletin).length" class="bulletin-table">
+          <thead>
+            <tr>
+              <th>Дистанция</th>
+              <th>длина</th>
+              <th>кол-во КП</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, index) in filledCourses(bulletin)" :key="index">
+              <td>{{ row.name }}</td>
+              <td>{{ row.length }}</td>
+              <td>{{ row.controls }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <div v-if="editable || hasText(bulletin.extra_course_notes)" class="bulletin-block">
-        <p class="bulletin-field-label">Дополнительно про дистанции</p>
-        <RichTextEditor
-          v-if="editable"
-          v-model="bulletin.extra_course_notes"
-          min-height="4rem"
-        />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.extra_course_notes)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.extra_course_notes"
+        field="extra_course_notes"
+        label="Дополнительно про дистанции"
+        :active="isActive('extra_course_notes')"
+        :can-edit="canEdit"
+        placeholder="Дополнительно про дистанции"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.terrain)" class="bulletin-block">
-        <p class="bulletin-field-label">Местность</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.terrain" min-height="4rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.terrain)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.terrain"
+        field="terrain"
+        label="Местность"
+        :active="isActive('terrain')"
+        :can-edit="canEdit"
+        placeholder="Местность"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.relief)" class="bulletin-block">
-        <p class="bulletin-field-label">Рельеф</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.relief" min-height="3.5rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.relief)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.relief"
+        field="relief"
+        label="Рельеф"
+        :active="isActive('relief')"
+        :can-edit="canEdit"
+        placeholder="Рельеф"
+        min-height="3.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.map_info)" class="bulletin-block">
-        <p class="bulletin-field-label">Карта</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.map_info" min-height="4rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.map_info)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.map_info"
+        field="map_info"
+        label="Карта"
+        :active="isActive('map_info')"
+        :can-edit="canEdit"
+        placeholder="Карта"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.map_notes)" class="bulletin-block">
-        <p class="bulletin-field-label">Особенности рисовки</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.map_notes" min-height="4rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.map_notes)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.map_notes"
+        field="map_notes"
+        label="Особенности рисовки"
+        :active="isActive('map_notes')"
+        :can-edit="canEdit"
+        placeholder="Особенности рисовки"
+        min-height="4rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <div v-if="editable || hasText(bulletin.bounds)" class="bulletin-block">
-        <p class="bulletin-field-label">Границы района</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.bounds" min-height="3.5rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.bounds)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.bounds"
+        field="bounds"
+        label="Границы района"
+        :active="isActive('bounds')"
+        :can-edit="canEdit"
+        placeholder="Границы района"
+        min-height="3.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
       <p
-        v-if="!editable && bulletin.emergency_azimuth && !hasText(bulletin.bounds)"
+        v-if="!canEdit && bulletin.emergency_azimuth"
         class="bulletin-note"
       >
         Аварийный азимут — {{ bulletin.emergency_azimuth }}.
       </p>
-      <p
-        v-else-if="!editable && bulletin.emergency_azimuth && hasText(bulletin.bounds)"
-        class="bulletin-note"
-      >
-        Аварийный азимут — {{ bulletin.emergency_azimuth }}.
-      </p>
 
-      <div v-if="editable || hasText(bulletin.map_format)" class="bulletin-block">
-        <p class="bulletin-field-label">Формат и печать карты</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.map_format" min-height="3.5rem" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.map_format)" />
-      </div>
+      <BulletinField
+        v-model="bulletin.map_format"
+        field="map_format"
+        label="Формат и печать карты"
+        :active="isActive('map_format')"
+        :can-edit="canEdit"
+        placeholder="Формат и печать карты"
+        min-height="3.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
 
-      <p v-if="!editable && mapScaleLine" class="bulletin-note">
+      <p v-if="!canEdit && mapScaleLine" class="bulletin-note">
         {{ mapScaleLine.charAt(0).toUpperCase() + mapScaleLine.slice(1) }}.
       </p>
 
       <div
-        v-if="editable || bulletin.map_urls.length"
+        v-if="canEdit || bulletin.map_urls.length"
         class="bulletin-media"
-        :class="{ 'bulletin-media-active': dropTarget === 'map' }"
-        :tabindex="editable ? 0 : undefined"
-        @click="editable ? ($event.currentTarget as HTMLElement).focus() : undefined"
+        :class="{
+          'bulletin-media-active': dropTarget === 'map' || isActive('maps'),
+          'bulletin-zone-hit': canEdit && !isActive('maps'),
+        }"
+        :tabindex="canEdit ? 0 : undefined"
+        @click="canEdit && !isActive('maps') ? startEdit('maps') : undefined"
         @paste="onMediaPaste('map', $event)"
         @dragover="onMediaDragOver('map', $event)"
         @dragleave="onMediaDragLeave('map')"
@@ -626,44 +860,61 @@ function clearScheme() {
           <figure v-for="(url, index) in bulletin.map_urls" :key="url" class="bulletin-figure">
             <img :src="url" alt="Фрагмент карты" />
             <button
-              v-if="editable"
+              v-if="canEdit && isActive('maps')"
               class="btn"
               type="button"
-              @click="removeMap(index)"
+              @click.stop="removeMap(index)"
             >
               Убрать
             </button>
           </figure>
         </div>
         <div
-          v-if="editable"
+          v-if="canEdit && (isActive('maps') || !bulletin.map_urls.length)"
           class="bulletin-dropzone"
           :class="{ busy: uploading === 'map' }"
         >
-          {{ uploading === "map" ? "Загрузка…" : "Вставьте картинку (Ctrl+V) или перетащите файл сюда" }}
+          {{
+            uploading === "map"
+              ? "Загрузка…"
+              : "Нажмите, затем Ctrl+V / drag-and-drop / загрузка"
+          }}
         </div>
-        <label v-if="editable" class="btn">
-          {{ uploading === "map" ? "Загрузка…" : "Добавить фрагмент" }}
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            hidden
-            :disabled="uploading !== ''"
-            @change="onMap"
-          />
-        </label>
+        <div v-if="canEdit && isActive('maps')" class="admin-row-actions">
+          <label class="btn" @click.stop>
+            {{ uploading === "map" ? "Загрузка…" : "Добавить файл" }}
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              hidden
+              :disabled="uploading !== ''"
+              @change="onMap"
+            />
+          </label>
+          <button class="btn btn-primary" type="button" @click.stop="stopEdit">Готово</button>
+        </div>
       </div>
     </section>
 
-    <section v-if="editable || hasText(bulletin.hazards)" class="bulletin-section bulletin-section-warn">
+    <section
+      v-if="canEdit || hasText(bulletin.hazards)"
+      class="bulletin-section bulletin-section-warn"
+    >
       <h2>Опасные места</h2>
-      <RichTextEditor v-if="editable" v-model="bulletin.hazards" />
-      <div v-else class="bulletin-text" v-html="textHtml(bulletin.hazards)" />
+      <BulletinField
+        v-model="bulletin.hazards"
+        field="hazards"
+        :active="isActive('hazards')"
+        :can-edit="canEdit"
+        placeholder="Опасные места"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
     </section>
 
     <section v-if="showEntry" class="bulletin-section">
       <h2>Заявка и стоимость</h2>
-      <p v-if="registrationUrl && !editable" class="bulletin-register-wrap">
+      <p v-if="registrationUrl && !canEdit" class="bulletin-register-wrap">
         <a
           class="bulletin-register-btn"
           :href="registrationUrl"
@@ -673,28 +924,44 @@ function clearScheme() {
           Зарегистрироваться
         </a>
       </p>
-      <div v-if="editable" class="bulletin-block">
-        <p class="bulletin-field-label">Тип заявки</p>
-        <input
-          v-model="bulletin.entry_kind"
-          class="bulletin-inline-input"
-          placeholder="динамическая"
-        />
-      </div>
-      <p v-else-if="bulletin.entry_kind" class="bulletin-note">
-        <strong>Тип заявки:</strong> {{ bulletin.entry_kind }}
-      </p>
-      <div v-if="editable || hasText(bulletin.entry_details)" class="bulletin-block">
-        <p class="bulletin-field-label">Сроки, цены и детали</p>
-        <RichTextEditor v-if="editable" v-model="bulletin.entry_details" />
-        <div v-else class="bulletin-text" v-html="textHtml(bulletin.entry_details)" />
-      </div>
+
+      <BulletinField
+        v-model="bulletin.entry_kind"
+        field="entry_kind"
+        kind="text"
+        label="Тип заявки"
+        :active="isActive('entry_kind')"
+        :can-edit="canEdit"
+        placeholder="Тип заявки (например, динамическая)"
+        display-class="bulletin-note"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
+
+      <BulletinField
+        v-model="bulletin.entry_details"
+        field="entry_details"
+        label="Сроки, цены и детали"
+        :active="isActive('entry_details')"
+        :can-edit="canEdit"
+        placeholder="Сроки, цены и детали"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
     </section>
 
-    <section v-if="editable || hasText(bulletin.contacts)" class="bulletin-section">
+    <section v-if="canEdit || hasText(bulletin.contacts)" class="bulletin-section">
       <h2>Контакты</h2>
-      <RichTextEditor v-if="editable" v-model="bulletin.contacts" min-height="3.5rem" />
-      <div v-else class="bulletin-text" v-html="textHtml(bulletin.contacts)" />
+      <BulletinField
+        v-model="bulletin.contacts"
+        field="contacts"
+        :active="isActive('contacts')"
+        :can-edit="canEdit"
+        placeholder="Контакты"
+        min-height="3.5rem"
+        @edit="startEdit"
+        @done="stopEdit"
+      />
     </section>
   </article>
 </template>

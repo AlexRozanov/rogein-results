@@ -1823,6 +1823,121 @@ th { color: #64748b; font-weight: 600; }
   gap: 12px;
 }
 
+.bulletin-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bulletin-preview-head .admin-block-title {
+  margin-bottom: 4px;
+}
+
+.bulletin-preview-head .muted {
+  margin: 0;
+  max-width: 36rem;
+}
+
+.bulletin-field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.bulletin-field:last-child {
+  margin-bottom: 0;
+}
+
+.bulletin-field-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.bulletin-field-view {
+  cursor: pointer;
+  border-radius: 10px;
+  outline: none;
+}
+
+.bulletin-field-editable .bulletin-field-view:hover,
+.bulletin-zone-hit:hover,
+.bulletin-field-editable .bulletin-placeholder:hover {
+  box-shadow: 0 0 0 2px rgb(31 122 60 / 28%);
+}
+
+.bulletin-field-active,
+.bulletin-zone-active {
+  padding: 10px;
+  border-radius: 12px;
+  background: #f7fbf8;
+  border: 1px solid #cfe3d5;
+}
+
+.bulletin-placeholder,
+.bulletin-placeholder-inline {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1.5px dashed #b7cfc0;
+  border-radius: 12px;
+  background: #f7fbf8;
+  color: #6b8574;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bulletin-placeholder-inline {
+  display: inline-block;
+  width: auto;
+  padding: 6px 10px;
+  color: #cfe9d5;
+  border-color: rgb(255 255 255 / 35%);
+  background: rgb(255 255 255 / 10%);
+}
+
+.bulletin-zone {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.bulletin-zone-hit {
+  cursor: pointer;
+  border-radius: 12px;
+}
+
+.bulletin-zone-hit:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.bulletin-pill-muted {
+  opacity: 0.7;
+  border: 1px dashed rgb(255 255 255 / 45%);
+  background: transparent;
+}
+
+.bulletin-hero .bulletin-zone-hit:hover {
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 35%);
+}
+
+.bulletin-editable .bulletin-section {
+  position: relative;
+}
+
 .admin-form label {
   display: grid;
   gap: 4px;

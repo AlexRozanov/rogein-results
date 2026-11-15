@@ -35,6 +35,7 @@ const saved = ref("");
 const loading = ref(!isNew.value);
 const pending = ref(false);
 const slugTouched = ref(false);
+const previewMode = ref(false);
 
 const generatedSlug = computed(() =>
   buildEventSlug(competitionDate.value, title.value),
@@ -223,23 +224,45 @@ onMounted(load);
     </form>
 
     <section v-if="!loading" class="bulletin-preview">
-      <h2 class="admin-block-title">Информационный бюллетень</h2>
-      <p class="muted">
-        Редактируйте прямо в макете — так же, как увидят на сайте. Шаблон ориентирования уже подставлен.
-      </p>
+      <div class="bulletin-preview-head">
+        <div>
+          <h2 class="admin-block-title">Информационный бюллетень</h2>
+          <p class="muted">
+            {{
+              previewMode
+                ? "Так страницу увидят на сайте. Нажмите «Редактировать», чтобы править блоки."
+                : "Страница как на сайте. Нажмите на блок, чтобы редактировать. Пустые блоки — с подсказкой."
+            }}
+          </p>
+        </div>
+        <div class="admin-row-actions">
+          <button
+            class="btn"
+            type="button"
+            :class="{ 'btn-primary': previewMode }"
+            @click="previewMode = !previewMode"
+          >
+            {{ previewMode ? "Редактировать" : "Просмотр" }}
+          </button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="pending || previewMode"
+            @click="onSubmit"
+          >
+            {{ pending ? "Сохраняем…" : "Сохранить бюллетень" }}
+          </button>
+        </div>
+      </div>
       <BulletinView
         v-model="bulletin"
         editable
+        :preview="previewMode"
         :title="title || 'Название старта'"
         :date="competitionDate || null"
         :upcoming-id="upcomingId"
         @error="error = $event"
       />
-      <div class="admin-row-actions">
-        <button class="btn btn-primary" type="button" :disabled="pending" @click="onSubmit">
-          {{ pending ? "Сохраняем…" : "Сохранить бюллетень" }}
-        </button>
-      </div>
     </section>
   </div>
 </template>

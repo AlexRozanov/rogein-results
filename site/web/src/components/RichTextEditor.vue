@@ -61,6 +61,9 @@ const editor = useEditor({
       placeholder: props.placeholder || "",
     }),
   ],
+  onCreate: ({ editor: ed }) => {
+    ed.commands.focus("end");
+  },
   onUpdate: ({ editor: ed }) => {
     const html = ed.isEmpty ? "" : ed.getHTML();
     if (html !== model.value) {
