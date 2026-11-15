@@ -4,7 +4,6 @@ import { useRoute, useRouter } from "vue-router";
 import { api } from "../../auth";
 import { defaultOrientBulletin, normalizeBulletin, type Bulletin } from "../../bulletin";
 import { buildEventSlug } from "../../eventSlug";
-import BulletinEditor from "../../components/BulletinEditor.vue";
 import BulletinView from "../../components/BulletinView.vue";
 import PageLoading from "../../components/PageLoading.vue";
 
@@ -206,16 +205,6 @@ onMounted(load);
         </select>
       </label>
 
-      <h2 class="admin-block-title">Информационный бюллетень</h2>
-      <p class="muted">
-        Блоки как в бумажном бюллетене. Шаблон ориентирования уже подставлен — правьте поля.
-      </p>
-      <BulletinEditor
-        v-model="bulletin"
-        :upcoming-id="upcomingId"
-        @error="error = $event"
-      />
-
       <div class="admin-row-actions">
         <button class="btn btn-primary" type="submit" :disabled="pending">
           {{ pending ? "Сохраняем…" : "Сохранить" }}
@@ -234,12 +223,23 @@ onMounted(load);
     </form>
 
     <section v-if="!loading" class="bulletin-preview">
-      <h2>Как это увидят на сайте</h2>
+      <h2 class="admin-block-title">Информационный бюллетень</h2>
+      <p class="muted">
+        Редактируйте прямо в макете — так же, как увидят на сайте. Шаблон ориентирования уже подставлен.
+      </p>
       <BulletinView
+        v-model="bulletin"
+        editable
         :title="title || 'Название старта'"
         :date="competitionDate || null"
-        :bulletin="bulletin"
+        :upcoming-id="upcomingId"
+        @error="error = $event"
       />
+      <div class="admin-row-actions">
+        <button class="btn btn-primary" type="button" :disabled="pending" @click="onSubmit">
+          {{ pending ? "Сохраняем…" : "Сохранить бюллетень" }}
+        </button>
+      </div>
     </section>
   </div>
 </template>
