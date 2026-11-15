@@ -29,7 +29,6 @@ async function onSubmit() {
   <div class="admin-login">
     <form class="card admin-form" @submit.prevent="onSubmit">
       <h1>Вход организатора</h1>
-      <p class="muted">Людей заводит команда userctl на сервере, не эта форма.</p>
       <p v-if="error" class="err">{{ error }}</p>
       <label>
         Email

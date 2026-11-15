@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../../auth";
+import { buildEventSlug } from "../../eventSlug";
 import PageLoading from "../../components/PageLoading.vue";
 
 type AdminUpcoming = {
@@ -29,22 +30,35 @@ const loading = ref(!isNew.value);
 const pending = ref(false);
 const slugTouched = ref(false);
 
-function slugFromTitle(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/ё/g, "e")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
+const generatedSlug = computed(() =>
+  buildEventSlug(competitionDate.value, title.value),
+);
 
-function onTitleInput() {
-  if (!slugTouched.value && isNew.value) {
-    const generated = slugFromTitle(title.value);
-    if (generated) slug.value = generated;
+function applyGeneratedSlug() {
+  if (generatedSlug.value) {
+    slug.value = generatedSlug.value;
   }
 }
+
+function onSlugInput() {
+  slugTouched.value = true;
+}
+
+function generateSlug() {
+  if (!generatedSlug.value) {
+    error.value = "Для slug нужны название и дата";
+    return;
+  }
+  error.value = "";
+  slug.value = generatedSlug.value;
+  slugTouched.value = false;
+}
+
+watch([title, competitionDate], () => {
+  if (isNew.value && !slugTouched.value) {
+    applyGeneratedSlug();
+  }
+});
 
 async function load() {
   if (isNew.value) return;
@@ -106,27 +120,37 @@ onMounted(load);
     <p class="back-link">
       <router-link to="/admin/calendar">← К списку</router-link>
     </p>
-    <h1>{{ isNew ? "Новый анонс" : "Анонс" }}</h1>
+    <h1>{{ isNew ? "Новый старт" : "Старт" }}</h1>
     <PageLoading v-if="loading" label="Загрузка…" />
     <form v-else class="card admin-form" @submit.prevent="onSubmit">
       <p v-if="error" class="err">{{ error }}</p>
       <label>
         Название
-        <input v-model="title" required @input="onTitleInput" />
-      </label>
-      <label>
-        Slug
-        <input
-          v-model="slug"
-          required
-          pattern="[a-z0-9_-]+"
-          title="латиница, цифры, дефис"
-          @input="slugTouched = true"
-        />
+        <input v-model="title" required />
       </label>
       <label>
         Дата
-        <input v-model="competitionDate" type="date" />
+        <input v-model="competitionDate" type="date" required />
+      </label>
+      <label>
+        Slug
+        <span class="admin-slug-row">
+          <input
+            v-model="slug"
+            required
+            pattern="[a-z0-9_-]+"
+            title="латиница, цифры, дефис"
+            @input="onSlugInput"
+          />
+          <button
+            class="btn"
+            type="button"
+            :disabled="!generatedSlug"
+            @click="generateSlug"
+          >
+            Из названия и даты
+          </button>
+        </span>
       </label>
       <label>
         Вид

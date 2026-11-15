@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { site, sportKindLabel } from "../content/site";
+import { sportKindLabel } from "../content/site";
 import PageLoading from "../components/PageLoading.vue";
 
 type UpcomingItem = {
@@ -33,8 +33,7 @@ onMounted(async () => {
   <h1>Календарь</h1>
   <p v-if="error" class="err">{{ error }}</p>
   <PageLoading v-else-if="loading" label="Загрузка календаря…" />
-  <p v-else-if="!items.length" class="muted">{{ site.calendarEmpty }}</p>
-  <div v-else class="event-list">
+  <div v-else-if="items.length" class="event-list">
     <article
       v-for="item in items"
       :id="item.slug"

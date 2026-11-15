@@ -13,7 +13,7 @@ import { hasPerm, me } from "../../auth";
         to="/admin/calendar"
       >
         <h2>Календарь</h2>
-        <p class="muted">Анонсы предстоящих стартов на сайте</p>
+        <p class="muted">Предстоящие старты на сайте</p>
       </router-link>
       <p v-else class="muted">Нет разделов, к которым есть доступ.</p>
     </div>

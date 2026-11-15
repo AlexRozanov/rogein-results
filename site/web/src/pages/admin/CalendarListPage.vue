@@ -44,15 +44,15 @@ onMounted(reload);
   <div class="admin-page">
     <div class="admin-page-head">
       <h1>Календарь</h1>
-      <router-link class="btn btn-primary" to="/admin/calendar/new">Новый анонс</router-link>
+      <router-link class="btn btn-primary" to="/admin/calendar/new">Новый старт</router-link>
     </div>
     <p class="muted">
-      Анонсы с статусом «в календаре» видны на
+      Старты со статусом «в календаре» видны на
       <router-link to="/calendar">публичной странице</router-link>.
     </p>
     <p v-if="error" class="err">{{ error }}</p>
-    <PageLoading v-else-if="loading" label="Загрузка анонсов…" />
-    <p v-else-if="!items.length" class="muted">Пока нет анонсов.</p>
+    <PageLoading v-else-if="loading" label="Загрузка стартов…" />
+    <p v-else-if="!items.length" class="muted">Пока нет стартов.</p>
     <div v-else class="event-list">
       <article v-for="item in items" :key="item.id" class="card">
         <p class="kind-pill">{{ sportKindLabel(item.sport_kind) }}</p>

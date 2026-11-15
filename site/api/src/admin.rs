@@ -82,7 +82,7 @@ async fn load_upcoming(
     .fetch_optional(pool)
     .await
     .map_err(internal)?
-    .ok_or((StatusCode::NOT_FOUND, "Анонс не найден".into()))
+    .ok_or((StatusCode::NOT_FOUND, "Старт не найден".into()))
 }
 
 async fn audit(

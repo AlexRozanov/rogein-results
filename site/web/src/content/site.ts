@@ -32,8 +32,6 @@ export const site = {
       body: "[Текст] Как попасть на тренировку, кому писать, где собираемся. Заменить в src/content/site.ts.",
     },
   ],
-  calendarEmpty:
-    "[Календарь] Здесь появятся анонсы предстоящих стартов. Заменить этот текст, когда будет первый анонс.",
 };
 
 export function sportKindLabel(kind: string | null | undefined): string {

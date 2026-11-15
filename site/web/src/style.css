@@ -1620,6 +1620,22 @@ th { color: #64748b; font-weight: 600; }
   font-weight: 600;
 }
 
+.admin-slug-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.admin-slug-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-slug-row .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .admin-form input,
 .admin-form textarea,
 .admin-form select {
