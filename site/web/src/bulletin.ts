@@ -38,6 +38,7 @@ export type Bulletin = {
   hazards: string;
   entry_kind: string;
   entry_details: string;
+  registration_url: string;
   contacts: string;
 };
 
@@ -111,6 +112,7 @@ export function defaultOrientBulletin(): Bulletin {
     hazards: "",
     entry_kind: "динамическая",
     entry_details: "",
+    registration_url: "",
     contacts: "https://t.me/malahit_sprint +7(903)158-33-46 Вячеслав",
   };
 }
@@ -158,6 +160,7 @@ export function emptyBulletin(): Bulletin {
     hazards: "",
     entry_kind: "",
     entry_details: "",
+    registration_url: "",
     contacts: "",
   };
 }
@@ -235,4 +238,96 @@ export function linkify(text: string): string {
     /https?:\/\/[^\s<]+/g,
     (url) => `<a href="${url}" target="_blank" rel="noreferrer">${url}</a>`,
   );
+}
+
+const RICH_TAGS = new Set([
+  "P",
+  "BR",
+  "STRONG",
+  "B",
+  "EM",
+  "I",
+  "U",
+  "UL",
+  "OL",
+  "LI",
+  "A",
+]);
+
+function looksLikeHtml(value: string): boolean {
+  return /<\/?(p|br|strong|b|em|i|u|ul|ol|li|a)\b/i.test(value);
+}
+
+/** Legacy plain text → HTML TipTap can load; pass through existing HTML. */
+export function plainToEditorHtml(value: string): string {
+  const text = value ?? "";
+  if (!text.trim()) return "";
+  if (looksLikeHtml(text)) return text;
+  return text
+    .split(/\n{2,}/)
+    .map((block) => {
+      const lines = block
+        .split("\n")
+        .map((line) =>
+          line
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;"),
+        )
+        .join("<br>");
+      return `<p>${lines || "<br>"}</p>`;
+    })
+    .join("");
+}
+
+export function sanitizeHtml(html: string): string {
+  if (typeof DOMParser === "undefined") return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+
+  const walk = (node: Node) => {
+    const children = Array.from(node.childNodes);
+    for (const child of children) {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        const el = child as HTMLElement;
+        const tag = el.tagName;
+        if (!RICH_TAGS.has(tag)) {
+          while (el.firstChild) {
+            node.insertBefore(el.firstChild, el);
+          }
+          node.removeChild(el);
+          continue;
+        }
+        if (tag === "A") {
+          const href = (el.getAttribute("href") || "").trim();
+          [...el.attributes].forEach((attr) => el.removeAttribute(attr.name));
+          if (/^https?:\/\//i.test(href) || href.startsWith("/")) {
+            el.setAttribute("href", href);
+            el.setAttribute("target", "_blank");
+            el.setAttribute("rel", "noreferrer");
+          }
+        } else {
+          [...el.attributes].forEach((attr) => el.removeAttribute(attr.name));
+        }
+        walk(el);
+      } else if (child.nodeType === Node.COMMENT_NODE) {
+        node.removeChild(child);
+      }
+    }
+  };
+
+  walk(doc.body);
+  return doc.body.innerHTML;
+}
+
+/** Render bulletin multiline field: rich HTML or legacy plain text. */
+export function richTextHtml(value: string): string {
+  const text = value ?? "";
+  if (!text.trim()) return "";
+  if (looksLikeHtml(text)) return sanitizeHtml(text);
+  return linkify(text).replace(/\n/g, "<br>");
+}
+
+export function isHttpUrl(value: string): boolean {
+  const url = value.trim();
+  return /^https?:\/\//i.test(url);
 }

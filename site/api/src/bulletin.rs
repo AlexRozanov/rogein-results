@@ -53,6 +53,7 @@ pub struct Bulletin {
     pub hazards: String,
     pub entry_kind: String,
     pub entry_details: String,
+    pub registration_url: String,
     pub contacts: String,
 }
 
@@ -105,6 +106,7 @@ pub fn sanitize(mut bulletin: Bulletin, upcoming_id: i64) -> Bulletin {
         .map(|url| sanitize_media_url(&url, upcoming_id))
         .filter(|url| !url.is_empty())
         .collect();
+    bulletin.registration_url = sanitize_http_url(&bulletin.registration_url);
     bulletin.courses = bulletin
         .courses
         .into_iter()
@@ -122,6 +124,18 @@ fn sanitize_media_url(raw: &str, upcoming_id: i64) -> String {
     let prefix = format!("/media/bulletins/{upcoming_id}/");
     if url.starts_with(&prefix)
         && !url.contains("..")
+        && url.chars().all(|c| c.is_ascii_graphic())
+    {
+        url.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn sanitize_http_url(raw: &str) -> String {
+    let url = raw.trim();
+    if (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(char::is_whitespace)
         && url.chars().all(|c| c.is_ascii_graphic())
     {
         url.to_string()

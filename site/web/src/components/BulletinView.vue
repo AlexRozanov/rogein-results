@@ -5,7 +5,8 @@ import {
   filledCourses,
   googleMapsUrl,
   hasCoords,
-  linkify,
+  isHttpUrl,
+  richTextHtml,
   yandexMapsUrl,
   type Bulletin,
 } from "../bulletin";
@@ -17,8 +18,13 @@ const props = defineProps<{
 }>();
 
 function textHtml(value: string): string {
-  return linkify(value).replace(/\n/g, "<br>");
+  return richTextHtml(value);
 }
+
+const registrationUrl = computed(() => {
+  const url = props.bulletin.registration_url.trim();
+  return isHttpUrl(url) ? url : "";
+});
 
 const startHoursLine = computed(() => {
   const parts: string[] = [];
@@ -60,11 +66,21 @@ const mapScaleLine = computed(() => {
         {{ bulletin.discipline }}
       </p>
       <h1 class="bulletin-doc-title">Информационный бюллетень</h1>
+      <p v-if="registrationUrl" class="bulletin-register-wrap">
+        <a
+          class="bulletin-register-btn"
+          :href="registrationUrl"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Зарегистрироваться
+        </a>
+      </p>
     </header>
 
     <section>
       <h2>Дата, место и программа</h2>
-      <p v-if="bulletin.intro" class="bulletin-text" v-html="textHtml(bulletin.intro)" />
+      <div v-if="bulletin.intro" class="bulletin-text" v-html="textHtml(bulletin.intro)" />
       <p v-if="hasCoords(bulletin)">
         Координаты расположения старта / финиша:
         {{ bulletin.lat }}, {{ bulletin.lon }}
@@ -78,8 +94,8 @@ const mapScaleLine = computed(() => {
         </a>
       </p>
       <p v-if="startHoursLine">{{ startHoursLine }}</p>
-      <p v-if="bulletin.location" class="bulletin-text" v-html="textHtml(bulletin.location)" />
-      <p v-if="bulletin.parking" class="bulletin-text" v-html="textHtml(bulletin.parking)" />
+      <div v-if="bulletin.location" class="bulletin-text" v-html="textHtml(bulletin.location)" />
+      <div v-if="bulletin.parking" class="bulletin-text" v-html="textHtml(bulletin.parking)" />
       <figure v-if="bulletin.scheme_url" class="bulletin-figure">
         <img :src="bulletin.scheme_url" alt="Схема расположения старта" />
       </figure>
@@ -107,20 +123,21 @@ const mapScaleLine = computed(() => {
       "
     >
       <h2>Техническая информация</h2>
-      <p v-if="bulletin.rules || bulletin.time_limit_minutes">
-        <span v-if="bulletin.rules">{{ bulletin.rules }}</span>
-        <template v-if="bulletin.time_limit_minutes">
+      <div v-if="bulletin.rules || bulletin.time_limit_minutes" class="bulletin-text">
+        <div v-if="bulletin.rules" v-html="textHtml(bulletin.rules)" />
+        <p v-if="bulletin.time_limit_minutes">
           Контрольное время — {{ bulletin.time_limit_minutes }} минут.
-        </template>
-      </p>
+        </p>
+      </div>
       <p v-if="bulletin.punching">
         <strong>Система отметки:</strong> {{ bulletin.punching }}
       </p>
-      <p v-if="bulletin.stations">{{ bulletin.stations }}</p>
-      <p v-if="bulletin.course_intro">
-        <strong>Предварительные параметры:</strong> {{ bulletin.course_intro }}
-      </p>
-      <p
+      <div v-if="bulletin.stations" class="bulletin-text" v-html="textHtml(bulletin.stations)" />
+      <div v-if="bulletin.course_intro" class="bulletin-text">
+        <strong>Предварительные параметры:</strong>
+        <div v-html="textHtml(bulletin.course_intro)" />
+      </div>
+      <div
         v-if="bulletin.extra_course_notes"
         class="bulletin-text"
         v-html="textHtml(bulletin.extra_course_notes)"
@@ -141,30 +158,38 @@ const mapScaleLine = computed(() => {
           </tr>
         </tbody>
       </table>
-      <p v-if="bulletin.terrain">
-        <strong>Местность:</strong> {{ bulletin.terrain }}
-      </p>
-      <p v-if="bulletin.relief">
-        <strong>Рельеф:</strong> {{ bulletin.relief }}
-      </p>
-      <p v-if="bulletin.map_info">
-        <strong>Карта:</strong> {{ bulletin.map_info }}
-      </p>
-      <p
+      <div v-if="bulletin.terrain" class="bulletin-text">
+        <strong>Местность:</strong>
+        <div v-html="textHtml(bulletin.terrain)" />
+      </div>
+      <div v-if="bulletin.relief" class="bulletin-text">
+        <strong>Рельеф:</strong>
+        <div v-html="textHtml(bulletin.relief)" />
+      </div>
+      <div v-if="bulletin.map_info" class="bulletin-text">
+        <strong>Карта:</strong>
+        <div v-html="textHtml(bulletin.map_info)" />
+      </div>
+      <div
         v-if="bulletin.map_notes"
         class="bulletin-text"
         v-html="textHtml(bulletin.map_notes)"
       />
-      <p v-if="bulletin.bounds">
-        Район ограничен: {{ bulletin.bounds }}
-        <template v-if="bulletin.emergency_azimuth">
+      <div v-if="bulletin.bounds" class="bulletin-text">
+        <span>Район ограничен:</span>
+        <div v-html="textHtml(bulletin.bounds)" />
+        <p v-if="bulletin.emergency_azimuth">
           Аварийный азимут — {{ bulletin.emergency_azimuth }}.
-        </template>
-      </p>
+        </p>
+      </div>
       <p v-else-if="bulletin.emergency_azimuth">
         Аварийный азимут — {{ bulletin.emergency_azimuth }}.
       </p>
-      <p v-if="bulletin.map_format">{{ bulletin.map_format }}</p>
+      <div
+        v-if="bulletin.map_format"
+        class="bulletin-text"
+        v-html="textHtml(bulletin.map_format)"
+      />
       <p v-if="mapScaleLine">{{ mapScaleLine }}</p>
       <div v-if="bulletin.map_urls.length" class="bulletin-maps">
         <figure v-for="url in bulletin.map_urls" :key="url" class="bulletin-figure">
@@ -175,15 +200,25 @@ const mapScaleLine = computed(() => {
 
     <section v-if="bulletin.hazards">
       <h2>Опасные места</h2>
-      <p class="bulletin-text" v-html="textHtml(bulletin.hazards)" />
+      <div class="bulletin-text" v-html="textHtml(bulletin.hazards)" />
     </section>
 
-    <section v-if="bulletin.entry_kind || bulletin.entry_details">
+    <section v-if="bulletin.entry_kind || bulletin.entry_details || registrationUrl">
       <h2>Заявка и стоимость участия</h2>
+      <p v-if="registrationUrl" class="bulletin-register-wrap">
+        <a
+          class="bulletin-register-btn"
+          :href="registrationUrl"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Зарегистрироваться
+        </a>
+      </p>
       <p v-if="bulletin.entry_kind">
         <strong>Заявка и стоимость участия:</strong> {{ bulletin.entry_kind }}.
       </p>
-      <p
+      <div
         v-if="bulletin.entry_details"
         class="bulletin-text"
         v-html="textHtml(bulletin.entry_details)"
@@ -192,7 +227,7 @@ const mapScaleLine = computed(() => {
 
     <section v-if="bulletin.contacts">
       <h2>Контакты</h2>
-      <p class="bulletin-text" v-html="textHtml(bulletin.contacts)" />
+      <div class="bulletin-text" v-html="textHtml(bulletin.contacts)" />
     </section>
   </article>
 </template>

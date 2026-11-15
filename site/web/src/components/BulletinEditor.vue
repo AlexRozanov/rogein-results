@@ -4,6 +4,7 @@ import {
   emptyCourse,
   type Bulletin,
 } from "../bulletin";
+import RichTextEditor from "./RichTextEditor.vue";
 
 const bulletin = defineModel<Bulletin>({ required: true });
 
@@ -104,7 +105,7 @@ function clearScheme() {
       <legend>Дата, место и программа</legend>
       <label>
         Вводный абзац
-        <textarea v-model="bulletin.intro" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.intro" :disabled="disabled" />
       </label>
       <div class="admin-pair">
         <label>
@@ -135,11 +136,11 @@ function clearScheme() {
       </div>
       <label>
         Где старт, как добраться, размещение
-        <textarea v-model="bulletin.location" rows="4" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.location" :disabled="disabled" />
       </label>
       <label>
         Парковка
-        <textarea v-model="bulletin.parking" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.parking" :disabled="disabled" min-height="4.5rem" />
       </label>
       <div class="bulletin-upload">
         <p>Схема старта</p>
@@ -173,7 +174,7 @@ function clearScheme() {
       <legend>Техническая информация</legend>
       <label>
         Правила и дисциплина
-        <textarea v-model="bulletin.rules" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.rules" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Контрольное время, минут
@@ -185,15 +186,15 @@ function clearScheme() {
       </label>
       <label>
         Станции
-        <textarea v-model="bulletin.stations" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.stations" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Предварительные параметры
-        <textarea v-model="bulletin.course_intro" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.course_intro" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Дополнительно про дистанции
-        <textarea v-model="bulletin.extra_course_notes" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.extra_course_notes" :disabled="disabled" min-height="4.5rem" />
       </label>
       <div class="table-wrap">
         <table class="admin-courses">
@@ -229,23 +230,23 @@ function clearScheme() {
       </button>
       <label>
         Местность
-        <textarea v-model="bulletin.terrain" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.terrain" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Рельеф
-        <textarea v-model="bulletin.relief" rows="2" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.relief" :disabled="disabled" min-height="4rem" />
       </label>
       <label>
         Карта
-        <textarea v-model="bulletin.map_info" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.map_info" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Особенности рисовки
-        <textarea v-model="bulletin.map_notes" rows="3" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.map_notes" :disabled="disabled" min-height="4.5rem" />
       </label>
       <label>
         Границы района
-        <textarea v-model="bulletin.bounds" rows="2" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.bounds" :disabled="disabled" min-height="4rem" />
       </label>
       <label>
         Аварийный азимут
@@ -253,7 +254,7 @@ function clearScheme() {
       </label>
       <label>
         Формат и печать карты
-        <textarea v-model="bulletin.map_format" rows="2" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.map_format" :disabled="disabled" min-height="4rem" />
       </label>
       <div class="admin-pair">
         <label>
@@ -292,7 +293,7 @@ function clearScheme() {
       <legend>Опасные места</legend>
       <label>
         Текст
-        <textarea v-model="bulletin.hazards" rows="5" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.hazards" :disabled="disabled" />
       </label>
     </fieldset>
 
@@ -303,8 +304,20 @@ function clearScheme() {
         <input v-model="bulletin.entry_kind" :disabled="disabled" />
       </label>
       <label>
-        Сроки, ссылка, цены
-        <textarea v-model="bulletin.entry_details" rows="4" :disabled="disabled" />
+        Ссылка на регистрацию
+        <input
+          v-model="bulletin.registration_url"
+          type="url"
+          :disabled="disabled"
+          placeholder="https://…"
+        />
+      </label>
+      <p class="muted">
+        Если ссылка заполнена, в бюллетене появится большая кнопка «Зарегистрироваться».
+      </p>
+      <label>
+        Сроки, цены и детали
+        <RichTextEditor v-model="bulletin.entry_details" :disabled="disabled" />
       </label>
     </fieldset>
 
@@ -312,7 +325,7 @@ function clearScheme() {
       <legend>Контакты</legend>
       <label>
         Текст
-        <textarea v-model="bulletin.contacts" rows="2" :disabled="disabled" />
+        <RichTextEditor v-model="bulletin.contacts" :disabled="disabled" min-height="4rem" />
       </label>
     </fieldset>
   </div>
