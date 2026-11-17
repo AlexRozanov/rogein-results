@@ -61,6 +61,7 @@ import ru.rogein.chip.queue.EventStore
 import ru.rogein.chip.queue.ExclusionEntity
 import ru.rogein.chip.queue.QueuedChipEntity
 import ru.rogein.chip.queue.ScoredResult
+import ru.rogein.chip.queue.UpcomingSiteStart
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
 import java.time.Instant
@@ -87,6 +88,12 @@ enum class MorePage { Menu, Starts, Printer, Removed, Exclusions, Corrections, P
 data class PrintPrompt(
     val summary: String,
     val text: String,
+)
+
+data class UpcomingPickerState(
+    val loading: Boolean = false,
+    val items: List<UpcomingSiteStart> = emptyList(),
+    val error: String? = null,
 )
 
 enum class CsvImportKind { Protocol, Courses, Finish, EventPack, Formats, AwardGroups, Legends }
@@ -236,6 +243,9 @@ class ChipQueueViewModel(
 
     private val _overwritePrompt = MutableStateFlow(false)
     val overwritePrompt = _overwritePrompt.asStateFlow()
+
+    private val _upcomingPicker = MutableStateFlow<UpcomingPickerState?>(null)
+    val upcomingPicker = _upcomingPicker.asStateFlow()
 
     private val _courseXmlMismatch = MutableStateFlow(false)
     val courseXmlMismatch = _courseXmlMismatch.asStateFlow()
@@ -2233,8 +2243,85 @@ class ChipQueueViewModel(
                 val message = repository.resetForNewStart(sport)
                 resetSessionUi()
                 _status.value = message
+                openUpcomingPickerLocked(afterNewStart = true)
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось начать новый старт"
+            }
+        }
+    }
+
+    fun openUpcomingPicker(baseUrl: String? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val override = baseUrl?.trim().orEmpty()
+            if (override.isNotBlank()) {
+                val current = repository.event.settingsNow()
+                if (current.apiBaseUrl.trim() != override) {
+                    repository.event.saveSettings(current.copy(apiBaseUrl = override))
+                }
+            }
+            openUpcomingPickerLocked(afterNewStart = false)
+        }
+    }
+
+    fun dismissUpcomingPicker() {
+        _upcomingPicker.value = null
+    }
+
+    fun applyUpcomingStart(item: UpcomingSiteStart) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val current = repository.event.settingsNow()
+                val date = item.competitionDate?.trim().orEmpty().ifBlank { current.competitionDate }
+                val next = current.copy(
+                    title = item.title.trim().ifBlank { current.title },
+                    slug = item.slug.trim(),
+                    competitionDate = date,
+                )
+                repository.event.saveSettings(next)
+                _upcomingPicker.value = null
+                val label = item.title.ifBlank { item.slug }
+                if (!EventStore.liveReady(next)) {
+                    _status.value = "С сайта: $label. Для online нужен токен в «Публикация»."
+                    return@launch
+                }
+                repository.flushLiveNow()
+                val after = repository.event.settingsNow()
+                _status.value = if (after.livePending) {
+                    "С сайта: $label. Online: ${after.liveNote.ifBlank { "нет связи" }}"
+                } else {
+                    "С сайта: $label. Online открыт."
+                }
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось взять старт с сайта"
+            }
+        }
+    }
+
+    private suspend fun openUpcomingPickerLocked(afterNewStart: Boolean) {
+        val settings = repository.event.settingsNow()
+        val base = settings.apiBaseUrl.trim()
+        if (base.isBlank()) {
+            if (!afterNewStart) {
+                _status.value = "Сначала укажите адрес сайта в «Публикация»"
+            }
+            return
+        }
+        _upcomingPicker.value = UpcomingPickerState(loading = true)
+        try {
+            val items = repository.event.fetchUpcoming(base, settings.sportKind)
+            _upcomingPicker.value = UpcomingPickerState(loading = false, items = items)
+            if (items.isEmpty() && afterNewStart) {
+                _status.value = "${_status.value} В календаре сайта нет анонсов для этого вида."
+            }
+        } catch (e: Exception) {
+            if (afterNewStart) {
+                _upcomingPicker.value = null
+                _status.value = "${_status.value} Календарь сайта: ${e.message ?: "ошибка"}"
+            } else {
+                _upcomingPicker.value = UpcomingPickerState(
+                    loading = false,
+                    error = e.message ?: "Не удалось загрузить календарь",
+                )
             }
         }
     }

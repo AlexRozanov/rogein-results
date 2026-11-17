@@ -4114,6 +4114,7 @@ fun PublishScreen(
     onTest: (String) -> Unit,
     onGenerateSlug: (EventSettings) -> Unit,
     onPublish: (EventSettings) -> Unit,
+    onPickFromSite: (String) -> Unit = {},
 ) {
     var api by remember(settings.apiBaseUrl) { mutableStateOf(settings.apiBaseUrl) }
     var token by remember(settings.publishToken) { mutableStateOf(settings.publishToken) }
@@ -4160,6 +4161,14 @@ fun PublishScreen(
             ) { Text("Проверить") }
         }
         Text("Этот старт", style = MaterialTheme.typography.titleMedium)
+        OutlinedButton(
+            onClick = {
+                onSave(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title))
+                onPickFromSite(api)
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Взять с сайта") }
         OutlinedTextField(
             value = title,
             onValueChange = { title = it },

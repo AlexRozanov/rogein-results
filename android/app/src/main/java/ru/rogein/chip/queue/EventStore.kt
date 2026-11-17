@@ -94,6 +94,14 @@ data class EventPackDownload(
     val mapFileName: String,
 )
 
+data class UpcomingSiteStart(
+    val slug: String,
+    val title: String,
+    val competitionDate: String?,
+    val sportKind: String,
+    val summary: String = "",
+)
+
 data class AwardGroupView(
     val name: String,
     val genderMode: String,
@@ -516,6 +524,32 @@ class EventStore(
     suspend fun eventExists(baseUrl: String, slug: String): Boolean {
         val code = request("GET", "${normalizeBase(baseUrl)}/api/events/${slug.trim()}", null, null).first
         return code == 200
+    }
+
+    suspend fun fetchUpcoming(baseUrl: String, sportKind: String? = null): List<UpcomingSiteStart> {
+        val base = normalizeBase(baseUrl)
+        if (base.isBlank()) error("укажите адрес сайта")
+        val (code, body) = request("GET", "$base/api/upcoming", null, null)
+        if (code !in 200..299) error("календарь $code: ${body.take(180)}")
+        val want = sportKind?.let { normalizeSportKind(it) }
+        val arr = JSONArray(body)
+        val out = ArrayList<UpcomingSiteStart>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val slug = o.optString("slug").trim()
+            if (slug.isBlank()) continue
+            val kind = normalizeSportKind(o.optString("sport_kind"))
+            if (want != null && kind != want) continue
+            val dateRaw = if (o.isNull("competition_date")) "" else o.optString("competition_date").trim()
+            out += UpcomingSiteStart(
+                slug = slug,
+                title = o.optString("title").trim(),
+                competitionDate = dateRaw.ifBlank { null },
+                sportKind = kind,
+                summary = o.optString("summary").trim(),
+            )
+        }
+        return out
     }
 
     suspend fun publish(

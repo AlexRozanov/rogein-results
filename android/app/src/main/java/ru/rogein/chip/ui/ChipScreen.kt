@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
@@ -36,6 +37,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -56,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
+import ru.rogein.chip.queue.UpcomingSiteStart
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -124,6 +127,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val section by viewModel.section.collectAsStateWithLifecycle()
     val morePage by viewModel.morePage.collectAsStateWithLifecycle()
     val overwritePrompt by viewModel.overwritePrompt.collectAsStateWithLifecycle()
+    val upcomingPicker by viewModel.upcomingPicker.collectAsStateWithLifecycle()
     val courseXmlMismatch by viewModel.courseXmlMismatch.collectAsStateWithLifecycle()
     val finishReplacePrompt by viewModel.finishReplacePrompt.collectAsStateWithLifecycle()
     val finishMissingPrompt by viewModel.finishMissingPrompt.collectAsStateWithLifecycle()
@@ -465,6 +469,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         onTest = viewModel::testSite,
                         onGenerateSlug = viewModel::saveAndGenerateSlug,
                         onPublish = viewModel::requestPublish,
+                        onPickFromSite = viewModel::openUpcomingPicker,
                     )
                     MorePage.Settings -> EventSettingsScreen(
                         settings = settings,
@@ -502,6 +507,13 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             dismissButton = {
                 TextButton(onClick = { confirmNewStart = false }) { Text("Отмена") }
             },
+        )
+    }
+    upcomingPicker?.let { picker ->
+        UpcomingPickerDialog(
+            state = picker,
+            onPick = viewModel::applyUpcomingStart,
+            onDismiss = viewModel::dismissUpcomingPicker,
         )
     }
     if (section == AppSection.Chip) stationWritePrompt?.let { prompt ->
@@ -1825,4 +1837,78 @@ private fun QueueCard(item: QueuedChipEntity) {
             )
         }
     }
+}
+
+@Composable
+private fun UpcomingPickerDialog(
+    state: UpcomingPickerState,
+    onPick: (UpcomingSiteStart) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Старт с сайта") },
+        text = {
+            when {
+                state.loading -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(36.dp), color = Green)
+                    }
+                }
+                state.error != null -> {
+                    Text(state.error, color = Color(0xFF8B3A3A))
+                }
+                state.items.isEmpty() -> {
+                    Text("В календаре нет анонсированных стартов для этого вида.")
+                }
+                else -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            "Подставит название, дату и slug. Можно пропустить и заполнить вручную.",
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        state.items.forEach { item ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onPick(item) }
+                                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                            ) {
+                                Text(
+                                    item.title.ifBlank { item.slug },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                val date = item.competitionDate?.takeIf { it.isNotBlank() } ?: "без даты"
+                                Text(
+                                    "$date · ${item.slug}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(if (state.loading) "Отмена" else "Пропустить")
+            }
+        },
+    )
 }

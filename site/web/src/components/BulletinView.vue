@@ -785,8 +785,8 @@ onBeforeUnmount(() => {
           v-if="isActive('courses')"
           class="bulletin-zone"
         >
-          <div class="table-wrap">
-            <table class="bulletin-table">
+          <div class="table-wrap bulletin-courses-wrap">
+            <table class="bulletin-table bulletin-courses-table">
               <thead>
                 <tr>
                   <th>Дистанция</th>
@@ -799,17 +799,23 @@ onBeforeUnmount(() => {
               </thead>
               <tbody>
                 <tr v-for="(row, index) in bulletin.courses" :key="index">
-                  <td><input v-model="row.name" class="bulletin-inline-input" /></td>
-                  <td><input v-model="row.length" class="bulletin-inline-input" /></td>
-                  <td><input v-model="row.controls" class="bulletin-inline-input" /></td>
-                  <td>
+                  <td data-label="Дистанция">
+                    <input v-model="row.name" class="bulletin-inline-input" />
+                  </td>
+                  <td data-label="длина">
+                    <input v-model="row.length" class="bulletin-inline-input" />
+                  </td>
+                  <td data-label="кол-во КП">
+                    <input v-model="row.controls" class="bulletin-inline-input" />
+                  </td>
+                  <td data-label="масштаб">
                     <input
                       v-model="row.scale"
                       class="bulletin-inline-input"
                       placeholder="1:4000"
                     />
                   </td>
-                  <td v-if="registrationUrl">
+                  <td v-if="registrationUrl" data-label="регистрация">
                     <a
                       class="bulletin-register-link"
                       :href="registrationUrl"
@@ -820,7 +826,7 @@ onBeforeUnmount(() => {
                       Регистрация
                     </a>
                   </td>
-                  <td>
+                  <td data-label="">
                     <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
                   </td>
                 </tr>
@@ -842,7 +848,45 @@ onBeforeUnmount(() => {
           class="bulletin-zone bulletin-zone-hit"
           @click="startEdit('courses')"
         >
-          <table v-if="filledCourses(bulletin).length" class="bulletin-table">
+          <div v-if="filledCourses(bulletin).length" class="table-wrap bulletin-courses-wrap">
+            <table class="bulletin-table bulletin-courses-table">
+              <thead>
+                <tr>
+                  <th>Дистанция</th>
+                  <th>длина</th>
+                  <th>кол-во КП</th>
+                  <th v-if="coursesHaveScale(bulletin)">масштаб</th>
+                  <th v-if="registrationUrl">регистрация</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, index) in filledCourses(bulletin)" :key="index">
+                  <td data-label="Дистанция">{{ row.name }}</td>
+                  <td data-label="длина">{{ row.length }}</td>
+                  <td data-label="кол-во КП">{{ row.controls }}</td>
+                  <td v-if="coursesHaveScale(bulletin)" data-label="масштаб">{{ row.scale }}</td>
+                  <td v-if="registrationUrl" data-label="регистрация">
+                    <a
+                      class="bulletin-register-link"
+                      :href="registrationUrl"
+                      target="_blank"
+                      rel="noreferrer"
+                      @click.stop
+                    >
+                      Регистрация
+                    </a>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <span v-else class="bulletin-placeholder">Таблица дистанций</span>
+        </button>
+        <div
+          v-else-if="filledCourses(bulletin).length"
+          class="table-wrap bulletin-courses-wrap"
+        >
+          <table class="bulletin-table bulletin-courses-table">
             <thead>
               <tr>
                 <th>Дистанция</th>
@@ -854,17 +898,16 @@ onBeforeUnmount(() => {
             </thead>
             <tbody>
               <tr v-for="(row, index) in filledCourses(bulletin)" :key="index">
-                <td>{{ row.name }}</td>
-                <td>{{ row.length }}</td>
-                <td>{{ row.controls }}</td>
-                <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
-                <td v-if="registrationUrl">
+                <td data-label="Дистанция">{{ row.name }}</td>
+                <td data-label="длина">{{ row.length }}</td>
+                <td data-label="кол-во КП">{{ row.controls }}</td>
+                <td v-if="coursesHaveScale(bulletin)" data-label="масштаб">{{ row.scale }}</td>
+                <td v-if="registrationUrl" data-label="регистрация">
                   <a
                     class="bulletin-register-link"
                     :href="registrationUrl"
                     target="_blank"
                     rel="noreferrer"
-                    @click.stop
                   >
                     Регистрация
                   </a>
@@ -872,37 +915,7 @@ onBeforeUnmount(() => {
               </tr>
             </tbody>
           </table>
-          <span v-else class="bulletin-placeholder">Таблица дистанций</span>
-        </button>
-        <table v-else-if="filledCourses(bulletin).length" class="bulletin-table">
-          <thead>
-            <tr>
-              <th>Дистанция</th>
-              <th>длина</th>
-              <th>кол-во КП</th>
-              <th v-if="coursesHaveScale(bulletin)">масштаб</th>
-              <th v-if="registrationUrl">регистрация</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(row, index) in filledCourses(bulletin)" :key="index">
-              <td>{{ row.name }}</td>
-              <td>{{ row.length }}</td>
-              <td>{{ row.controls }}</td>
-              <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
-              <td v-if="registrationUrl">
-                <a
-                  class="bulletin-register-link"
-                  :href="registrationUrl"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Регистрация
-                </a>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        </div>
       </div>
 
       <BulletinField
