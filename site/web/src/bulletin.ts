@@ -243,6 +243,95 @@ export function snapshotBulletin(bulletin: Bulletin): Bulletin {
   return coerceBulletin(JSON.parse(JSON.stringify(bulletin)) as Partial<Bulletin>);
 }
 
+/** Same rule as Android EventStore.liveViewerUrl / site route /live/:slug */
+export function liveResultsPath(slug: string | null | undefined): string {
+  const id = (slug ?? "").trim();
+  return id ? `/live/${encodeURIComponent(id)}` : "";
+}
+
+export type ParsedContact =
+  | { kind: "telegram"; href: string; label: string }
+  | { kind: "phone"; href: string; label: string }
+  | { kind: "text"; label: string };
+
+function stripTags(value: string): string {
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePhoneHref(raw: string): string {
+  const digits = raw.replace(/[^\d+]/g, "");
+  if (digits.startsWith("+")) return `tel:${digits}`;
+  if (digits.startsWith("8") && digits.length === 11) return `tel:+7${digits.slice(1)}`;
+  if (digits.startsWith("7") && digits.length === 11) return `tel:+${digits}`;
+  return `tel:${digits}`;
+}
+
+/** Pull Telegram + phones out of free-text contacts for icon rendering. */
+export function parseContacts(raw: string): ParsedContact[] {
+  const text = stripTags(raw);
+  if (!text) return [];
+
+  type Span = { start: number; end: number; item: ParsedContact };
+  const spans: Span[] = [];
+
+  const tgRe =
+    /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([A-Za-z0-9_]{4,})|(@[A-Za-z0-9_]{4,})/gi;
+  for (const match of text.matchAll(tgRe)) {
+    const handle = (match[1] || match[2] || "").replace(/^@/, "");
+    if (!handle) continue;
+    const start = match.index ?? 0;
+    spans.push({
+      start,
+      end: start + match[0].length,
+      item: {
+        kind: "telegram",
+        href: `https://t.me/${handle}`,
+        label: `@${handle}`,
+      },
+    });
+  }
+
+  const phoneRe =
+    /(?:\+?7|8)[\s\-()]*(?:\d[\s\-()]*){10}|\+\d[\d\s\-()]{8,18}\d/g;
+  for (const match of text.matchAll(phoneRe)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (spans.some((s) => start < s.end && end > s.start)) continue;
+    const label = match[0].replace(/\s+/g, " ").trim();
+    spans.push({
+      start,
+      end,
+      item: {
+        kind: "phone",
+        href: normalizePhoneHref(label),
+        label,
+      },
+    });
+  }
+
+  spans.sort((a, b) => a.start - b.start);
+  const out: ParsedContact[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    const before = text.slice(cursor, span.start).trim();
+    if (before) out.push({ kind: "text", label: before });
+    out.push(span.item);
+    cursor = span.end;
+  }
+  const tail = text.slice(cursor).trim();
+  if (tail) out.push({ kind: "text", label: tail });
+  return out;
+}
+
 export function linkify(text: string): string {
   const escaped = text
     .replace(/&/g, "&amp;")

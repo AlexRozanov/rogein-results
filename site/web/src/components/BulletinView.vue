@@ -9,6 +9,8 @@ import {
   googleMapsUrl,
   hasCoords,
   isHttpUrl,
+  liveResultsPath,
+  parseContacts,
   snapshotBulletin,
   yandexMapsUrl,
   type Bulletin,
@@ -21,6 +23,7 @@ const bulletin = defineModel<Bulletin>({ required: true });
 const props = defineProps<{
   title: string;
   date: string | null;
+  slug?: string | null;
   editable?: boolean;
   preview?: boolean;
   upcomingId?: number | null;
@@ -154,6 +157,10 @@ const registrationUrl = computed(() => {
   const url = bulletin.value.registration_url.trim();
   return isHttpUrl(url) ? url : "";
 });
+
+const liveUrl = computed(() => liveResultsPath(props.slug));
+
+const contactItems = computed(() => parseContacts(bulletin.value.contacts));
 
 const placeLine = computed(
   () => bulletinPlaceLine(props.date, bulletin.value) || props.title,
@@ -425,7 +432,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div
-        v-if="canEdit || registrationUrl"
+        v-if="canEdit || registrationUrl || liveUrl"
         class="bulletin-hero-cta"
       >
         <div v-if="isActive('registration')" class="bulletin-zone bulletin-zone-active">
@@ -457,15 +464,24 @@ onBeforeUnmount(() => {
           </a>
           <span v-else class="bulletin-placeholder-inline">Добавить ссылку на регистрацию</span>
         </button>
-        <a
-          v-else-if="registrationUrl"
-          class="bulletin-register-btn"
-          :href="registrationUrl"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Регистрация
-        </a>
+        <div v-else class="bulletin-hero-actions">
+          <a
+            v-if="registrationUrl"
+            class="bulletin-register-btn"
+            :href="registrationUrl"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Регистрация
+          </a>
+          <a
+            v-if="liveUrl"
+            class="bulletin-live-btn"
+            :href="liveUrl"
+          >
+            Live-результаты
+          </a>
+        </div>
       </div>
     </header>
 
@@ -764,19 +780,7 @@ onBeforeUnmount(() => {
         class="bulletin-block"
         :class="{ 'bulletin-zone-active': isActive('courses') }"
       >
-        <div class="bulletin-section-head">
-          <p class="bulletin-field-label">Дистанции</p>
-          <a
-            v-if="registrationUrl"
-            class="bulletin-register-link"
-            :href="registrationUrl"
-            target="_blank"
-            rel="noreferrer"
-            @click.stop
-          >
-            Регистрация
-          </a>
-        </div>
+        <p class="bulletin-field-label">Дистанции</p>
         <div
           v-if="isActive('courses')"
           class="bulletin-zone"
@@ -789,6 +793,7 @@ onBeforeUnmount(() => {
                   <th>длина</th>
                   <th>кол-во КП</th>
                   <th>масштаб</th>
+                  <th v-if="registrationUrl">регистрация</th>
                   <th></th>
                 </tr>
               </thead>
@@ -803,6 +808,17 @@ onBeforeUnmount(() => {
                       class="bulletin-inline-input"
                       placeholder="1:4000"
                     />
+                  </td>
+                  <td v-if="registrationUrl">
+                    <a
+                      class="bulletin-register-link"
+                      :href="registrationUrl"
+                      target="_blank"
+                      rel="noreferrer"
+                      @click.stop
+                    >
+                      Регистрация
+                    </a>
                   </td>
                   <td>
                     <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
@@ -833,6 +849,7 @@ onBeforeUnmount(() => {
                 <th>длина</th>
                 <th>кол-во КП</th>
                 <th v-if="coursesHaveScale(bulletin)">масштаб</th>
+                <th v-if="registrationUrl">регистрация</th>
               </tr>
             </thead>
             <tbody>
@@ -841,6 +858,17 @@ onBeforeUnmount(() => {
                 <td>{{ row.length }}</td>
                 <td>{{ row.controls }}</td>
                 <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
+                <td v-if="registrationUrl">
+                  <a
+                    class="bulletin-register-link"
+                    :href="registrationUrl"
+                    target="_blank"
+                    rel="noreferrer"
+                    @click.stop
+                  >
+                    Регистрация
+                  </a>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -853,6 +881,7 @@ onBeforeUnmount(() => {
               <th>длина</th>
               <th>кол-во КП</th>
               <th v-if="coursesHaveScale(bulletin)">масштаб</th>
+              <th v-if="registrationUrl">регистрация</th>
             </tr>
           </thead>
           <tbody>
@@ -861,6 +890,16 @@ onBeforeUnmount(() => {
               <td>{{ row.length }}</td>
               <td>{{ row.controls }}</td>
               <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
+              <td v-if="registrationUrl">
+                <a
+                  class="bulletin-register-link"
+                  :href="registrationUrl"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Регистрация
+                </a>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -1055,8 +1094,9 @@ onBeforeUnmount(() => {
 
     <section v-if="showEntry" class="bulletin-section">
       <h2>Заявка и стоимость</h2>
-      <p v-if="registrationUrl && !canEdit" class="bulletin-register-wrap">
+      <div v-if="(registrationUrl || liveUrl) && !canEdit" class="bulletin-register-wrap">
         <a
+          v-if="registrationUrl"
           class="bulletin-register-btn"
           :href="registrationUrl"
           target="_blank"
@@ -1064,7 +1104,10 @@ onBeforeUnmount(() => {
         >
           Регистрация
         </a>
-      </p>
+        <a v-if="liveUrl" class="bulletin-live-btn" :href="liveUrl">
+          Live-результаты
+        </a>
+      </div>
 
       <BulletinField
         v-model="bulletin.entry_kind"
@@ -1097,18 +1140,105 @@ onBeforeUnmount(() => {
 
     <section v-if="canEdit || hasText(bulletin.contacts)" class="bulletin-section">
       <h2>Контакты</h2>
-      <BulletinField
-        v-model="bulletin.contacts"
-        field="contacts"
-        :active="isActive('contacts')"
-        :can-edit="canEdit"
-        placeholder="Контакты"
-        min-height="3.5rem"
-        :saving="saving"
-        @edit="startEdit"
-        @confirm="confirmEdit"
-        @cancel="cancelEdit"
-      />
+      <template v-if="isActive('contacts')">
+        <BulletinField
+          v-model="bulletin.contacts"
+          field="contacts"
+          :active="true"
+          :can-edit="canEdit"
+          placeholder="Telegram, телефон, имя…"
+          min-height="3.5rem"
+          :saving="saving"
+          @edit="startEdit"
+          @confirm="confirmEdit"
+          @cancel="cancelEdit"
+        />
+      </template>
+      <button
+        v-else-if="canEdit && !hasText(bulletin.contacts)"
+        type="button"
+        class="bulletin-placeholder"
+        @click="startEdit('contacts')"
+      >
+        Контакты
+      </button>
+      <div
+        v-else-if="canEdit"
+        class="bulletin-contacts bulletin-field-view"
+        role="button"
+        tabindex="0"
+        @click="startEdit('contacts')"
+        @keydown.enter.prevent="startEdit('contacts')"
+      >
+        <template v-for="(item, index) in contactItems" :key="index">
+          <a
+            v-if="item.kind === 'telegram'"
+            class="bulletin-contact bulletin-contact-tg"
+            :href="item.href"
+            target="_blank"
+            rel="noreferrer"
+            :title="item.label"
+            @click.stop
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
+              />
+            </svg>
+            <span class="sr-only">{{ item.label }}</span>
+          </a>
+          <a
+            v-else-if="item.kind === 'phone'"
+            class="bulletin-contact bulletin-contact-phone"
+            :href="item.href"
+            @click.stop
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
+              />
+            </svg>
+            <span>{{ item.label }}</span>
+          </a>
+          <span v-else class="bulletin-contact-text">{{ item.label }}</span>
+        </template>
+      </div>
+      <div v-else class="bulletin-contacts">
+        <template v-for="(item, index) in contactItems" :key="index">
+          <a
+            v-if="item.kind === 'telegram'"
+            class="bulletin-contact bulletin-contact-tg"
+            :href="item.href"
+            target="_blank"
+            rel="noreferrer"
+            :title="item.label"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
+              />
+            </svg>
+            <span class="sr-only">{{ item.label }}</span>
+          </a>
+          <a
+            v-else-if="item.kind === 'phone'"
+            class="bulletin-contact bulletin-contact-phone"
+            :href="item.href"
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
+              />
+            </svg>
+            <span>{{ item.label }}</span>
+          </a>
+          <span v-else class="bulletin-contact-text">{{ item.label }}</span>
+        </template>
+      </div>
     </section>
   </article>
 </template>

@@ -296,6 +296,7 @@ onMounted(load);
         :saving="savingBulletin"
         :title="title || 'Название старта'"
         :date="competitionDate || null"
+        :slug="slug || null"
         :upcoming-id="upcomingId"
         @error="error = $event"
         @save="onBulletinSave"

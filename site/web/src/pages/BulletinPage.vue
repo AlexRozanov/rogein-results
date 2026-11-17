@@ -40,5 +40,6 @@ onMounted(async () => {
     v-model="bulletin"
     :title="item.title"
     :date="item.competition_date"
+    :slug="item.slug"
   />
 </template>
