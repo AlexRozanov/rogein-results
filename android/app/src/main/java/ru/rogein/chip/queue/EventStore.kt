@@ -507,11 +507,27 @@ class EventStore(
             removed,
             requireResults = false,
         )
-        val url = "${normalizeBase(settings.apiBaseUrl)}/api/live/$slug"
-        val (code, body) = request("PUT", url, payload, settings.publishToken)
+        putLive(settings.apiBaseUrl, slug, payload, settings.publishToken)
+        return "online: ${scored.size} результатов"
+    }
+
+    /** Opens /live/{slug} with an empty payload (title/date/slug only). */
+    suspend fun openLiveShell(settings: EventSettings): String {
+        val slug = settings.slug.trim()
+        val title = settings.title.trim()
+        if (!liveReady(settings)) error("online не настроен")
+        val payload = buildLiveShellJson(settings, title)
+        putLive(settings.apiBaseUrl, slug, payload, settings.publishToken)
+        return "online открыт"
+    }
+
+    private fun putLive(baseUrl: String, slug: String, payload: String, token: String) {
+        val id = slug.trim()
+        if (id.isEmpty()) error("нужен slug")
+        val url = "${normalizeBase(baseUrl)}/api/live/${encodePathSegment(id)}"
+        val (code, body) = request("PUT", url, payload, token)
         if (code == 409) error("этот старт уже в архиве сайта")
         if (code !in 200..299) error("online $code: ${body.take(200)}")
-        return "online: ${scored.size} результатов"
     }
 
     suspend fun testSite(baseUrl: String): String {
@@ -1513,19 +1529,41 @@ class EventStore(
             }
             return JSONObject()
                 .put("title", title)
-                .put("competition_date", settings.competitionDate)
+                .put("competition_date", jsonDateOrNull(settings.competitionDate))
                 .put("sport_kind", normalizeSportKind(settings.sportKind))
-                .put("start_cp", settings.startCp)
-                .put("finish_cp", settings.finishCp)
+                .put("start_cp", settings.startCp.takeIf { it > 0 } ?: JSONObject.NULL)
+                .put("finish_cp", settings.finishCp.takeIf { it > 0 } ?: JSONObject.NULL)
                 .put("award_groups", groups)
                 .put("participants", participants)
                 .put("results", results)
                 .put("map_points", mapPoints)
-                .put("meters_per_pixel", settings.metersPerPixel ?: JSONObject.NULL)
-                .put("map_width", settings.mapWidth ?: JSONObject.NULL)
-                .put("map_height", settings.mapHeight ?: JSONObject.NULL)
+                .put("meters_per_pixel", settings.metersPerPixel?.takeIf { it.isFinite() && it > 0 } ?: JSONObject.NULL)
+                .put("map_width", settings.mapWidth?.takeIf { it > 0 } ?: JSONObject.NULL)
+                .put("map_height", settings.mapHeight?.takeIf { it > 0 } ?: JSONObject.NULL)
                 .toString()
         }
+
+        private fun buildLiveShellJson(settings: EventSettings, title: String): String {
+            return JSONObject()
+                .put("title", title)
+                .put("competition_date", jsonDateOrNull(settings.competitionDate))
+                .put("sport_kind", normalizeSportKind(settings.sportKind))
+                .put("start_cp", settings.startCp.takeIf { it > 0 } ?: JSONObject.NULL)
+                .put("finish_cp", settings.finishCp.takeIf { it > 0 } ?: JSONObject.NULL)
+                .put("award_groups", JSONArray())
+                .put("participants", JSONArray())
+                .put("results", JSONArray())
+                .put("map_points", JSONArray())
+                .toString()
+        }
+
+        private fun jsonDateOrNull(raw: String): Any {
+            val value = raw.trim()
+            return if (value.matches(Regex("""^\d{4}-\d{2}-\d{2}$"""))) value else JSONObject.NULL
+        }
+
+        private fun encodePathSegment(raw: String): String =
+            java.net.URLEncoder.encode(raw, Charsets.UTF_8.name()).replace("+", "%20")
 
         private fun optionalIntJson(values: List<Int?>): JSONArray {
             val array = JSONArray()

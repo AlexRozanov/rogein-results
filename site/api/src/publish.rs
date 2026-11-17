@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 use base64::Engine;
+use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::map_image::{prepare_web_map, scale_meters_per_pixel};
@@ -11,6 +12,7 @@ use crate::models::{PublishAwardGroup, PublishMapPoint, PublishParticipant, Publ
 #[derive(Debug, serde::Deserialize)]
 pub struct PublishPayload {
     pub title: String,
+    #[serde(default, deserialize_with = "deserialize_optional_date")]
     pub competition_date: Option<chrono::NaiveDate>,
     pub award_groups: Vec<PublishAwardGroup>,
     pub participants: Vec<PublishParticipant>,
@@ -30,6 +32,21 @@ pub struct PublishPayload {
     pub start_cp: Option<i32>,
     #[serde(default)]
     pub finish_cp: Option<i32>,
+}
+
+fn deserialize_optional_date<'de, D>(
+    deserializer: D,
+) -> Result<Option<chrono::NaiveDate>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(raw) = value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| serde::de::Error::custom(format!("invalid competition_date '{raw}'")))
 }
 
 fn default_sport_kind() -> String {
@@ -58,6 +75,7 @@ pub async fn publish_event(
     }
 
     let mut tx = pool.begin().await?;
+    let organizer_id = resolve_event_organizer_id(&mut tx, slug).await?;
     sqlx::query("DELETE FROM events WHERE slug = $1")
         .bind(slug)
         .execute(&mut *tx)
@@ -67,8 +85,11 @@ pub async fn publish_event(
     let map_points = serde_json::to_value(&payload.map_points)?;
     let event_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO events (slug, title, competition_date, status, map_points, meters_per_pixel, sport_kind, start_cp, finish_cp, revision)
-        VALUES ($1, $2, $3, 'published', $4, $5, $6, $7, $8, 1)
+        INSERT INTO events (
+            slug, title, competition_date, status, map_points, meters_per_pixel,
+            sport_kind, start_cp, finish_cp, revision, organizer_id
+        )
+        VALUES ($1, $2, $3, 'published', $4, $5, $6, $7, $8, 1, $9)
         RETURNING id
         "#,
     )
@@ -80,6 +101,7 @@ pub async fn publish_event(
     .bind(normalize_sport_kind(&payload.sport_kind))
     .bind(payload.start_cp)
     .bind(payload.finish_cp)
+    .bind(organizer_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -160,13 +182,14 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
             id
         }
         None => {
+            let organizer_id = resolve_event_organizer_id(&mut tx, slug).await?;
             sqlx::query_scalar(
                 r#"
                 INSERT INTO events (
                     slug, title, competition_date, status, map_points, meters_per_pixel,
-                    sport_kind, start_cp, finish_cp, revision, map_width, map_height
+                    sport_kind, start_cp, finish_cp, revision, map_width, map_height, organizer_id
                 )
-                VALUES ($1, $2, $3, 'live', $7, $8, $4, $5, $6, 1, $9, $10)
+                VALUES ($1, $2, $3, 'live', $7, $8, $4, $5, $6, 1, $9, $10, $11)
                 RETURNING id
                 "#,
             )
@@ -180,6 +203,7 @@ pub async fn publish_live_event(pool: &PgPool, slug: &str, payload: PublishPaylo
             .bind(payload.meters_per_pixel)
             .bind(payload.map_width.filter(|v| *v > 0))
             .bind(payload.map_height.filter(|v| *v > 0))
+            .bind(organizer_id)
             .fetch_one(&mut *tx)
             .await?
         }
@@ -530,6 +554,34 @@ async fn save_map_bytes(
     Ok(())
 }
 
+/// Phone publish has no login: take organizer from matching upcoming, else default club.
+async fn resolve_event_organizer_id(
+    tx: &mut Transaction<'_, Postgres>,
+    slug: &str,
+) -> anyhow::Result<i64> {
+    let from_upcoming: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT organizer_id
+        FROM upcoming_events
+        WHERE slug = $1
+        ORDER BY id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(slug)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(id) = from_upcoming {
+        return Ok(id);
+    }
+    let default_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM organizers WHERE slug = 'malahit' ORDER BY id LIMIT 1",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    default_id.ok_or_else(|| anyhow::anyhow!("нет организатора для события"))
+}
+
 fn sanitize_file_name(raw: &str) -> String {
     let name = std::path::Path::new(raw)
         .file_name()
@@ -551,3 +603,4 @@ fn sanitize_file_name(raw: &str) -> String {
         cleaned
     }
 }
+

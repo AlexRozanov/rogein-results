@@ -414,10 +414,16 @@ async fn get_live_event(
         .map_err(internal)?
     {
         Some(event) => event,
-        None => load_pack_live_placeholder(&state.pool, &slug)
+        None => match load_pack_live_placeholder(&state.pool, &slug)
             .await
             .map_err(internal)?
-            .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?,
+        {
+            Some(event) => event,
+            None => load_upcoming_live_placeholder(&state.pool, &slug)
+                .await
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "Live event not found".into()))?,
+        },
     };
     fill_live_map_from_pack(&state.pool, &slug, &mut event)
         .await
@@ -930,6 +936,56 @@ async fn fill_live_map_from_pack(
         row.map_height,
     );
     Ok(())
+}
+
+async fn load_upcoming_live_placeholder(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<EventDetail>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (String, Option<NaiveDate>, String)>(
+        r#"
+        SELECT title, competition_date, sport_kind
+        FROM upcoming_events
+        WHERE slug = $1
+          AND status = 'announced'
+          AND published_event_id IS NULL
+        "#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    let Some((title, competition_date, sport_kind)) = row else {
+        return Ok(None);
+    };
+    let title = title.trim().to_string();
+    let kind = sport_kind.trim().to_ascii_lowercase();
+    Ok(Some(EventDetail {
+        slug: slug.to_string(),
+        title: if title.is_empty() {
+            slug.to_string()
+        } else {
+            title
+        },
+        competition_date,
+        sport_kind: if kind == "orient" {
+            "orient".into()
+        } else {
+            "rogaine".into()
+        },
+        status: "pending".into(),
+        published_at: Utc::now(),
+        map_url: None,
+        map_mime: None,
+        map_width: None,
+        map_height: None,
+        meters_per_pixel: None,
+        map_points: serde_json::json!([]),
+        start_cp: None,
+        finish_cp: None,
+        revision: 0,
+        award_groups: vec![],
+        results: vec![],
+    }))
 }
 
 async fn load_pack_live_placeholder(

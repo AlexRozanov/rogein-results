@@ -2284,12 +2284,13 @@ class ChipQueueViewModel(
                     _status.value = "С сайта: $label. Для online нужен токен в «Публикация»."
                     return@launch
                 }
-                repository.flushLiveNow()
-                val after = repository.event.settingsNow()
-                _status.value = if (after.livePending) {
-                    "С сайта: $label. Online: ${after.liveNote.ifBlank { "нет связи" }}"
-                } else {
-                    "С сайта: $label. Online открыт."
+                try {
+                    val note = repository.event.openLiveShell(next)
+                    repository.event.setLiveNote(note)
+                    _status.value = "С сайта: $label. $note."
+                } catch (e: Exception) {
+                    repository.event.setLiveNote(e.message ?: "нет связи")
+                    _status.value = "С сайта: $label. Online: ${e.message ?: "ошибка"}"
                 }
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось взять старт с сайта"
