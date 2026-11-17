@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { richTextHtml } from "../bulletin";
 import { sportKindLabel } from "../content/site";
 import PageLoading from "../components/PageLoading.vue";
 
@@ -44,7 +45,11 @@ onMounted(async () => {
       <p class="kind-pill">{{ sportKindLabel(item.sport_kind) }}</p>
       <h2>{{ item.title }}</h2>
       <p class="muted">{{ item.competition_date || "дата уточняется" }}</p>
-      <p v-if="item.summary">{{ item.summary }}</p>
+      <div
+        v-if="item.summary"
+        class="calendar-summary"
+        v-html="richTextHtml(item.summary)"
+      />
     </router-link>
   </div>
 </template>

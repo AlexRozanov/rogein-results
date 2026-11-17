@@ -414,6 +414,25 @@ h2 {
 .event-link:hover { border-color: var(--green); }
 .event-link h2 { margin-bottom: 6px; }
 
+.calendar-summary {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.calendar-summary p {
+  margin: 0 0 0.4em;
+}
+
+.calendar-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.calendar-summary ul,
+.calendar-summary ol {
+  margin: 0 0 0.4em;
+  padding-left: 1.2em;
+}
+
 .table-wrap {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;

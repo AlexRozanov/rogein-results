@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { api } from "../../auth";
+import { richTextHtml } from "../../bulletin";
 import { sportKindLabel } from "../../content/site";
 import PageLoading from "../../components/PageLoading.vue";
 
@@ -62,7 +63,11 @@ onMounted(reload);
           · {{ statusLabel[item.status] || item.status }}
           · {{ item.slug }}
         </p>
-        <p v-if="item.summary">{{ item.summary }}</p>
+        <div
+          v-if="item.summary"
+          class="calendar-summary"
+          v-html="richTextHtml(item.summary)"
+        />
         <p class="admin-row-actions">
           <router-link
             v-if="item.status !== 'completed'"
