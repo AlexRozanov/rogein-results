@@ -249,10 +249,10 @@ export function liveResultsPath(slug: string | null | undefined): string {
   return id ? `/live/${encodeURIComponent(id)}` : "";
 }
 
-export type ParsedContact =
-  | { kind: "telegram"; href: string; label: string }
-  | { kind: "phone"; href: string; label: string }
-  | { kind: "text"; label: string };
+export type ContactBlocks = {
+  telegram: { href: string } | null;
+  phone: { href: string; number: string; name: string } | null;
+};
 
 function stripTags(value: string): string {
   return value
@@ -275,61 +275,51 @@ function normalizePhoneHref(raw: string): string {
   return `tel:${digits}`;
 }
 
-/** Pull Telegram + phones out of free-text contacts for icon rendering. */
-export function parseContacts(raw: string): ParsedContact[] {
+/** Telegram + phone(+name) blocks from free-text contacts. */
+export function parseContactBlocks(raw: string): ContactBlocks {
   const text = stripTags(raw);
-  if (!text) return [];
+  if (!text) return { telegram: null, phone: null };
 
-  type Span = { start: number; end: number; item: ParsedContact };
-  const spans: Span[] = [];
+  let rest = text;
+  let telegram: ContactBlocks["telegram"] = null;
+  let phone: ContactBlocks["phone"] = null;
 
-  const tgRe =
-    /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([A-Za-z0-9_]{4,})|(@[A-Za-z0-9_]{4,})/gi;
-  for (const match of text.matchAll(tgRe)) {
-    const handle = (match[1] || match[2] || "").replace(/^@/, "");
-    if (!handle) continue;
-    const start = match.index ?? 0;
-    spans.push({
-      start,
-      end: start + match[0].length,
-      item: {
-        kind: "telegram",
-        href: `https://t.me/${handle}`,
-        label: `@${handle}`,
-      },
-    });
+  const tgMatch = rest.match(
+    /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([A-Za-z0-9_]{4,})|(@[A-Za-z0-9_]{4,})/i,
+  );
+  if (tgMatch) {
+    const handle = (tgMatch[1] || tgMatch[2] || "").replace(/^@/, "");
+    if (handle) {
+      telegram = { href: `https://t.me/${handle}` };
+      rest = `${rest.slice(0, tgMatch.index ?? 0)} ${rest.slice((tgMatch.index ?? 0) + tgMatch[0].length)}`.trim();
+    }
   }
 
-  const phoneRe =
-    /(?:\+?7|8)[\s\-()]*(?:\d[\s\-()]*){10}|\+\d[\d\s\-()]{8,18}\d/g;
-  for (const match of text.matchAll(phoneRe)) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    if (spans.some((s) => start < s.end && end > s.start)) continue;
-    const label = match[0].replace(/\s+/g, " ").trim();
-    spans.push({
-      start,
-      end,
-      item: {
-        kind: "phone",
-        href: normalizePhoneHref(label),
-        label,
-      },
-    });
+  const phoneMatch = rest.match(
+    /(?:\+?7|8)[\s\-()]*(?:\d[\s\-()]*){10}|\+\d[\d\s\-()]{8,18}\d/,
+  );
+  if (phoneMatch) {
+    const number = phoneMatch[0].replace(/\s+/g, " ").trim();
+    const after = rest.slice((phoneMatch.index ?? 0) + phoneMatch[0].length).trim();
+    const before = rest.slice(0, phoneMatch.index ?? 0).trim();
+    const name = [before, after]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/^[,;.\-–—]+|[,;.\-–—]+$/g, "")
+      .trim();
+    phone = {
+      href: normalizePhoneHref(number),
+      number,
+      name,
+    };
   }
 
-  spans.sort((a, b) => a.start - b.start);
-  const out: ParsedContact[] = [];
-  let cursor = 0;
-  for (const span of spans) {
-    const before = text.slice(cursor, span.start).trim();
-    if (before) out.push({ kind: "text", label: before });
-    out.push(span.item);
-    cursor = span.end;
-  }
-  const tail = text.slice(cursor).trim();
-  if (tail) out.push({ kind: "text", label: tail });
-  return out;
+  return { telegram, phone };
+}
+
+export function hasContactBlocks(raw: string): boolean {
+  const blocks = parseContactBlocks(raw);
+  return Boolean(blocks.telegram || blocks.phone);
 }
 
 export function linkify(text: string): string {
