@@ -1094,20 +1094,6 @@ onBeforeUnmount(() => {
 
     <section v-if="showEntry" class="bulletin-section">
       <h2>Заявка и стоимость</h2>
-      <div v-if="(registrationUrl || liveUrl) && !canEdit" class="bulletin-register-wrap">
-        <a
-          v-if="registrationUrl"
-          class="bulletin-register-btn"
-          :href="registrationUrl"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Регистрация
-        </a>
-        <a v-if="liveUrl" class="bulletin-live-btn" :href="liveUrl">
-          Live-результаты
-        </a>
-      </div>
 
       <BulletinField
         v-model="bulletin.entry_kind"
@@ -1136,6 +1122,21 @@ onBeforeUnmount(() => {
         @confirm="confirmEdit"
         @cancel="cancelEdit"
       />
+
+      <div v-if="(registrationUrl || liveUrl) && !canEdit" class="bulletin-register-wrap">
+        <a
+          v-if="registrationUrl"
+          class="bulletin-register-btn"
+          :href="registrationUrl"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Регистрация
+        </a>
+        <a v-if="liveUrl" class="bulletin-live-btn" :href="liveUrl">
+          Live-результаты
+        </a>
+      </div>
     </section>
 
     <section v-if="canEdit || hasText(bulletin.contacts)" class="bulletin-section">
