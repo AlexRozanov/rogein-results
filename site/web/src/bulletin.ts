@@ -2,6 +2,7 @@ export type BulletinCourse = {
   name: string;
   length: string;
   controls: string;
+  scale: string;
 };
 
 export type Bulletin = {
@@ -68,7 +69,7 @@ const MONTHS_RU = [
 ];
 
 export function emptyCourse(): BulletinCourse {
-  return { name: "", length: "", controls: "" };
+  return { name: "", length: "", controls: "", scale: "" };
 }
 
 export function defaultOrientBulletin(): Bulletin {
@@ -94,8 +95,8 @@ export function defaultOrientBulletin(): Bulletin {
     course_intro:
       "Дистанция заданного направления. Доступно прохождение двух дистанций по цене одной, в случае наличия свободных карт.",
     courses: [
-      { name: "D1", length: "", controls: "" },
-      { name: "D2", length: "", controls: "" },
+      { name: "D1", length: "", controls: "", scale: "" },
+      { name: "D2", length: "", controls: "", scale: "" },
     ],
     extra_course_notes: "",
     terrain: "",
@@ -122,6 +123,7 @@ function coerceCourses(rows: BulletinCourse[] | undefined): BulletinCourse[] {
     name: row.name ?? "",
     length: row.length ?? "",
     controls: row.controls ?? "",
+    scale: row.scale ?? "",
   }));
 }
 
@@ -225,8 +227,20 @@ export function hasCoords(bulletin: Bulletin): boolean {
 
 export function filledCourses(bulletin: Bulletin): BulletinCourse[] {
   return bulletin.courses.filter(
-    (row) => row.name.trim() || row.length.trim() || row.controls.trim(),
+    (row) =>
+      row.name.trim() ||
+      row.length.trim() ||
+      row.controls.trim() ||
+      row.scale.trim(),
   );
+}
+
+export function coursesHaveScale(bulletin: Bulletin): boolean {
+  return filledCourses(bulletin).some((row) => row.scale.trim());
+}
+
+export function snapshotBulletin(bulletin: Bulletin): Bulletin {
+  return coerceBulletin(JSON.parse(JSON.stringify(bulletin)) as Partial<Bulletin>);
 }
 
 export function linkify(text: string): string {

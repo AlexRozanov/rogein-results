@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
@@ -66,13 +66,22 @@ const editor = useEditor({
   },
   onUpdate: ({ editor: ed }) => {
     const html = ed.isEmpty ? "" : ed.getHTML();
-    if (html !== model.value) {
-      model.value = html;
-    }
+    if (html !== model.value) model.value = html;
+  },
+  onBlur: ({ editor: ed }) => {
+    const html = ed.isEmpty ? "" : ed.getHTML();
+    if (html !== model.value) model.value = html;
   },
   onSelectionUpdate: () => {
     colorMenu.value = null;
   },
+});
+
+onBeforeUnmount(() => {
+  const ed = editor.value;
+  if (!ed || ed.isDestroyed) return;
+  const html = ed.isEmpty ? "" : ed.getHTML();
+  if (html !== model.value) model.value = html;
 });
 
 watch(

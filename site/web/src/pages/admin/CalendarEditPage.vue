@@ -2,7 +2,13 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../../auth";
-import { defaultOrientBulletin, normalizeBulletin, type Bulletin } from "../../bulletin";
+import {
+  coerceBulletin,
+  defaultOrientBulletin,
+  normalizeBulletin,
+  snapshotBulletin,
+  type Bulletin,
+} from "../../bulletin";
 import { buildEventSlug } from "../../eventSlug";
 import BulletinView from "../../components/BulletinView.vue";
 import PageLoading from "../../components/PageLoading.vue";
@@ -36,6 +42,7 @@ const loading = ref(!isNew.value);
 const pending = ref(false);
 const slugTouched = ref(false);
 const previewMode = ref(false);
+const bulletinView = ref<{ commit: () => Promise<Bulletin> } | null>(null);
 
 const generatedSlug = computed(() =>
   buildEventSlug(competitionDate.value, title.value),
@@ -110,6 +117,10 @@ async function onSubmit() {
   error.value = "";
   saved.value = "";
   pending.value = true;
+  const bulletinPayload = bulletinView.value
+    ? await bulletinView.value.commit()
+    : snapshotBulletin(bulletin.value);
+  bulletin.value = bulletinPayload;
   const body = {
     title: title.value,
     slug: slug.value,
@@ -117,7 +128,7 @@ async function onSubmit() {
     sport_kind: sportKind.value,
     summary: summary.value,
     status: status.value,
-    bulletin: bulletin.value,
+    bulletin: bulletinPayload,
   };
   try {
     if (isNew.value && !savedId.value) {
@@ -126,16 +137,19 @@ async function onSubmit() {
         body: JSON.stringify(body),
       });
       savedId.value = created.id;
-      bulletin.value = normalizeBulletin(created.bulletin);
+      bulletin.value = coerceBulletin(created.bulletin);
       await router.replace(`/admin/calendar/${created.id}`);
       saved.value = "Сохранено. Можно загрузить схему и фрагмент карты.";
     } else {
       const id = upcomingId.value;
+      if (!id) {
+        throw new Error("Сначала сохраните карточку старта (название, дата, slug)");
+      }
       const updated = await api<AdminUpcoming>(`/api/admin/upcoming/${id}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
-      bulletin.value = normalizeBulletin(updated.bulletin);
+      bulletin.value = coerceBulletin(updated.bulletin);
       saved.value = "Сохранено.";
     }
   } catch (e) {
@@ -234,6 +248,8 @@ onMounted(load);
                 : "Страница как на сайте. Нажмите на блок, чтобы редактировать. Пустые блоки — с подсказкой."
             }}
           </p>
+          <p v-if="error" class="err">{{ error }}</p>
+          <p v-else-if="saved" class="ok">{{ saved }}</p>
         </div>
         <div class="admin-row-actions">
           <button
@@ -255,6 +271,7 @@ onMounted(load);
         </div>
       </div>
       <BulletinView
+        ref="bulletinView"
         v-model="bulletin"
         editable
         :preview="previewMode"

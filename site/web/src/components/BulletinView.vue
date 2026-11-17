@@ -3,11 +3,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import {
   bulletinPlaceLine,
   emptyCourse,
+  coursesHaveScale,
   filledCourses,
   formatDateRu,
   googleMapsUrl,
   hasCoords,
   isHttpUrl,
+  snapshotBulletin,
   yandexMapsUrl,
   type Bulletin,
 } from "../bulletin";
@@ -65,14 +67,30 @@ function isActive(field: string): boolean {
   return canEdit.value && activeField.value === field;
 }
 
+function syncBulletin() {
+  bulletin.value = snapshotBulletin(bulletin.value);
+}
+
 function startEdit(field: string) {
   if (!canEdit.value) return;
   activeField.value = field;
 }
 
 function stopEdit() {
+  if (!activeField.value) return;
   activeField.value = "";
+  void nextTick(() => syncBulletin());
 }
+
+/** Call before save so the open editor is flushed into the model. */
+async function commit() {
+  activeField.value = "";
+  await nextTick();
+  syncBulletin();
+  return snapshotBulletin(bulletin.value);
+}
+
+defineExpose({ commit });
 
 function fileFromImageBlob(blob: Blob, mimeHint = ""): File {
   const type = blob.type || mimeHint || "image/png";
@@ -629,13 +647,16 @@ onBeforeUnmount(() => {
             <input v-model="bulletin.emergency_azimuth" class="bulletin-inline-input" />
           </label>
           <label>
-            Масштаб
+            Масштаб по умолчанию
             <input v-model="bulletin.map_scale" class="bulletin-inline-input" placeholder="1:4000" />
           </label>
           <label>
             Сечение
             <input v-model="bulletin.contour" class="bulletin-inline-input" placeholder="2,5м" />
           </label>
+          <p class="muted" style="grid-column: 1 / -1; margin: 0">
+            Масштаб для конкретной дистанции задаётся в таблице дистанций.
+          </p>
         </div>
         <div class="bulletin-field-actions">
           <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
@@ -739,6 +760,7 @@ onBeforeUnmount(() => {
                   <th>Дистанция</th>
                   <th>длина</th>
                   <th>кол-во КП</th>
+                  <th>масштаб</th>
                   <th></th>
                 </tr>
               </thead>
@@ -747,6 +769,13 @@ onBeforeUnmount(() => {
                   <td><input v-model="row.name" class="bulletin-inline-input" /></td>
                   <td><input v-model="row.length" class="bulletin-inline-input" /></td>
                   <td><input v-model="row.controls" class="bulletin-inline-input" /></td>
+                  <td>
+                    <input
+                      v-model="row.scale"
+                      class="bulletin-inline-input"
+                      placeholder="1:4000"
+                    />
+                  </td>
                   <td>
                     <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
                   </td>
@@ -771,6 +800,7 @@ onBeforeUnmount(() => {
                 <th>Дистанция</th>
                 <th>длина</th>
                 <th>кол-во КП</th>
+                <th v-if="coursesHaveScale(bulletin)">масштаб</th>
               </tr>
             </thead>
             <tbody>
@@ -778,6 +808,7 @@ onBeforeUnmount(() => {
                 <td>{{ row.name }}</td>
                 <td>{{ row.length }}</td>
                 <td>{{ row.controls }}</td>
+                <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
               </tr>
             </tbody>
           </table>
@@ -789,6 +820,7 @@ onBeforeUnmount(() => {
               <th>Дистанция</th>
               <th>длина</th>
               <th>кол-во КП</th>
+              <th v-if="coursesHaveScale(bulletin)">масштаб</th>
             </tr>
           </thead>
           <tbody>
@@ -796,6 +828,7 @@ onBeforeUnmount(() => {
               <td>{{ row.name }}</td>
               <td>{{ row.length }}</td>
               <td>{{ row.controls }}</td>
+              <td v-if="coursesHaveScale(bulletin)">{{ row.scale }}</td>
             </tr>
           </tbody>
         </table>

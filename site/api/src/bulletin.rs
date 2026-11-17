@@ -15,6 +15,7 @@ pub struct BulletinCourse {
     pub name: String,
     pub length: String,
     pub controls: String,
+    pub scale: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -114,6 +115,7 @@ pub fn sanitize(mut bulletin: Bulletin, upcoming_id: i64) -> Bulletin {
             !row.name.trim().is_empty()
                 || !row.length.trim().is_empty()
                 || !row.controls.trim().is_empty()
+                || !row.scale.trim().is_empty()
         })
         .collect();
     bulletin
