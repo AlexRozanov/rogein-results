@@ -13,6 +13,7 @@ import {
   yandexMapsUrl,
   type Bulletin,
 } from "../bulletin";
+import BulletinBlockActions from "./BulletinBlockActions.vue";
 import BulletinField from "./BulletinField.vue";
 
 const bulletin = defineModel<Bulletin>({ required: true });
@@ -23,15 +24,18 @@ const props = defineProps<{
   editable?: boolean;
   preview?: boolean;
   upcomingId?: number | null;
+  saving?: boolean;
 }>();
 
 const emit = defineEmits<{
   error: [message: string];
+  save: [bulletin: Bulletin];
 }>();
 
 const uploading = ref("");
 const dropTarget = ref<"scheme" | "map" | "">("");
 const activeField = ref("");
+const editSnapshot = ref<Bulletin | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const schemeMediaEl = ref<HTMLElement | null>(null);
 const mapsMediaEl = ref<HTMLElement | null>(null);
@@ -48,7 +52,10 @@ const mediaSlot = computed<"scheme" | "map" | null>(() => {
 watch(
   () => props.preview,
   (preview) => {
-    if (preview) activeField.value = "";
+    if (preview) {
+      activeField.value = "";
+      editSnapshot.value = null;
+    }
   },
 );
 
@@ -72,25 +79,29 @@ function syncBulletin() {
 }
 
 function startEdit(field: string) {
-  if (!canEdit.value) return;
+  if (!canEdit.value || props.saving) return;
+  if (!activeField.value) {
+    editSnapshot.value = snapshotBulletin(bulletin.value);
+  }
   activeField.value = field;
 }
 
-function stopEdit() {
+async function confirmEdit() {
   if (!activeField.value) return;
-  activeField.value = "";
-  void nextTick(() => syncBulletin());
-}
-
-/** Call before save so the open editor is flushed into the model. */
-async function commit() {
   activeField.value = "";
   await nextTick();
   syncBulletin();
-  return snapshotBulletin(bulletin.value);
+  editSnapshot.value = null;
+  emit("save", snapshotBulletin(bulletin.value));
 }
 
-defineExpose({ commit });
+function cancelEdit() {
+  if (editSnapshot.value) {
+    bulletin.value = snapshotBulletin(editSnapshot.value);
+  }
+  activeField.value = "";
+  editSnapshot.value = null;
+}
 
 function fileFromImageBlob(blob: Blob, mimeHint = ""): File {
   const type = blob.type || mimeHint || "image/png";
@@ -312,15 +323,16 @@ function clearScheme() {
 }
 
 function onDocPointerDown(event: PointerEvent) {
-  if (!activeField.value || !rootEl.value) return;
-  const target = event.target as Node | null;
+  if (!activeField.value || !rootEl.value || props.saving) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest?.("[data-bulletin-cancel]")) return;
   if (target && rootEl.value.contains(target)) {
     const active = rootEl.value.querySelector(
       ".bulletin-zone-active, .bulletin-field-active, .bulletin-media-editing",
     );
     if (active?.contains(target)) return;
   }
-  stopEdit();
+  void confirmEdit();
 }
 
 onMounted(() => {
@@ -382,9 +394,7 @@ onBeforeUnmount(() => {
                 placeholder="Дисциплина"
               />
             </div>
-            <div class="bulletin-field-actions">
-              <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
-            </div>
+            <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
           </div>
 
           <button
@@ -428,9 +438,7 @@ onBeforeUnmount(() => {
               placeholder="https://…"
             />
           </label>
-          <div class="bulletin-field-actions">
-            <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
-          </div>
+          <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
         </div>
         <button
           v-else-if="canEdit"
@@ -445,7 +453,7 @@ onBeforeUnmount(() => {
             tabindex="-1"
             @click.prevent
           >
-            Зарегистрироваться
+            Регистрация
           </a>
           <span v-else class="bulletin-placeholder-inline">Добавить ссылку на регистрацию</span>
         </button>
@@ -456,7 +464,7 @@ onBeforeUnmount(() => {
           target="_blank"
           rel="noreferrer"
         >
-          Зарегистрироваться
+          Регистрация
         </a>
       </div>
     </header>
@@ -490,9 +498,7 @@ onBeforeUnmount(() => {
             <input v-model="bulletin.lon" class="bulletin-inline-input" placeholder="37.516126" />
           </label>
         </div>
-        <div class="bulletin-field-actions">
-          <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
-        </div>
+        <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
       </div>
 
       <button
@@ -540,8 +546,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Вводный абзац — нажмите, чтобы заполнить"
         :min-height="'4.5rem'"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -551,8 +559,10 @@ onBeforeUnmount(() => {
         :active="isActive('location')"
         :can-edit="canEdit"
         placeholder="Где старт и как добраться"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -563,8 +573,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Парковка"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <div
@@ -620,7 +632,7 @@ onBeforeUnmount(() => {
           >
             Убрать
           </button>
-          <button class="btn btn-primary" type="button" @click.stop="stopEdit">Готово</button>
+          <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
           <p v-if="!upcomingId" class="muted">Сначала сохраните старт.</p>
         </div>
       </div>
@@ -658,9 +670,7 @@ onBeforeUnmount(() => {
             Масштаб для конкретной дистанции задаётся в таблице дистанций.
           </p>
         </div>
-        <div class="bulletin-field-actions">
-          <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
-        </div>
+        <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
       </div>
 
       <button
@@ -715,8 +725,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Правила и дисциплина"
         min-height="4.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -727,8 +739,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Станции"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -739,8 +753,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Предварительные параметры дистанций"
         min-height="4.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <div
@@ -748,7 +764,19 @@ onBeforeUnmount(() => {
         class="bulletin-block"
         :class="{ 'bulletin-zone-active': isActive('courses') }"
       >
-        <p class="bulletin-field-label">Дистанции</p>
+        <div class="bulletin-section-head">
+          <p class="bulletin-field-label">Дистанции</p>
+          <a
+            v-if="registrationUrl"
+            class="bulletin-register-link"
+            :href="registrationUrl"
+            target="_blank"
+            rel="noreferrer"
+            @click.stop
+          >
+            Регистрация
+          </a>
+        </div>
         <div
           v-if="isActive('courses')"
           class="bulletin-zone"
@@ -785,7 +813,11 @@ onBeforeUnmount(() => {
           </div>
           <div class="admin-row-actions">
             <button class="btn" type="button" @click="addCourse">Добавить дистанцию</button>
-            <button class="btn btn-primary" type="button" @click="stopEdit">Готово</button>
+            <BulletinBlockActions
+              :disabled="saving"
+              @confirm="confirmEdit"
+              @cancel="cancelEdit"
+            />
           </div>
         </div>
         <button
@@ -842,8 +874,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Дополнительно про дистанции"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -854,8 +888,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Местность"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -866,8 +902,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Рельеф"
         min-height="3.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -878,8 +916,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Карта"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -890,8 +930,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Особенности рисовки"
         min-height="4rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -902,8 +944,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Границы района"
         min-height="3.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <p
@@ -921,8 +965,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Формат и печать карты"
         min-height="3.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <p v-if="!canEdit && mapScaleLine" class="bulletin-note">
@@ -984,7 +1030,7 @@ onBeforeUnmount(() => {
               @change="onMap"
             />
           </label>
-          <button class="btn btn-primary" type="button" @click.stop="stopEdit">Готово</button>
+          <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
         </div>
       </div>
     </section>
@@ -1000,8 +1046,10 @@ onBeforeUnmount(() => {
         :active="isActive('hazards')"
         :can-edit="canEdit"
         placeholder="Опасные места"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
     </section>
 
@@ -1014,7 +1062,7 @@ onBeforeUnmount(() => {
           target="_blank"
           rel="noreferrer"
         >
-          Зарегистрироваться
+          Регистрация
         </a>
       </p>
 
@@ -1027,8 +1075,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Тип заявки (например, динамическая)"
         display-class="bulletin-note"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
 
       <BulletinField
@@ -1038,8 +1088,10 @@ onBeforeUnmount(() => {
         :active="isActive('entry_details')"
         :can-edit="canEdit"
         placeholder="Сроки, цены и детали"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
     </section>
 
@@ -1052,8 +1104,10 @@ onBeforeUnmount(() => {
         :can-edit="canEdit"
         placeholder="Контакты"
         min-height="3.5rem"
+        :saving="saving"
         @edit="startEdit"
-        @done="stopEdit"
+        @confirm="confirmEdit"
+        @cancel="cancelEdit"
       />
     </section>
   </article>

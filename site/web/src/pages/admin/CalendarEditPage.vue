@@ -40,9 +40,9 @@ const error = ref("");
 const saved = ref("");
 const loading = ref(!isNew.value);
 const pending = ref(false);
+const savingBulletin = ref(false);
 const slugTouched = ref(false);
 const previewMode = ref(false);
-const bulletinView = ref<{ commit: () => Promise<Bulletin> } | null>(null);
 
 const generatedSlug = computed(() =>
   buildEventSlug(competitionDate.value, title.value),
@@ -113,14 +113,10 @@ async function load() {
   }
 }
 
-async function onSubmit() {
+async function onSubmitMeta() {
   error.value = "";
   saved.value = "";
   pending.value = true;
-  const bulletinPayload = bulletinView.value
-    ? await bulletinView.value.commit()
-    : snapshotBulletin(bulletin.value);
-  bulletin.value = bulletinPayload;
   const body = {
     title: title.value,
     slug: slug.value,
@@ -128,7 +124,7 @@ async function onSubmit() {
     sport_kind: sportKind.value,
     summary: summary.value,
     status: status.value,
-    bulletin: bulletinPayload,
+    bulletin: snapshotBulletin(bulletin.value),
   };
   try {
     if (isNew.value && !savedId.value) {
@@ -139,23 +135,53 @@ async function onSubmit() {
       savedId.value = created.id;
       bulletin.value = coerceBulletin(created.bulletin);
       await router.replace(`/admin/calendar/${created.id}`);
-      saved.value = "Сохранено. Можно загрузить схему и фрагмент карты.";
+      saved.value = "Карточка сохранена. Можно править бюллетень по блокам.";
     } else {
       const id = upcomingId.value;
-      if (!id) {
-        throw new Error("Сначала сохраните карточку старта (название, дата, slug)");
-      }
+      if (!id) throw new Error("Нет id старта");
       const updated = await api<AdminUpcoming>(`/api/admin/upcoming/${id}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
       bulletin.value = coerceBulletin(updated.bulletin);
-      saved.value = "Сохранено.";
+      saved.value = "Карточка сохранена.";
     }
   } catch (e) {
     error.value = String(e).replace(/^Error:\s*/, "");
   } finally {
     pending.value = false;
+  }
+}
+
+async function onBulletinSave(payload: Bulletin) {
+  error.value = "";
+  saved.value = "";
+  const id = upcomingId.value;
+  if (!id) {
+    error.value = "Сначала сохраните карточку старта (название, дата, slug)";
+    return;
+  }
+  savingBulletin.value = true;
+  bulletin.value = snapshotBulletin(payload);
+  try {
+    const updated = await api<AdminUpcoming>(`/api/admin/upcoming/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        title: title.value,
+        slug: slug.value,
+        competition_date: competitionDate.value || null,
+        sport_kind: sportKind.value,
+        summary: summary.value,
+        status: status.value,
+        bulletin: snapshotBulletin(payload),
+      }),
+    });
+    bulletin.value = coerceBulletin(updated.bulletin);
+    saved.value = "Блок сохранён.";
+  } catch (e) {
+    error.value = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    savingBulletin.value = false;
   }
 }
 
@@ -169,7 +195,7 @@ onMounted(load);
     </p>
     <h1>{{ isNew && !savedId ? "Новый старт" : "Старт" }}</h1>
     <PageLoading v-if="loading" label="Загрузка…" />
-    <form v-else class="card admin-form admin-form-wide" @submit.prevent="onSubmit">
+    <form v-else class="card admin-form admin-form-wide" @submit.prevent="onSubmitMeta">
       <p v-if="error" class="err">{{ error }}</p>
       <p v-else-if="saved" class="ok">{{ saved }}</p>
       <label>
@@ -222,7 +248,7 @@ onMounted(load);
 
       <div class="admin-row-actions">
         <button class="btn btn-primary" type="submit" :disabled="pending">
-          {{ pending ? "Сохраняем…" : "Сохранить" }}
+          {{ pending ? "Сохраняем…" : "Сохранить карточку" }}
         </button>
         <router-link class="btn" to="/admin/calendar">К списку</router-link>
         <a
@@ -245,11 +271,12 @@ onMounted(load);
             {{
               previewMode
                 ? "Так страницу увидят на сайте. Нажмите «Редактировать», чтобы править блоки."
-                : "Страница как на сайте. Нажмите на блок, чтобы редактировать. Пустые блоки — с подсказкой."
+                : "Нажмите блок → правьте → ✓ сохранить или ✕ отменить. Клик мимо блока тоже сохраняет."
             }}
           </p>
           <p v-if="error" class="err">{{ error }}</p>
           <p v-else-if="saved" class="ok">{{ saved }}</p>
+          <p v-else-if="savingBulletin" class="muted">Сохраняем блок…</p>
         </div>
         <div class="admin-row-actions">
           <button
@@ -260,25 +287,18 @@ onMounted(load);
           >
             {{ previewMode ? "Редактировать" : "Просмотр" }}
           </button>
-          <button
-            class="btn btn-primary"
-            type="button"
-            :disabled="pending || previewMode"
-            @click="onSubmit"
-          >
-            {{ pending ? "Сохраняем…" : "Сохранить бюллетень" }}
-          </button>
         </div>
       </div>
       <BulletinView
-        ref="bulletinView"
         v-model="bulletin"
         editable
         :preview="previewMode"
+        :saving="savingBulletin"
         :title="title || 'Название старта'"
         :date="competitionDate || null"
         :upcoming-id="upcomingId"
         @error="error = $event"
+        @save="onBulletinSave"
       />
     </section>
   </div>

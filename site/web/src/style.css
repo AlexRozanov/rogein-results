@@ -1850,11 +1850,69 @@ th { color: #64748b; font-weight: 600; }
   margin-bottom: 0;
 }
 
-.bulletin-field-actions {
+.bulletin-field-actions,
+.bulletin-block-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin-top: 4px;
+}
+
+.bulletin-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.bulletin-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bulletin-icon-confirm {
+  background: var(--green);
+  border-color: var(--green-dark);
+  color: #fff;
+}
+
+.bulletin-icon-cancel {
+  background: #fff;
+  border-color: #d4a5a5;
+  color: #9a3412;
+}
+
+.bulletin-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.bulletin-section-head .bulletin-field-label {
+  margin: 0;
+}
+
+.bulletin-register-link {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--green-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.bulletin-register-link:hover {
+  color: var(--green);
 }
 
 .bulletin-field-view {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
 import { richTextHtml } from "../bulletin";
+import BulletinBlockActions from "./BulletinBlockActions.vue";
 import RichTextEditor from "./RichTextEditor.vue";
 
 const model = defineModel<string>({ required: true });
@@ -15,13 +16,15 @@ const props = withDefaults(
     label?: string;
     minHeight?: string;
     displayClass?: string;
+    saving?: boolean;
   }>(),
   { kind: "rich" },
 );
 
 const emit = defineEmits<{
   edit: [field: string];
-  done: [];
+  confirm: [];
+  cancel: [];
 }>();
 
 const inputEl = ref<HTMLInputElement | null>(null);
@@ -33,10 +36,6 @@ function hasText(value: string | undefined): boolean {
 function startEdit() {
   if (!props.canEdit || props.active) return;
   emit("edit", props.field);
-}
-
-function finish() {
-  emit("done");
 }
 
 watch(
@@ -74,12 +73,14 @@ watch(
         v-model="model"
         class="bulletin-inline-input"
         :placeholder="placeholder"
-        @keydown.enter.prevent="finish"
-        @keydown.escape.prevent="finish"
+        @keydown.enter.prevent="emit('confirm')"
+        @keydown.escape.prevent="emit('cancel')"
       />
-      <div class="bulletin-field-actions">
-        <button class="btn btn-primary" type="button" @click="finish">Готово</button>
-      </div>
+      <BulletinBlockActions
+        :disabled="saving"
+        @confirm="emit('confirm')"
+        @cancel="emit('cancel')"
+      />
     </template>
 
     <button
