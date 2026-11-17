@@ -10,7 +10,7 @@ import {
   hasCoords,
   isHttpUrl,
   liveResultsPath,
-  parseContacts,
+  parseContactBlocks,
   snapshotBulletin,
   yandexMapsUrl,
   type Bulletin,
@@ -160,7 +160,7 @@ const registrationUrl = computed(() => {
 
 const liveUrl = computed(() => liveResultsPath(props.slug));
 
-const contactItems = computed(() => parseContacts(bulletin.value.contacts));
+const contactBlocks = computed(() => parseContactBlocks(bulletin.value.contacts));
 
 const placeLine = computed(
   () => bulletinPlaceLine(props.date, bulletin.value) || props.title,
@@ -1170,74 +1170,76 @@ onBeforeUnmount(() => {
         @click="startEdit('contacts')"
         @keydown.enter.prevent="startEdit('contacts')"
       >
-        <template v-for="(item, index) in contactItems" :key="index">
-          <a
-            v-if="item.kind === 'telegram'"
-            class="bulletin-contact bulletin-contact-tg"
-            :href="item.href"
-            target="_blank"
-            rel="noreferrer"
-            :title="item.label"
-            @click.stop
-          >
-            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
-              />
-            </svg>
-            <span class="sr-only">{{ item.label }}</span>
-          </a>
-          <a
-            v-else-if="item.kind === 'phone'"
-            class="bulletin-contact bulletin-contact-phone"
-            :href="item.href"
-            @click.stop
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
-              />
-            </svg>
-            <span>{{ item.label }}</span>
-          </a>
-          <span v-else class="bulletin-contact-text">{{ item.label }}</span>
-        </template>
+        <a
+          v-if="contactBlocks.telegram"
+          class="bulletin-contact-row bulletin-contact-tg"
+          :href="contactBlocks.telegram.href"
+          target="_blank"
+          rel="noreferrer"
+          @click.stop
+        >
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
+            />
+          </svg>
+          <span>Телеграм канал</span>
+        </a>
+        <a
+          v-if="contactBlocks.phone"
+          class="bulletin-contact-row bulletin-contact-phone"
+          :href="contactBlocks.phone.href"
+          @click.stop
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
+            />
+          </svg>
+          <span>
+            {{ contactBlocks.phone.number }}
+            <template v-if="contactBlocks.phone.name">
+              {{ contactBlocks.phone.name }}
+            </template>
+          </span>
+        </a>
       </div>
       <div v-else class="bulletin-contacts">
-        <template v-for="(item, index) in contactItems" :key="index">
-          <a
-            v-if="item.kind === 'telegram'"
-            class="bulletin-contact bulletin-contact-tg"
-            :href="item.href"
-            target="_blank"
-            rel="noreferrer"
-            :title="item.label"
-          >
-            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
-              />
-            </svg>
-            <span class="sr-only">{{ item.label }}</span>
-          </a>
-          <a
-            v-else-if="item.kind === 'phone'"
-            class="bulletin-contact bulletin-contact-phone"
-            :href="item.href"
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
-              />
-            </svg>
-            <span>{{ item.label }}</span>
-          </a>
-          <span v-else class="bulletin-contact-text">{{ item.label }}</span>
-        </template>
+        <a
+          v-if="contactBlocks.telegram"
+          class="bulletin-contact-row bulletin-contact-tg"
+          :href="contactBlocks.telegram.href"
+          target="_blank"
+          rel="noreferrer"
+        >
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2Zm4.7 6.9-1.6 7.5c-.1.5-.4.6-.9.4l-2.4-1.8-1.2 1.1c-.1.1-.3.3-.6.3l.2-2.5 4.5-4.1c.2-.2 0-.3-.3-.1l-5.6 3.5-2.4-.8c-.5-.1-.5-.5.1-.8l9.4-3.6c.4-.2.8.1.7.9Z"
+            />
+          </svg>
+          <span>Телеграм канал</span>
+        </a>
+        <a
+          v-if="contactBlocks.phone"
+          class="bulletin-contact-row bulletin-contact-phone"
+          :href="contactBlocks.phone.href"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M7.2 3.5c.4-.4 1-.5 1.5-.3l2.2.9c.5.2.8.7.8 1.2l-.2 2.3c0 .4-.2.7-.5.9l-1.3.9c.9 1.8 2.3 3.2 4.1 4.1l.9-1.3c.2-.3.5-.5.9-.5l2.3-.2c.5 0 1 .3 1.2.8l.9 2.2c.2.5.1 1.1-.3 1.5l-1.4 1.4c-.4.4-1 .6-1.5.5-3.3-.5-6.4-2.3-8.8-4.7S4.2 9.3 3.7 6c-.1-.5.1-1.1.5-1.5l1.4-1.4-.4-.6.2-.5.3-.5Z"
+            />
+          </svg>
+          <span>
+            {{ contactBlocks.phone.number }}
+            <template v-if="contactBlocks.phone.name">
+              {{ contactBlocks.phone.name }}
+            </template>
+          </span>
+        </a>
       </div>
     </section>
   </article>
