@@ -3005,6 +3005,74 @@ th { color: #64748b; font-weight: 600; }
   color: #9a3412;
 }
 
+.admin-status-pill.is-bulletin-ready {
+  background: color-mix(in srgb, var(--green) 12%, #fff);
+  color: var(--green-dark);
+}
+
+.admin-status-pill.is-bulletin-pending {
+  background: #f3eee4;
+  color: #6b5c45;
+}
+
+.admin-bulletin-setup {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--card) 70%, #fff);
+}
+
+.admin-bulletin-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-bulletin-copy label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.admin-bulletin-copy select {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.admin-bulletin-copy .btn {
+  width: fit-content;
+}
+
+.bulletin-pending {
+  max-width: 40rem;
+  margin: 0 auto 32px;
+  padding: clamp(18px, 3vw, 28px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+  display: grid;
+  gap: 10px;
+}
+
+.bulletin-pending h1 {
+  margin: 0;
+  line-height: 1.25;
+}
+
+.bulletin-pending-note {
+  margin: 8px 0 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--green) 10%, #fff);
+  color: var(--ink);
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
 .admin-calendar-title {
   margin: 0;
   font-size: 1.15rem;

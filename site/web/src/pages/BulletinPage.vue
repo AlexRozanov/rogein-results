@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
-import { coerceBulletin, type Bulletin, type UpcomingBulletin } from "../bulletin";
+import {
+  coerceBulletin,
+  formatDateRu,
+  richTextHtml,
+  type Bulletin,
+  type UpcomingBulletin,
+} from "../bulletin";
+import { sportKindLabel } from "../content/site";
 import BulletinView from "../components/BulletinView.vue";
 import PageLoading from "../components/PageLoading.vue";
 
@@ -23,7 +30,7 @@ onMounted(async () => {
     if (!res.ok) throw new Error(await res.text());
     const data = (await res.json()) as UpcomingBulletin;
     item.value = data;
-    bulletin.value = coerceBulletin(data.bulletin);
+    bulletin.value = data.bulletin_ready ? coerceBulletin(data.bulletin) : null;
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -42,4 +49,20 @@ onMounted(async () => {
     :date="item.competition_date"
     :slug="item.slug"
   />
+  <section v-else-if="item" class="bulletin-pending">
+    <p class="kind-pill">{{ sportKindLabel(item.sport_kind) }}</p>
+    <h1>{{ item.title }}</h1>
+    <p class="muted">{{ formatDateRu(item.competition_date) || "дата уточняется" }}</p>
+    <div
+      v-if="item.summary"
+      class="calendar-summary"
+      v-html="richTextHtml(item.summary)"
+    />
+    <p class="bulletin-pending-note">
+      Информационный бюллетень появится ближе к старту.
+    </p>
+    <p class="back-link">
+      <router-link to="/calendar">← К календарю</router-link>
+    </p>
+  </section>
 </template>

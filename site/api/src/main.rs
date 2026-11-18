@@ -200,7 +200,17 @@ async fn serve() -> anyhow::Result<()> {
         )
         .route(
             "/api/admin/upcoming/{id}",
-            get(admin::get_upcoming).patch(admin::update_upcoming),
+            get(admin::get_upcoming)
+                .patch(admin::update_upcoming)
+                .delete(admin::delete_upcoming),
+        )
+        .route(
+            "/api/admin/upcoming/{id}/bulletin",
+            post(admin::init_bulletin),
+        )
+        .route(
+            "/api/admin/upcoming/{id}/bulletin/copy",
+            post(admin::copy_bulletin),
         )
         .route(
             "/api/admin/upcoming/{id}/bulletin-image",

@@ -14,12 +14,14 @@ export type AdminUpcoming = {
   sport_kind: string;
   status: string;
   summary: string;
+  bulletin_ready: boolean;
 };
 
 const items = ref<AdminUpcoming[]>([]);
 const error = ref("");
 const loading = ref(true);
 const showPast = ref(false);
+const pendingId = ref<number | null>(null);
 
 const statusLabel: Record<string, string> = {
   draft: "черновик",
@@ -67,6 +69,26 @@ async function reload() {
     error.value = String(e).replace(/^Error:\s*/, "");
   } finally {
     loading.value = false;
+  }
+}
+
+async function onDelete(item: AdminUpcoming) {
+  if (
+    !confirm(
+      `Удалить старт «${item.title}»? Это действие нельзя отменить.`,
+    )
+  ) {
+    return;
+  }
+  error.value = "";
+  pendingId.value = item.id;
+  try {
+    await api(`/api/admin/upcoming/${item.id}`, { method: "DELETE" });
+    items.value = items.value.filter((row) => row.id !== item.id);
+  } catch (e) {
+    error.value = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    pendingId.value = null;
   }
 }
 
@@ -130,6 +152,12 @@ onMounted(reload);
             <span class="admin-status-pill" :class="statusClass(item.status)">
               {{ statusLabel[item.status] || item.status }}
             </span>
+            <span
+              class="admin-status-pill"
+              :class="item.bulletin_ready ? 'is-bulletin-ready' : 'is-bulletin-pending'"
+            >
+              {{ item.bulletin_ready ? "бюллетень" : "только анонс" }}
+            </span>
             <span v-if="isPast(item)" class="admin-past-mark">прошедший</span>
           </div>
           <h2 class="admin-calendar-title">{{ item.title }}</h2>
@@ -157,11 +185,22 @@ onMounted(reload);
             v-if="item.status === 'announced'"
             class="admin-icon-btn"
             :to="`/calendar/${item.slug}`"
-            title="Бюллетень"
-            aria-label="Бюллетень"
+            :title="item.bulletin_ready ? 'Бюллетень' : 'Страница старта'"
+            :aria-label="item.bulletin_ready ? 'Бюллетень' : 'Страница старта'"
           >
             <AdminIcon name="doc" />
           </router-link>
+          <button
+            v-if="item.status !== 'completed'"
+            type="button"
+            class="admin-icon-btn is-danger"
+            title="Удалить"
+            aria-label="Удалить"
+            :disabled="pendingId === item.id"
+            @click="onDelete(item)"
+          >
+            <AdminIcon name="trash" />
+          </button>
         </div>
       </li>
     </ul>

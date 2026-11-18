@@ -66,6 +66,7 @@ pub struct PublicUpcoming {
     pub sport_kind: String,
     pub status: String,
     pub summary: String,
+    pub bulletin_ready: bool,
     pub bulletin: SqlJson<Bulletin>,
 }
 
@@ -152,7 +153,8 @@ pub async fn get_public_upcoming(
 ) -> Result<Json<PublicUpcoming>, (StatusCode, String)> {
     let row = sqlx::query_as::<_, PublicUpcoming>(
         r#"
-        SELECT slug, title, competition_date, sport_kind, status, summary, bulletin
+        SELECT slug, title, competition_date, sport_kind, status, summary,
+               bulletin_ready, bulletin
         FROM upcoming_events
         WHERE slug = $1
           AND status = 'announced'

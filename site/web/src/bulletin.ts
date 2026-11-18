@@ -50,6 +50,7 @@ export type UpcomingBulletin = {
   sport_kind: string;
   status: string;
   summary: string;
+  bulletin_ready: boolean;
   bulletin: Bulletin;
 };
 
