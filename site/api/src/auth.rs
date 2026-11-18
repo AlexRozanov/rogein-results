@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use crate::password::{normalize_email, verify_password};
+use crate::password::{hash_password, normalize_email, verify_password};
 use crate::rbac::{permission_codes, role_codes};
 use crate::{internal, AppState};
 
 pub const SESSION_COOKIE: &str = "rogein_sid";
 const SESSION_DAYS: i64 = 14;
+const RESET_HOURS: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub struct AuthUser {
@@ -29,6 +30,28 @@ pub struct AuthUser {
 pub struct LoginBody {
     pub email: String,
     pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordBody {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordBody {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordBody {
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResetInfo {
+    pub email: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,12 +193,12 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn new_session_token() -> String {
+pub(crate) fn new_session_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -233,9 +256,30 @@ pub async fn login(
     let Some((user_id, password_hash, status)) = row else {
         return Err(invalid);
     };
+    if status == "invited" {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Приглашение ещё не принято. Откройте ссылку из письма.".into(),
+        ));
+    }
+    if status == "disabled" {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Учётная запись отключена".into(),
+        ));
+    }
     if status != "active" || !verify_password(&body.password, &password_hash) {
         return Err(invalid);
     }
+    issue_session_response(&state, user_id, email, "auth.login").await
+}
+
+pub(crate) async fn issue_session_response(
+    state: &AppState,
+    user_id: i64,
+    email: String,
+    audit_action: &str,
+) -> Result<Response, (StatusCode, String)> {
     let token = new_session_token();
     let hash = token_hash(&token);
     sqlx::query(
@@ -252,10 +296,11 @@ pub async fn login(
     sqlx::query(
         r#"
         INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, meta)
-        VALUES ($1, 'auth.login', 'user', $2, '{}'::jsonb)
+        VALUES ($1, $2, 'user', $3, '{}'::jsonb)
         "#,
     )
     .bind(user_id)
+    .bind(audit_action)
     .bind(user_id.to_string())
     .execute(&state.pool)
     .await
@@ -295,6 +340,291 @@ pub async fn me(
     user: AuthUser,
 ) -> Result<Json<MeResponse>, (StatusCode, String)> {
     Ok(Json(load_me(&state.pool, user.id, user.email).await?))
+}
+
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<Response, (StatusCode, String)> {
+    check_origin(&headers, &state.allowed_origins)?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT password_hash, status FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal)?;
+    let Some((password_hash, status)) = row else {
+        return Err((StatusCode::UNAUTHORIZED, "Нужен вход".into()));
+    };
+    if status != "active" {
+        return Err((StatusCode::FORBIDDEN, "Учётная запись недоступна".into()));
+    }
+    if !verify_password(&body.current_password, &password_hash) {
+        return Err((StatusCode::BAD_REQUEST, "Неверный текущий пароль".into()));
+    }
+    if body.current_password == body.new_password {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Новый пароль должен отличаться от текущего".into(),
+        ));
+    }
+    let new_hash =
+        hash_password(&body.new_password).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let mut tx = state.pool.begin().await.map_err(internal)?;
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = $2, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(user.id)
+    .bind(&new_hash)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, meta)
+        VALUES ($1, 'auth.change_password', 'user', $2, '{}'::jsonb)
+        "#,
+    )
+    .bind(user.id)
+    .bind(user.id.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+
+    issue_session_response(&state, user.id, user.email, "auth.change_password_login").await
+}
+
+pub async fn forgot_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ForgotPasswordBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_origin(&headers, &state.allowed_origins)?;
+    let ok = Json(serde_json::json!({
+        "ok": true,
+        "message": "Если такой аккаунт есть, мы отправили письмо со ссылкой."
+    }));
+    let email = match normalize_email(&body.email) {
+        Ok(v) => v,
+        Err(_) => return Ok(ok),
+    };
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT id, status FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal)?;
+    let Some((user_id, status)) = row else {
+        return Ok(ok);
+    };
+    if status != "active" {
+        return Ok(ok);
+    }
+
+    let mut tx = state.pool.begin().await.map_err(internal)?;
+    sqlx::query(
+        r#"
+        UPDATE auth_tokens
+        SET used_at = COALESCE(used_at, now())
+        WHERE user_id = $1
+          AND purpose = 'reset'
+          AND used_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    let raw_token = new_session_token();
+    let digest = token_hash(&raw_token);
+    sqlx::query(
+        r#"
+        INSERT INTO auth_tokens (user_id, purpose, token_hash, expires_at, created_by)
+        VALUES ($1, 'reset', $2, now() + make_interval(hours => $3::int), $1)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&digest)
+    .bind(RESET_HOURS as i32)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, meta)
+        VALUES ($1, 'auth.forgot_password', 'user', $2, '{}'::jsonb)
+        "#,
+    )
+    .bind(user_id)
+    .bind(user_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+
+    let reset_url = state.mail.reset_url(&raw_token);
+    if let Err(err) = state.mail.send_password_reset(&email, &reset_url).await {
+        tracing::warn!(error = %err, email = %email, "не удалось отправить сброс пароля");
+        // Don't leak mail config to anonymous callers; still return generic ok.
+        // Ops can check logs. For local/dev without mail, include hint only if same-origin admin...
+        // Keep response generic for security.
+    }
+    Ok(ok)
+}
+
+pub async fn reset_info(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Result<Json<ResetInfo>, (StatusCode, String)> {
+    check_origin(&headers, &state.allowed_origins)?;
+    let row = find_valid_reset(&state.pool, &token).await?;
+    Ok(Json(ResetInfo {
+        email: row.email,
+        expires_at: row.expires_at,
+    }))
+}
+
+pub async fn accept_reset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    Json(body): Json<ResetPasswordBody>,
+) -> Result<Response, (StatusCode, String)> {
+    check_origin(&headers, &state.allowed_origins)?;
+    let row = find_valid_reset(&state.pool, &token).await?;
+    let password_hash =
+        hash_password(&body.password).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let mut tx = state.pool.begin().await.map_err(internal)?;
+    let updated: Option<i64> = sqlx::query_scalar(
+        r#"
+        UPDATE auth_tokens
+        SET used_at = now()
+        WHERE id = $1
+          AND used_at IS NULL
+          AND expires_at > now()
+        RETURNING id
+        "#,
+    )
+    .bind(row.token_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if updated.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Ссылка уже использована или устарела".into(),
+        ));
+    }
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = $2, updated_at = now()
+        WHERE id = $1 AND status = 'active'
+        "#,
+    )
+    .bind(row.user_id)
+    .bind(&password_hash)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query(
+        r#"
+        UPDATE auth_tokens
+        SET used_at = COALESCE(used_at, now())
+        WHERE user_id = $1
+          AND purpose = 'reset'
+          AND used_at IS NULL
+        "#,
+    )
+    .bind(row.user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(row.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, meta)
+        VALUES ($1, 'auth.reset_password', 'user', $2, '{}'::jsonb)
+        "#,
+    )
+    .bind(row.user_id)
+    .bind(row.user_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+
+    issue_session_response(&state, row.user_id, row.email, "auth.reset_login").await
+}
+
+struct ResetRow {
+    token_id: i64,
+    user_id: i64,
+    email: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn find_valid_reset(
+    pool: &sqlx::PgPool,
+    raw_token: &str,
+) -> Result<ResetRow, (StatusCode, String)> {
+    let token = raw_token.trim();
+    if token.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Нет токена сброса".into()));
+    }
+    let digest = token_hash(token);
+    let row: Option<(i64, i64, String, chrono::DateTime<chrono::Utc>, String)> = sqlx::query_as(
+        r#"
+        SELECT t.id, u.id, u.email, t.expires_at, u.status
+        FROM auth_tokens t
+        JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = $1
+          AND t.purpose = 'reset'
+          AND t.used_at IS NULL
+          AND t.expires_at > now()
+        "#,
+    )
+    .bind(&digest)
+    .fetch_optional(pool)
+    .await
+    .map_err(internal)?;
+    let Some((token_id, user_id, email, expires_at, status)) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Ссылка недействительна или устарела".into(),
+        ));
+    };
+    if status != "active" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Учётная запись недоступна".into(),
+        ));
+    }
+    Ok(ResetRow {
+        token_id,
+        user_id,
+        email,
+        expires_at,
+    })
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {

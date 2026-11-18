@@ -2634,6 +2634,51 @@ th { color: #64748b; font-weight: 600; }
   width: min(100%, 24rem);
 }
 
+.admin-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-weight: 500;
+}
+
+.admin-check input {
+  width: auto;
+}
+
+.admin-users-table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+}
+
+.admin-users-table th,
+.admin-users-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.admin-invite-fallback {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7fbf8;
+}
+
+.admin-invite-url {
+  flex: 1 1 16rem;
+  overflow-wrap: anywhere;
+  font-size: 0.86rem;
+}
+
 @media (min-width: 2560px) {
   .shell {
     width: min(100%, 150rem);

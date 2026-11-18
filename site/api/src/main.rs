@@ -1,12 +1,14 @@
 mod admin;
 mod auth;
 mod bulletin;
+mod mail;
 mod map_image;
 mod models;
 mod password;
 mod publish;
 mod rbac;
 mod userctl;
+mod users;
 
 use std::convert::Infallible;
 use std::fs;
@@ -58,6 +60,7 @@ pub struct AppState {
     live_tx: broadcast::Sender<LiveTick>,
     cookie_secure: bool,
     allowed_origins: Vec<String>,
+    mail: mail::MailConfig,
 }
 
 #[derive(Parser)]
@@ -160,12 +163,37 @@ async fn serve() -> anyhow::Result<()> {
         live_tx,
         cookie_secure: auth::cookie_secure_from_env(),
         allowed_origins: auth::parse_allowed_origins(),
+        mail: mail::MailConfig::from_env(),
     });
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
+        .route("/api/auth/change-password", post(auth::change_password))
+        .route("/api/auth/forgot-password", post(auth::forgot_password))
+        .route("/api/auth/reset/{token}", get(auth::reset_info))
+        .route(
+            "/api/auth/reset/{token}/accept",
+            post(auth::accept_reset),
+        )
+        .route("/api/auth/invite/{token}", get(users::invite_info))
+        .route(
+            "/api/auth/invite/{token}/accept",
+            post(users::accept_invite),
+        )
+        .route(
+            "/api/admin/users",
+            get(users::list_users).post(users::invite_user),
+        )
+        .route(
+            "/api/admin/users/{id}/resend-invite",
+            post(users::resend_invite),
+        )
+        .route(
+            "/api/admin/users/{id}/disable",
+            post(users::disable_user),
+        )
         .route(
             "/api/admin/upcoming",
             get(admin::list_upcoming).post(admin::create_upcoming),

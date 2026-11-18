@@ -7,7 +7,12 @@ import SiteLayout from "./layouts/SiteLayout.vue";
 import AdminHomePage from "./pages/admin/AdminHomePage.vue";
 import CalendarEditPage from "./pages/admin/CalendarEditPage.vue";
 import CalendarListPage from "./pages/admin/CalendarListPage.vue";
+import ChangePasswordPage from "./pages/admin/ChangePasswordPage.vue";
+import ForgotPasswordPage from "./pages/admin/ForgotPasswordPage.vue";
+import InviteAcceptPage from "./pages/admin/InviteAcceptPage.vue";
 import LoginPage from "./pages/admin/LoginPage.vue";
+import ResetPasswordPage from "./pages/admin/ResetPasswordPage.vue";
+import UsersPage from "./pages/admin/UsersPage.vue";
 import BulletinPage from "./pages/BulletinPage.vue";
 import CalendarPage from "./pages/CalendarPage.vue";
 import ComingSoonPage from "./pages/ComingSoonPage.vue";
@@ -47,6 +52,9 @@ const router = createRouter({
       ],
     },
     { path: "/admin/login", component: LoginPage },
+    { path: "/admin/forgot", component: ForgotPasswordPage },
+    { path: "/admin/invite/:token", component: InviteAcceptPage },
+    { path: "/admin/reset/:token", component: ResetPasswordPage },
     {
       path: "/admin",
       component: AdminLayout,
@@ -69,6 +77,12 @@ const router = createRouter({
           component: CalendarEditPage,
           meta: { perm: "events.announce" },
         },
+        {
+          path: "users",
+          component: UsersPage,
+          meta: { perm: "users.manage" },
+        },
+        { path: "password", component: ChangePasswordPage },
       ],
     },
   ],
@@ -76,16 +90,24 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const needsAuth = to.matched.some((record) => record.meta.requiresAuth);
-  if (!needsAuth && to.path !== "/admin/login") {
+  const isPublicAdmin =
+    to.path === "/admin/login" ||
+    to.path === "/admin/forgot" ||
+    to.path.startsWith("/admin/invite/") ||
+    to.path.startsWith("/admin/reset/");
+  if (!needsAuth && !isPublicAdmin) {
     return true;
   }
   if (!meLoaded.value) {
     await loadMe();
   }
-  if (to.path === "/admin/login") {
+  if (to.path === "/admin/login" || to.path === "/admin/forgot") {
     if (me.value) {
       return { path: "/admin" };
     }
+    return true;
+  }
+  if (to.path.startsWith("/admin/invite/") || to.path.startsWith("/admin/reset/")) {
     return true;
   }
   if (!me.value) {

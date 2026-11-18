@@ -23,9 +23,17 @@ async function onLogout() {
           >
             Календарь
           </router-link>
+          <router-link
+            v-if="hasPerm('users.manage')"
+            to="/admin/users"
+            class="admin-nav-link"
+          >
+            Сотрудники
+          </router-link>
         </nav>
         <div class="admin-user">
           <span class="muted">{{ me?.email }}</span>
+          <router-link class="admin-nav-link" to="/admin/password">Пароль</router-link>
           <button type="button" class="btn btn-quiet" @click="onLogout">Выйти</button>
           <router-link class="admin-nav-link" to="/">На сайт</router-link>
         </div>

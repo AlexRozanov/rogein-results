@@ -15,7 +15,20 @@ import { hasPerm, me } from "../../auth";
         <h2>Календарь</h2>
         <p class="muted">Предстоящие старты на сайте</p>
       </router-link>
-      <p v-else class="muted">Нет разделов, к которым есть доступ.</p>
+      <router-link
+        v-if="hasPerm('users.manage')"
+        class="card event-link"
+        to="/admin/users"
+      >
+        <h2>Сотрудники</h2>
+        <p class="muted">Приглашения в админку по email</p>
+      </router-link>
+      <p
+        v-if="!hasPerm('events.announce') && !hasPerm('users.manage')"
+        class="muted"
+      >
+        Нет разделов, к которым есть доступ.
+      </p>
     </div>
   </div>
 </template>

@@ -41,6 +41,9 @@ async function onSubmit() {
       <button class="btn btn-primary" type="submit" :disabled="pending">
         {{ pending ? "Входим…" : "Войти" }}
       </button>
+      <p>
+        <router-link class="admin-nav-link" to="/admin/forgot">Забыли пароль?</router-link>
+      </p>
     </form>
   </div>
 </template>
