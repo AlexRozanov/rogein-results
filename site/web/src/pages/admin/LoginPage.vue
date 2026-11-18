@@ -27,22 +27,29 @@ async function onSubmit() {
 
 <template>
   <div class="admin-login">
-    <form class="card admin-form" @submit.prevent="onSubmit">
+    <form class="admin-auth-card" @submit.prevent="onSubmit">
+      <p class="admin-auth-brand">
+        <span class="admin-auth-brand-mark" aria-hidden="true" />
+        Админка
+      </p>
       <h1>Вход организатора</h1>
+      <p class="admin-auth-lead">Email и пароль сотрудника для доступа к календарю и бюллетеням.</p>
       <p v-if="error" class="err">{{ error }}</p>
-      <label>
-        Email
-        <input v-model="email" type="email" autocomplete="username" required />
-      </label>
-      <label>
-        Пароль
-        <input v-model="password" type="password" autocomplete="current-password" required />
-      </label>
-      <button class="btn btn-primary" type="submit" :disabled="pending">
+      <div class="admin-auth-fields">
+        <label>
+          Email
+          <input v-model="email" type="email" autocomplete="username" required />
+        </label>
+        <label>
+          Пароль
+          <input v-model="password" type="password" autocomplete="current-password" required />
+        </label>
+      </div>
+      <button class="btn btn-primary admin-auth-submit" type="submit" :disabled="pending">
         {{ pending ? "Входим…" : "Войти" }}
       </button>
-      <p>
-        <router-link class="admin-nav-link" to="/admin/forgot">Забыли пароль?</router-link>
+      <p class="admin-auth-footer">
+        <router-link to="/admin/forgot">Забыли пароль?</router-link>
       </p>
     </form>
   </div>

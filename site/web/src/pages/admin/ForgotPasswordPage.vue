@@ -27,20 +27,28 @@ async function onSubmit() {
 
 <template>
   <div class="admin-login">
-    <form class="card admin-form" @submit.prevent="onSubmit">
+    <form class="admin-auth-card" @submit.prevent="onSubmit">
+      <p class="admin-auth-brand">
+        <span class="admin-auth-brand-mark" aria-hidden="true" />
+        Админка
+      </p>
       <h1>Сброс пароля</h1>
-      <p class="muted">Укажите email — если аккаунт есть, придёт ссылка на смену пароля.</p>
+      <p class="admin-auth-lead">
+        Укажите email — если аккаунт есть, придёт ссылка на смену пароля.
+      </p>
       <p v-if="error" class="err">{{ error }}</p>
       <p v-if="notice" class="ok">{{ notice }}</p>
-      <label>
-        Email
-        <input v-model="email" type="email" autocomplete="username" required />
-      </label>
-      <button class="btn btn-primary" type="submit" :disabled="pending">
+      <div class="admin-auth-fields">
+        <label>
+          Email
+          <input v-model="email" type="email" autocomplete="username" required />
+        </label>
+      </div>
+      <button class="btn btn-primary admin-auth-submit" type="submit" :disabled="pending">
         {{ pending ? "Отправляем…" : "Отправить ссылку" }}
       </button>
-      <p>
-        <router-link class="admin-nav-link" to="/admin/login">Ко входу</router-link>
+      <p class="admin-auth-footer">
+        <router-link to="/admin/login">Ко входу</router-link>
       </p>
     </form>
   </div>
