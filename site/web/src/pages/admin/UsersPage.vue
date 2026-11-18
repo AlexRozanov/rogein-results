@@ -26,6 +26,10 @@ const STAFF_ROLES = [
   { code: "owner", label: "Владелец" },
 ] as const;
 
+const ROLE_LABEL: Record<string, string> = Object.fromEntries(
+  STAFF_ROLES.map((role) => [role.code, role.label]),
+);
+
 const users = ref<AdminUser[]>([]);
 const email = ref("");
 const name = ref("");
@@ -40,12 +44,6 @@ const canGrantOwner = computed(() => hasPerm("roles.manage"));
 const roleOptions = computed(() =>
   STAFF_ROLES.filter((role) => role.code !== "owner" || canGrantOwner.value),
 );
-
-const statusLabel: Record<string, string> = {
-  active: "активен",
-  invited: "приглашён",
-  disabled: "отключён",
-};
 
 async function loadUsers() {
   loading.value = true;
@@ -65,6 +63,23 @@ function toggleRole(code: string) {
   } else {
     selectedRoles.value = [...selectedRoles.value, code];
   }
+}
+
+function roleLabel(code: string): string {
+  return ROLE_LABEL[code] || code;
+}
+
+function statusClass(status: string): string {
+  if (status === "active") return "is-active";
+  if (status === "invited") return "is-invited";
+  return "is-disabled";
+}
+
+function statusLabel(status: string): string {
+  if (status === "active") return "активен";
+  if (status === "invited") return "приглашён";
+  if (status === "disabled") return "отключён";
+  return status;
 }
 
 async function onInvite() {
@@ -153,10 +168,12 @@ onMounted(loadUsers);
 </script>
 
 <template>
-  <div class="admin-page">
-    <div class="admin-page-head">
-      <h1>Сотрудники</h1>
-      <p class="muted">Приглашение в админку по email со ссылкой для установки пароля.</p>
+  <div class="admin-page admin-users-page">
+    <div class="admin-page-head admin-users-head">
+      <div>
+        <h1>Сотрудники</h1>
+        <p class="muted">Приглашение в админку по email со ссылкой для установки пароля.</p>
+      </div>
     </div>
 
     <p v-if="error" class="err">{{ error }}</p>
@@ -168,75 +185,99 @@ onMounted(loadUsers);
       </button>
     </div>
 
-    <form class="card admin-form" @submit.prevent="onInvite">
-      <h2>Пригласить</h2>
-      <label>
-        Email
-        <input v-model="email" type="email" required autocomplete="off" />
-      </label>
-      <label>
-        Имя (необязательно)
-        <input v-model="name" type="text" autocomplete="off" />
-      </label>
-      <fieldset>
-        <legend>Роли</legend>
-        <label v-for="role in roleOptions" :key="role.code" class="admin-check">
-          <input
-            type="checkbox"
-            :checked="selectedRoles.includes(role.code)"
-            @change="toggleRole(role.code)"
-          />
-          {{ role.label }}
-        </label>
-      </fieldset>
-      <button class="btn btn-primary" type="submit" :disabled="pending || !selectedRoles.length">
-        {{ pending ? "Сохраняем…" : "Пригласить" }}
-      </button>
-    </form>
+    <section class="admin-users-panel">
+      <h2 class="admin-users-title">Пригласить</h2>
+      <form class="admin-users-form" @submit.prevent="onInvite">
+        <div class="admin-users-fields">
+          <label class="admin-users-field">
+            <span>Email</span>
+            <input v-model="email" type="email" required autocomplete="off" />
+          </label>
+          <label class="admin-users-field">
+            <span>Имя <em class="muted">(необязательно)</em></span>
+            <input v-model="name" type="text" autocomplete="off" />
+          </label>
+        </div>
 
-    <div class="card" style="margin-top: 1rem">
-      <h2>Список</h2>
+        <div class="admin-users-roles">
+          <p class="admin-users-roles-label">Роли</p>
+          <div class="admin-role-chips" role="group" aria-label="Роли">
+            <button
+              v-for="role in roleOptions"
+              :key="role.code"
+              type="button"
+              class="admin-role-chip"
+              :class="{ 'is-on': selectedRoles.includes(role.code) }"
+              :aria-pressed="selectedRoles.includes(role.code)"
+              @click="toggleRole(role.code)"
+            >
+              {{ role.label }}
+            </button>
+          </div>
+        </div>
+
+        <button
+          class="btn btn-primary admin-users-submit"
+          type="submit"
+          :disabled="pending || !selectedRoles.length"
+        >
+          {{ pending ? "Сохраняем…" : "Пригласить" }}
+        </button>
+      </form>
+    </section>
+
+    <section class="admin-users-panel">
+      <h2 class="admin-users-title">Список</h2>
       <p v-if="loading" class="muted">Загрузка…</p>
-      <table v-else-if="users.length" class="admin-users-table">
-        <thead>
-          <tr>
-            <th>Email</th>
-            <th>Имя</th>
-            <th>Роли</th>
-            <th>Статус</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in users" :key="row.id">
-            <td>{{ row.email }}</td>
-            <td>{{ row.display_name || "—" }}</td>
-            <td>{{ row.roles.join(", ") || "—" }}</td>
-            <td>{{ statusLabel[row.status] || row.status }}</td>
-            <td class="admin-row-actions">
-              <button
-                v-if="row.status === 'invited'"
-                type="button"
-                class="btn btn-quiet"
-                :disabled="pending"
-                @click="onResend(row.id)"
+      <ul v-else-if="users.length" class="admin-users-list">
+        <li v-for="row in users" :key="row.id" class="admin-user-row">
+          <div class="admin-user-main">
+            <div class="admin-user-identity">
+              <strong class="admin-user-email">{{ row.email }}</strong>
+              <span v-if="row.display_name" class="admin-user-name">{{ row.display_name }}</span>
+            </div>
+            <div class="admin-user-meta">
+              <span
+                class="admin-status-pill"
+                :class="statusClass(row.status)"
               >
-                Ещё раз
-              </button>
-              <button
-                v-if="row.status !== 'disabled'"
-                type="button"
-                class="btn btn-quiet"
-                :disabled="pending"
-                @click="onDisable(row.id)"
-              >
-                Отключить
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+                {{ statusLabel(row.status) }}
+              </span>
+              <div class="admin-user-role-tags">
+                <span
+                  v-for="code in row.roles"
+                  :key="code"
+                  class="admin-role-tag"
+                >
+                  {{ roleLabel(code) }}
+                </span>
+                <span v-if="!row.roles.length" class="muted">без ролей</span>
+              </div>
+            </div>
+          </div>
+          <div class="admin-user-actions">
+            <button
+              v-if="row.status === 'invited'"
+              type="button"
+              class="btn btn-quiet"
+              :disabled="pending"
+              @click="onResend(row.id)"
+            >
+              Ещё раз
+            </button>
+            <button
+              v-if="row.status !== 'disabled'"
+              type="button"
+              class="btn btn-quiet"
+              :disabled="pending"
+              @click="onDisable(row.id)"
+            >
+              Отключить
+            </button>
+          </div>
+        </li>
+      </ul>
       <p v-else class="muted">Пока никого нет.</p>
-    </div>
+    </section>
   </div>
 </template>

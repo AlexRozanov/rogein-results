@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { api } from "../../auth";
-import { richTextHtml } from "../../bulletin";
+import { formatDateRu, richTextHtml } from "../../bulletin";
 import { sportKindLabel } from "../../content/site";
 import PageLoading from "../../components/PageLoading.vue";
 
@@ -18,6 +18,7 @@ export type AdminUpcoming = {
 const items = ref<AdminUpcoming[]>([]);
 const error = ref("");
 const loading = ref(true);
+const showPast = ref(false);
 
 const statusLabel: Record<string, string> = {
   draft: "черновик",
@@ -25,6 +26,36 @@ const statusLabel: Record<string, string> = {
   cancelled: "снят",
   completed: "проведён",
 };
+
+function todayIso(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function isPast(item: AdminUpcoming): boolean {
+  if (item.status === "completed" || item.status === "cancelled") return true;
+  const date = item.competition_date?.trim();
+  if (!date) return false;
+  return date < todayIso();
+}
+
+function statusClass(status: string): string {
+  if (status === "announced") return "is-announced";
+  if (status === "draft") return "is-draft";
+  if (status === "completed") return "is-completed";
+  if (status === "cancelled") return "is-cancelled";
+  return "";
+}
+
+const visibleItems = computed(() => {
+  if (showPast.value) return items.value;
+  return items.value.filter((item) => !isPast(item));
+});
+
+const pastCount = computed(() => items.value.filter(isPast).length);
 
 async function reload() {
   loading.value = true;
@@ -42,33 +73,63 @@ onMounted(reload);
 </script>
 
 <template>
-  <div class="admin-page">
-    <div class="admin-page-head">
-      <h1>Календарь</h1>
+  <div class="admin-page admin-calendar-page">
+    <div class="admin-page-head admin-calendar-head">
+      <div>
+        <h1>Календарь</h1>
+        <p class="muted">
+          Старты со статусом «в календаре» видны на
+          <router-link to="/calendar">публичной странице</router-link>.
+        </p>
+      </div>
       <router-link class="btn btn-primary" to="/admin/calendar/new">Новый старт</router-link>
     </div>
-    <p class="muted">
-      Старты со статусом «в календаре» видны на
-      <router-link to="/calendar">публичной странице</router-link>.
-    </p>
+
+    <div class="admin-calendar-toolbar">
+      <label class="admin-toggle">
+        <input v-model="showPast" type="checkbox" />
+        <span>Показывать прошедшие</span>
+        <span v-if="pastCount" class="admin-toggle-count">{{ pastCount }}</span>
+      </label>
+    </div>
+
     <p v-if="error" class="err">{{ error }}</p>
     <PageLoading v-else-if="loading" label="Загрузка стартов…" />
     <p v-else-if="!items.length" class="muted">Пока нет стартов.</p>
-    <div v-else class="event-list">
-      <article v-for="item in items" :key="item.id" class="card">
-        <p class="kind-pill">{{ sportKindLabel(item.sport_kind) }}</p>
-        <h2>{{ item.title }}</h2>
-        <p class="muted">
-          {{ item.competition_date || "дата уточняется" }}
-          · {{ statusLabel[item.status] || item.status }}
-          · {{ item.slug }}
-        </p>
-        <div
-          v-if="item.summary"
-          class="calendar-summary"
-          v-html="richTextHtml(item.summary)"
-        />
-        <p class="admin-row-actions">
+    <p v-else-if="!visibleItems.length" class="muted">
+      Нет актуальных стартов.
+      <button type="button" class="btn btn-quiet" @click="showPast = true">
+        Показать прошедшие ({{ pastCount }})
+      </button>
+    </p>
+
+    <ul v-else class="admin-calendar-list">
+      <li
+        v-for="item in visibleItems"
+        :key="item.id"
+        class="admin-calendar-row"
+        :class="{ 'is-past': isPast(item) }"
+      >
+        <div class="admin-calendar-main">
+          <div class="admin-calendar-topline">
+            <span class="admin-kind-pill">{{ sportKindLabel(item.sport_kind) }}</span>
+            <span class="admin-status-pill" :class="statusClass(item.status)">
+              {{ statusLabel[item.status] || item.status }}
+            </span>
+            <span v-if="isPast(item)" class="admin-past-mark">прошедший</span>
+          </div>
+          <h2 class="admin-calendar-title">{{ item.title }}</h2>
+          <p class="admin-calendar-meta">
+            <span>{{ formatDateRu(item.competition_date) || "дата уточняется" }}</span>
+            <span class="admin-calendar-slug">{{ item.slug }}</span>
+          </p>
+          <div
+            v-if="item.summary"
+            class="calendar-summary admin-calendar-summary"
+            v-html="richTextHtml(item.summary)"
+          />
+        </div>
+        <div class="admin-calendar-actions">
           <router-link
             v-if="item.status !== 'completed'"
             class="btn"
@@ -78,13 +139,13 @@ onMounted(reload);
           </router-link>
           <router-link
             v-if="item.status === 'announced'"
-            class="btn"
+            class="btn btn-quiet"
             :to="`/calendar/${item.slug}`"
           >
             Бюллетень
           </router-link>
-        </p>
-      </article>
-    </div>
+        </div>
+      </li>
+    </ul>
   </div>
 </template>
