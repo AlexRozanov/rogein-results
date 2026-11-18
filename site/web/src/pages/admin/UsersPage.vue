@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, hasPerm } from "../../auth";
+import AdminIcon from "../../components/AdminIcon.vue";
 
 type AdminUser = {
   id: number;
@@ -180,8 +181,15 @@ onMounted(loadUsers);
     <p v-if="notice" class="ok">{{ notice }}</p>
     <div v-if="inviteUrl" class="admin-invite-fallback">
       <code class="admin-invite-url">{{ inviteUrl }}</code>
-      <button type="button" class="btn" :disabled="pending" @click="copyInviteUrl">
-        Скопировать
+      <button
+        type="button"
+        class="admin-icon-btn"
+        title="Скопировать ссылку"
+        aria-label="Скопировать ссылку"
+        :disabled="pending"
+        @click="copyInviteUrl"
+      >
+        <AdminIcon name="copy" />
       </button>
     </div>
 
@@ -217,11 +225,12 @@ onMounted(loadUsers);
         </div>
 
         <button
-          class="btn btn-primary admin-users-submit"
+          class="btn btn-primary btn-with-icon admin-users-submit"
           type="submit"
           :disabled="pending || !selectedRoles.length"
         >
-          {{ pending ? "Сохраняем…" : "Пригласить" }}
+          <AdminIcon name="mail" />
+          <span>{{ pending ? "Сохраняем…" : "Пригласить" }}</span>
         </button>
       </form>
     </section>
@@ -259,20 +268,24 @@ onMounted(loadUsers);
             <button
               v-if="row.status === 'invited'"
               type="button"
-              class="btn btn-quiet"
+              class="admin-icon-btn"
+              title="Отправить приглашение ещё раз"
+              aria-label="Отправить приглашение ещё раз"
               :disabled="pending"
               @click="onResend(row.id)"
             >
-              Ещё раз
+              <AdminIcon name="mail" />
             </button>
             <button
               v-if="row.status !== 'disabled'"
               type="button"
-              class="btn btn-quiet"
+              class="admin-icon-btn is-danger"
+              title="Отключить"
+              aria-label="Отключить"
               :disabled="pending"
               @click="onDisable(row.id)"
             >
-              Отключить
+              <AdminIcon name="ban" />
             </button>
           </div>
         </li>

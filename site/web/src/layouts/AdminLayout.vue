@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { hasPerm, logout, me } from "../auth";
 import { useRouter } from "vue-router";
+import AdminIcon from "../components/AdminIcon.vue";
 
 const router = useRouter();
 
@@ -33,9 +34,31 @@ async function onLogout() {
         </nav>
         <div class="admin-user">
           <span class="muted">{{ me?.email }}</span>
-          <router-link class="admin-nav-link" to="/admin/password">Пароль</router-link>
-          <button type="button" class="btn btn-quiet" @click="onLogout">Выйти</button>
-          <router-link class="admin-nav-link" to="/">На сайт</router-link>
+          <router-link
+            class="admin-icon-btn"
+            to="/admin/password"
+            title="Смена пароля"
+            aria-label="Смена пароля"
+          >
+            <AdminIcon name="key" />
+          </router-link>
+          <button
+            type="button"
+            class="admin-icon-btn"
+            title="Выйти"
+            aria-label="Выйти"
+            @click="onLogout"
+          >
+            <AdminIcon name="logout" />
+          </button>
+          <router-link
+            class="admin-icon-btn"
+            to="/"
+            title="На сайт"
+            aria-label="На сайт"
+          >
+            <AdminIcon name="external" />
+          </router-link>
         </div>
       </div>
     </header>

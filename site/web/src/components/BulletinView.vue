@@ -15,6 +15,7 @@ import {
   yandexMapsUrl,
   type Bulletin,
 } from "../bulletin";
+import AdminIcon from "./AdminIcon.vue";
 import BulletinBlockActions from "./BulletinBlockActions.vue";
 import BulletinField from "./BulletinField.vue";
 
@@ -642,11 +643,13 @@ onBeforeUnmount(() => {
           </label>
           <button
             v-if="bulletin.scheme_url"
-            class="btn"
+            class="admin-icon-btn is-danger"
             type="button"
+            title="Убрать схему"
+            aria-label="Убрать схему"
             @click.stop="clearScheme"
           >
-            Убрать
+            <AdminIcon name="trash" />
           </button>
           <BulletinBlockActions :disabled="saving" @confirm="confirmEdit" @cancel="cancelEdit" />
           <p v-if="!upcomingId" class="muted">Сначала сохраните старт.</p>
@@ -827,14 +830,25 @@ onBeforeUnmount(() => {
                     </a>
                   </td>
                   <td data-label="">
-                    <button class="btn" type="button" @click="removeCourse(index)">Убрать</button>
+                    <button
+                      class="admin-icon-btn is-danger"
+                      type="button"
+                      title="Убрать дистанцию"
+                      aria-label="Убрать дистанцию"
+                      @click="removeCourse(index)"
+                    >
+                      <AdminIcon name="trash" />
+                    </button>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
           <div class="admin-row-actions">
-            <button class="btn" type="button" @click="addCourse">Добавить дистанцию</button>
+            <button class="btn btn-with-icon" type="button" @click="addCourse">
+              <AdminIcon name="plus" />
+              <span>Добавить дистанцию</span>
+            </button>
             <BulletinBlockActions
               :disabled="saving"
               @confirm="confirmEdit"
@@ -1050,11 +1064,13 @@ onBeforeUnmount(() => {
             <img :src="url" alt="Фрагмент карты" />
             <button
               v-if="canEdit && isActive('maps')"
-              class="btn"
+              class="admin-icon-btn is-danger"
               type="button"
+              title="Убрать фрагмент"
+              aria-label="Убрать фрагмент"
               @click.stop="removeMap(index)"
             >
-              Убрать
+              <AdminIcon name="trash" />
             </button>
           </figure>
         </div>

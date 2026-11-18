@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { api, loadMe } from "../../auth";
+import AdminIcon from "../../components/AdminIcon.vue";
 
 const router = useRouter();
 const currentPassword = ref("");
@@ -82,8 +83,14 @@ async function onSubmit() {
         <button class="btn btn-primary" type="submit" :disabled="pending">
           {{ pending ? "Сохраняем…" : "Сменить пароль" }}
         </button>
-        <button class="btn btn-quiet" type="button" @click="router.push('/admin')">
-          Назад
+        <button
+          class="admin-icon-btn"
+          type="button"
+          title="Назад"
+          aria-label="Назад"
+          @click="router.push('/admin')"
+        >
+          <AdminIcon name="back" />
         </button>
       </div>
     </form>

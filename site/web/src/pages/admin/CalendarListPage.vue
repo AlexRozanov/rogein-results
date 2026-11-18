@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../../auth";
 import { formatDateRu, richTextHtml } from "../../bulletin";
 import { sportKindLabel } from "../../content/site";
+import AdminIcon from "../../components/AdminIcon.vue";
 import PageLoading from "../../components/PageLoading.vue";
 
 export type AdminUpcoming = {
@@ -82,7 +83,14 @@ onMounted(reload);
           <router-link to="/calendar">публичной странице</router-link>.
         </p>
       </div>
-      <router-link class="btn btn-primary" to="/admin/calendar/new">Новый старт</router-link>
+      <router-link
+        class="btn btn-primary btn-with-icon"
+        to="/admin/calendar/new"
+        title="Новый старт"
+      >
+        <AdminIcon name="plus" />
+        <span>Новый старт</span>
+      </router-link>
     </div>
 
     <div class="admin-calendar-toolbar">
@@ -96,10 +104,16 @@ onMounted(reload);
     <p v-if="error" class="err">{{ error }}</p>
     <PageLoading v-else-if="loading" label="Загрузка стартов…" />
     <p v-else-if="!items.length" class="muted">Пока нет стартов.</p>
-    <p v-else-if="!visibleItems.length" class="muted">
+    <p v-else-if="!visibleItems.length" class="muted admin-empty-with-action">
       Нет актуальных стартов.
-      <button type="button" class="btn btn-quiet" @click="showPast = true">
-        Показать прошедшие ({{ pastCount }})
+      <button
+        type="button"
+        class="btn btn-quiet btn-with-icon"
+        title="Показать прошедшие"
+        @click="showPast = true"
+      >
+        <AdminIcon name="eye" />
+        <span>Показать прошедшие ({{ pastCount }})</span>
       </button>
     </p>
 
@@ -132,17 +146,21 @@ onMounted(reload);
         <div class="admin-calendar-actions">
           <router-link
             v-if="item.status !== 'completed'"
-            class="btn"
+            class="admin-icon-btn"
             :to="`/admin/calendar/${item.id}`"
+            title="Править"
+            aria-label="Править"
           >
-            Править
+            <AdminIcon name="edit" />
           </router-link>
           <router-link
             v-if="item.status === 'announced'"
-            class="btn btn-quiet"
+            class="admin-icon-btn"
             :to="`/calendar/${item.slug}`"
+            title="Бюллетень"
+            aria-label="Бюллетень"
           >
-            Бюллетень
+            <AdminIcon name="doc" />
           </router-link>
         </div>
       </li>

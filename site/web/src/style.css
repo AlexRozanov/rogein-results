@@ -123,6 +123,12 @@ body {
   text-decoration: none;
 }
 
+.back-link a.btn-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .header-contact:hover,
 .footer-link:hover,
 .text-link:hover,
@@ -2153,6 +2159,78 @@ th { color: #64748b; font-weight: 600; }
   color: inherit;
 }
 
+.admin-icon {
+  width: 1.15rem;
+  height: 1.15rem;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.admin-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.35rem;
+  height: 2.35rem;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  text-decoration: none;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+}
+
+.admin-icon-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--green-dark) 40%, var(--line));
+  background: #f7fbf8;
+  color: var(--green-dark);
+}
+
+.admin-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.admin-icon-btn.is-danger:hover:not(:disabled) {
+  border-color: #d4a5a5;
+  background: #fff5f5;
+  color: #9a3412;
+}
+
+.admin-icon-btn.is-on {
+  border-color: var(--green-dark);
+  background: color-mix(in srgb, var(--green) 14%, #fff);
+  color: var(--green-dark);
+}
+
+.admin-header .admin-icon-btn {
+  width: 2.2rem;
+  height: 2.2rem;
+  border-color: transparent;
+  background: transparent;
+  color: #e7f3ea;
+}
+
+.admin-header .admin-icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: transparent;
+  color: #fff;
+}
+
+.btn-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-with-icon .admin-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
 .bulletin {
   max-width: 52rem;
   margin: 0 auto 24px;
@@ -2658,6 +2736,13 @@ th { color: #64748b; font-weight: 600; }
   gap: 16px;
 }
 
+.admin-empty-with-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 .admin-calendar-head {
   align-items: flex-start;
 }
@@ -2821,10 +2906,7 @@ th { color: #64748b; font-weight: 600; }
 @media (max-width: 639px) {
   .admin-calendar-actions {
     width: 100%;
-  }
-
-  .admin-calendar-actions .btn {
-    flex: 1 1 auto;
+    justify-content: flex-end;
   }
 }
 

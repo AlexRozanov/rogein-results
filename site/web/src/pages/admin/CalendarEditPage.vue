@@ -10,6 +10,7 @@ import {
   type Bulletin,
 } from "../../bulletin";
 import { buildEventSlug } from "../../eventSlug";
+import AdminIcon from "../../components/AdminIcon.vue";
 import BulletinView from "../../components/BulletinView.vue";
 import PageLoading from "../../components/PageLoading.vue";
 
@@ -191,7 +192,14 @@ onMounted(load);
 <template>
   <div class="admin-page">
     <p class="back-link">
-      <router-link to="/admin/calendar">← К списку</router-link>
+      <router-link
+        class="btn-with-icon"
+        to="/admin/calendar"
+        title="К списку"
+      >
+        <AdminIcon name="back" />
+        <span>К списку</span>
+      </router-link>
     </p>
     <h1>{{ isNew && !savedId ? "Новый старт" : "Старт" }}</h1>
     <PageLoading v-if="loading" label="Загрузка…" />
@@ -250,15 +258,24 @@ onMounted(load);
         <button class="btn btn-primary" type="submit" :disabled="pending">
           {{ pending ? "Сохраняем…" : "Сохранить карточку" }}
         </button>
-        <router-link class="btn" to="/admin/calendar">К списку</router-link>
+        <router-link
+          class="admin-icon-btn"
+          to="/admin/calendar"
+          title="К списку"
+          aria-label="К списку"
+        >
+          <AdminIcon name="back" />
+        </router-link>
         <a
           v-if="status === 'announced' && slug"
-          class="btn"
+          class="admin-icon-btn"
           :href="`/calendar/${slug}`"
           target="_blank"
           rel="noreferrer"
+          title="Открыть бюллетень"
+          aria-label="Открыть бюллетень"
         >
-          Открыть бюллетень
+          <AdminIcon name="external" />
         </a>
       </div>
     </form>
@@ -270,7 +287,7 @@ onMounted(load);
           <p class="muted">
             {{
               previewMode
-                ? "Так страницу увидят на сайте. Нажмите «Редактировать», чтобы править блоки."
+                ? "Так страницу увидят на сайте. Нажмите карандаш, чтобы править блоки."
                 : "Нажмите блок → правьте → ✓ сохранить или ✕ отменить. Клик мимо блока тоже сохраняет."
             }}
           </p>
@@ -280,12 +297,14 @@ onMounted(load);
         </div>
         <div class="admin-row-actions">
           <button
-            class="btn"
+            class="admin-icon-btn"
             type="button"
-            :class="{ 'btn-primary': previewMode }"
+            :class="{ 'is-on': previewMode }"
+            :title="previewMode ? 'Редактировать' : 'Просмотр'"
+            :aria-label="previewMode ? 'Редактировать' : 'Просмотр'"
             @click="previewMode = !previewMode"
           >
-            {{ previewMode ? "Редактировать" : "Просмотр" }}
+            <AdminIcon :name="previewMode ? 'edit' : 'eye'" />
           </button>
         </div>
       </div>
