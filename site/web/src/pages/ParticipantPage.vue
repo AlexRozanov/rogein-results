@@ -16,6 +16,8 @@ import {
   hasCourseDistances,
   resultStatusLine,
   asOptionalIntList,
+  asAddedCpCounts,
+  expandMarksWithAddedCps,
   formatCpParen,
 } from "../orientSplits";
 import {
@@ -48,6 +50,7 @@ type Participant = {
   distance_m?: number | null;
   points_final?: number | null;
   elapsed_seconds?: number | null;
+  added_cps?: unknown;
 };
 
 type AwardGroup = {
@@ -170,7 +173,43 @@ watch(
     mapImageSize.value = null;
   },
 );
-const personMarks = computed(() => asMarks(person.value?.marks));
+const startCp = computed(() => event.value?.start_cp ?? 241);
+const finishCp = computed(() => event.value?.finish_cp ?? 240);
+const selectedStatus = computed(() => selectedResult.value?.status || "OK");
+const isDsq = computed(() => {
+  const status = selectedStatus.value;
+  return status === "Дисквалификация" || status === "DSQ";
+});
+const selectedGroup = computed(() =>
+  event.value?.award_groups.find((group) => group.id === selectedResult.value?.award_group_id) ?? null,
+);
+const diagnostics = computed(() => asStringList(selectedResult.value?.diagnostics));
+const courseControls = computed(() => {
+  if (!event.value || !selectedGroup.value) return [] as number[];
+  const rows = event.value.results.filter((row) => row.award_group_id === selectedGroup.value!.id);
+  return inferCourseCps(selectedGroup.value.course_cps, rows, startCp.value, finishCp.value);
+});
+const personMarks = computed(() => {
+  const raw = asMarks(person.value?.marks);
+  if (!isOrient.value) return raw;
+  return expandMarksWithAddedCps(
+    raw.map((mark) => ({
+      cp_number: mark.cp_number,
+      mark_time: mark.mark_time,
+      added: mark.added,
+      seq: mark.seq,
+    })),
+    courseControls.value,
+    asAddedCpCounts(person.value?.added_cps),
+    startCp.value,
+    finishCp.value,
+  ).map((mark, index) => ({
+    seq: mark.seq && mark.seq > 0 ? mark.seq : index + 1,
+    cp_number: mark.cp_number,
+    mark_time: mark.mark_time,
+    added: mark.added === true,
+  }));
+});
 const pathPoints = computed<PathPoint[]>(() => {
   const stored = normalizePath(person.value?.path);
   if (stored.length) return stored;
@@ -180,22 +219,6 @@ const pathPoints = computed<PathPoint[]>(() => {
     event.value?.start_cp,
     event.value?.finish_cp,
   );
-});
-const selectedStatus = computed(() => selectedResult.value?.status || "OK");
-const isDsq = computed(() => {
-  const status = selectedStatus.value;
-  return status === "Дисквалификация" || status === "DSQ";
-});
-const selectedGroup = computed(() =>
-  event.value?.award_groups.find((group) => group.id === selectedResult.value?.award_group_id) ?? null,
-);
-const startCp = computed(() => event.value?.start_cp ?? 241);
-const finishCp = computed(() => event.value?.finish_cp ?? 240);
-const diagnostics = computed(() => asStringList(selectedResult.value?.diagnostics));
-const courseControls = computed(() => {
-  if (!event.value || !selectedGroup.value) return [] as number[];
-  const rows = event.value.results.filter((row) => row.award_group_id === selectedGroup.value!.id);
-  return inferCourseCps(selectedGroup.value.course_cps, rows, startCp.value, finishCp.value);
 });
 
 const classifiedPunches = computed(() => {

@@ -1468,10 +1468,20 @@ class EventStore(
             if (isRogaine(settings.sportKind)) return row.punches
             val adds = addCpCounts(row.logicalId, row.course, corrections)
             val addTimes = addCpTimes(row.logicalId, row.course, corrections)
-            val required = filterCourseCps(
+            if (adds.isEmpty()) return row.punches
+            val courseControls = filterCourseCps(
                 courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
                 removed,
             )
+            // В required нужны старт/финиш, иначе корректировки станций не попадут в marks.
+            val required = ArrayList<Int>()
+            if (settings.startCp > 0 && courseControls.firstOrNull() != settings.startCp) {
+                required += settings.startCp
+            }
+            required += courseControls
+            if (settings.finishCp > 0 && required.lastOrNull() != settings.finishCp) {
+                required += settings.finishCp
+            }
             val base = marksWithAddedStart(row.punches, settings.startCp, adds, addTimes)
             val window = orientPunchWindow(base, settings.startCp, settings.finishCp)
             return applyAddedCps(window, required, adds, settings.startCp, settings.finishCp, addTimes)

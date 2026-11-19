@@ -383,6 +383,105 @@ export function formatCpParen(cp: number, added = false): string {
   return added ? `${body}*` : body;
 }
 
+export function asAddedCpCounts(raw: unknown): Map<number, number> {
+  const out = new Map<number, number>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const cp = Number(key);
+    const count = Number(value);
+    if (!Number.isFinite(cp) || cp <= 0 || !Number.isFinite(count) || count <= 0) continue;
+    out.set(cp, Math.floor(count));
+  }
+  return out;
+}
+
+function syntheticMarkTime(prev: SplitMark | undefined, next: SplitMark | undefined): string {
+  const prevMs = prev ? parseMarkMs(prev.mark_time) : null;
+  const nextMs = next ? parseMarkMs(next.mark_time) : null;
+  if (prevMs != null && nextMs != null && nextMs > prevMs) {
+    return new Date(prevMs + Math.floor((nextMs - prevMs) / 2)).toISOString().slice(0, 19);
+  }
+  if (prev?.mark_time) return prev.mark_time;
+  if (next?.mark_time) return next.mark_time;
+  return "";
+}
+
+/**
+ * Вставляет в список отметок КП из added_cps (как на телефоне) и помечает их added.
+ * Если отметки уже есть в marks — только ставит флаг added.
+ */
+export function expandMarksWithAddedCps(
+  marks: SplitMark[],
+  courseCps: number[],
+  addCounts: Map<number, number>,
+  startCp: number | null,
+  finishCp: number | null,
+): SplitMark[] {
+  if (!addCounts.size) {
+    return marks.map((mark) => ({ ...mark, added: mark.added === true }));
+  }
+
+  const required: number[] = [];
+  if (startCp != null && courseCps[0] !== startCp) required.push(startCp);
+  required.push(...courseCps);
+  if (finishCp != null && required[required.length - 1] !== finishCp) {
+    required.push(finishCp);
+  }
+
+  const remaining = new Map(addCounts);
+  const result = marks.map((mark) => ({ ...mark, added: mark.added === true }));
+  let p = 0;
+  if (result[0]?.cp_number === startCp && required[0] !== startCp) {
+    p = 1;
+  }
+
+  for (const cp of required) {
+    let q = p;
+    while (
+      q < result.length &&
+      (result[q].cp_number !== cp || (result[q].cp_number === finishCp && cp !== finishCp))
+    ) {
+      q += 1;
+    }
+    if (q < result.length) {
+      p = q + 1;
+      continue;
+    }
+    const left = remaining.get(cp) ?? 0;
+    if (left <= 0) break;
+    remaining.set(cp, left - 1);
+    let at = p;
+    let finishAt = -1;
+    for (let i = result.length - 1; i >= 0; i -= 1) {
+      if (result[i].cp_number === finishCp) {
+        finishAt = i;
+        break;
+      }
+    }
+    if (finishAt >= 0 && at >= finishAt && cp !== finishCp) at = finishAt;
+    result.splice(at, 0, {
+      cp_number: cp,
+      mark_time: syntheticMarkTime(result[at - 1], result[at]),
+      added: true,
+    });
+    p = at + 1;
+  }
+
+  const flagLeft = new Map(addCounts);
+  for (const mark of result) {
+    const left = flagLeft.get(mark.cp_number) ?? 0;
+    if (left > 0) {
+      mark.added = true;
+      flagLeft.set(mark.cp_number, left - 1);
+    }
+  }
+
+  return result.map((mark, index) => ({
+    ...mark,
+    seq: mark.seq && mark.seq > 0 ? mark.seq : index + 1,
+  }));
+}
+
 export function buildSplitCells(
   rows: { marks?: unknown }[],
   cols: SplitCol[],

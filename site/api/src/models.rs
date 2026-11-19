@@ -321,6 +321,9 @@ pub struct PublishMark {
     pub seq: i32,
     pub cp_number: i32,
     pub mark_time: String,
+    /// Вручную добавленная отметка (корректировка на финише).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
