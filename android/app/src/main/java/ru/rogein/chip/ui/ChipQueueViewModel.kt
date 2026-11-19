@@ -41,6 +41,7 @@ import ru.rogein.chip.parse.ReceiptMark
 import ru.rogein.chip.parse.ReceiptText
 import ru.rogein.chip.parse.SplitReceipt
 import ru.rogein.chip.parse.applyAddedCps
+import ru.rogein.chip.parse.marksWithAddedStart
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.displayBirthDate
 import ru.rogein.chip.parse.filterCourseCps
@@ -696,7 +697,7 @@ class ChipQueueViewModel(
         }
     }
 
-    fun addMissingCp(logicalId: Int, courseName: String, cp: Int) {
+    fun addMissingCp(logicalId: Int, courseName: String, cp: Int, time: String? = null) {
         if (cp <= 0) {
             _status.value = if (isRogaine(settings.value.sportKind)) "Укажите номер КП" else "Выберите КП дистанции"
             return
@@ -706,10 +707,16 @@ class ChipQueueViewModel(
                 if (isRogaine(settings.value.sportKind)) {
                     repository.event.addRogainePersonalCp(logicalId, cp)
                 } else {
-                    repository.event.addMissingCp(logicalId, courseName, cp)
+                    repository.event.addMissingCp(logicalId, courseName, cp, time)
                 }
                 repository.requestLiveSend()
-                _status.value = "№ $logicalId: добавлен КП $cp, результат пересчитан"
+                val startNote =
+                    if (!isRogaine(settings.value.sportKind) && cp == settings.value.startCp && !time.isNullOrBlank()) {
+                        " (старт $time)"
+                    } else {
+                        ""
+                    }
+                _status.value = "№ $logicalId: добавлен КП $cp$startNote, результат пересчитан"
             } catch (e: Exception) {
                 _status.value = e.message ?: "Не удалось добавить КП"
             }
@@ -2568,13 +2575,22 @@ class ChipQueueViewModel(
         settings: EventSettings,
         required: List<Int>,
     ): List<ReceiptMark> {
-        val window = orientPunchWindow(row.punches, settings.startCp, settings.finishCp)
+        val addCounts = EventStore.addCpCounts(row.logicalId, row.course, corrections.value)
+        val addTimes = EventStore.addCpTimes(row.logicalId, row.course, corrections.value)
+        val base = marksWithAddedStart(
+            row.punches,
+            settings.startCp,
+            addCounts,
+            addTimes,
+        )
+        val window = orientPunchWindow(base, settings.startCp, settings.finishCp)
         val expanded = applyAddedCps(
             window,
             required,
-            EventStore.addCpCounts(row.logicalId, row.course, corrections.value),
+            addCounts,
             settings.startCp,
             settings.finishCp,
+            addTimes,
         )
         return expanded.map { ReceiptMark(it.cp, it.seconds, it.added) }
     }

@@ -284,6 +284,48 @@ class OrientScoringTest {
     }
 
     @Test
+    fun missingStartWithoutAddIsDns() {
+        val marks = listOf(
+            mark(31, 10, 5),
+            mark(32, 10, 10),
+            mark(240, 10, 20),
+        )
+        val calc = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to listOf(31, 32)),
+            emptySet(),
+            emptyList(),
+            emptyMap(),
+        )
+        assertEquals(STATUS_DNS, calc.status)
+        assertEquals(true, calc.diagnostics.contains("start_missing"))
+    }
+
+    @Test
+    fun missingStartWithManualTimeIsOk() {
+        val marks = listOf(
+            mark(31, 10, 5),
+            mark(32, 10, 10),
+            mark(240, 10, 20),
+        )
+        val calc = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to listOf(31, 32)),
+            emptySet(),
+            emptyList(),
+            mapOf(241 to 1),
+            mapOf(241 to 10 * 3600),
+        )
+        assertEquals(STATUS_OK, calc.status)
+        assertEquals(2, calc.taken)
+        assertEquals(20 * 60, calc.elapsedSeconds)
+    }
+
+    @Test
     fun uniqueCourseCopyNameAddsCopySuffix() {
         assertEquals("D1 (копия)", uniqueCourseCopyName("D1", listOf("D1", "D2")))
         assertEquals("D1 (копия 2)", uniqueCourseCopyName("D1", listOf("D1", "D1 (копия)")))

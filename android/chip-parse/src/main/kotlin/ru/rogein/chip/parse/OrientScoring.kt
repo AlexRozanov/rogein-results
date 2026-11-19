@@ -194,12 +194,30 @@ fun courseProgress(
     }
 }
 
+/**
+ * Вставляет стартовую отметку из персональной корректировки с явным временем.
+ * Без времени старт не добавляется — его нельзя восстановить «посередине».
+ */
+fun marksWithAddedStart(
+    marks: List<OrientMark>,
+    startCp: Int,
+    addCounts: Map<Int, Int>,
+    addTimes: Map<Int, Int> = emptyMap(),
+): List<OrientMark> {
+    if (startCp <= 0) return marks
+    if (marks.any { it.cp == startCp }) return marks
+    if ((addCounts[startCp] ?: 0) <= 0) return marks
+    val seconds = addTimes[startCp] ?: return marks
+    return orientMarkOrder(marks + OrientMark(startCp, seconds, 0, added = true))
+}
+
 fun applyAddedCps(
     marks: List<OrientMark>,
     required: List<Int>,
     addCounts: Map<Int, Int>,
     startCp: Int = CP_START,
     finishCp: Int = CP_FINISH,
+    addTimes: Map<Int, Int> = emptyMap(),
 ): List<OrientMark> {
     if (required.isEmpty() || addCounts.values.all { it <= 0 }) return marks
     val remaining = addCounts.filterValues { it > 0 }.toMutableMap()
@@ -224,14 +242,27 @@ fun applyAddedCps(
         var at = p
         val finishAt = result.indexOfLast { it.cp == finishCp }
         if (finishAt >= 0 && at >= finishAt && cp != finishCp) at = finishAt
-        result.add(at, syntheticAddedMark(cp, result.getOrNull(at - 1), result.getOrNull(at)))
+        result.add(
+            at,
+            syntheticAddedMark(
+                cp,
+                result.getOrNull(at - 1),
+                result.getOrNull(at),
+                addTimes[cp],
+            ),
+        )
         p = at + 1
     }
     return result
 }
 
-private fun syntheticAddedMark(cp: Int, prev: OrientMark?, next: OrientMark?): OrientMark {
-    val seconds = when {
+private fun syntheticAddedMark(
+    cp: Int,
+    prev: OrientMark?,
+    next: OrientMark?,
+    forcedSeconds: Int? = null,
+): OrientMark {
+    val seconds = forcedSeconds ?: when {
         prev != null && next != null && next.seconds > prev.seconds ->
             prev.seconds + (next.seconds - prev.seconds) / 2
         prev != null -> prev.seconds
@@ -425,6 +456,7 @@ fun calculateOrientResult(
     removedCps: Set<Int>,
     exclusions: List<OrientExclusion>,
     addCpCounts: Map<Int, Int>,
+    addCpTimes: Map<Int, Int> = emptyMap(),
 ): OrientCalc {
     val diagnostics = mutableListOf<String>()
     val name = courseName.trim()
@@ -444,8 +476,35 @@ fun calculateOrientResult(
         }
         else -> filterCourseCps(courses.getValue(key), removedCps)
     }
+    return calculateOrientResultInner(
+        marks = marks,
+        settings = settings,
+        required = required,
+        key = key,
+        diagnostics = diagnostics,
+        exclusions = exclusions,
+        addCpCounts = addCpCounts,
+        addCpTimes = addCpTimes,
+    )
+}
+
+private fun calculateOrientResultInner(
+    marks: List<OrientMark>,
+    settings: OrientSettings,
+    required: List<Int>?,
+    key: String,
+    diagnostics: MutableList<String>,
+    exclusions: List<OrientExclusion>,
+    addCpCounts: Map<Int, Int>,
+    addCpTimes: Map<Int, Int>,
+): OrientCalc {
     val startCp = settings.startCp
-    val sorted = orientMarkOrder(marks)
+    val sorted = marksWithAddedStart(
+        orientMarkOrder(marks),
+        startCp,
+        addCpCounts,
+        addCpTimes,
+    )
     if (sorted.isEmpty()) {
         diagnostics += "no_marks"
         return OrientCalc(STATUS_DNS, 0, 0, diagnostics)
@@ -462,7 +521,7 @@ fun calculateOrientResult(
     val windowEnd = finishIdx ?: (sorted.lastIndex)
     val window = sorted.subList(startIdx, windowEnd + 1).toList()
     val expanded = required?.let {
-        applyAddedCps(window, it, addCpCounts, startCp, settings.finishCp)
+        applyAddedCps(window, it, addCpCounts, startCp, settings.finishCp, addCpTimes)
     } ?: window
     val punches = expanded.map { it.cp }
     val taken = required?.let { courseSubsequenceTaken(punches, it) } ?: 0

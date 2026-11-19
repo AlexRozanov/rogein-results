@@ -159,7 +159,9 @@ import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.nextFreeTeamId
 import ru.rogein.chip.parse.formatDayClock
 import ru.rogein.chip.parse.formatElapsed
+import ru.rogein.chip.parse.marksWithAddedStart
 import ru.rogein.chip.parse.orientPunchWindow
+import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.parse.rogaineSplitRows
 import ru.rogein.chip.parse.RogaineSplitKind
 import ru.rogein.chip.parse.protocolRunStatus
@@ -2625,7 +2627,7 @@ fun ResultsScreen(
     liveUrl: String?,
     liveShareText: String?,
     onSendLive: () -> Unit,
-    onAddCp: (Int, String, Int) -> Unit,
+    onAddCp: (Int, String, Int, String?) -> Unit,
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
@@ -3041,7 +3043,7 @@ private fun ResultRowDetails(
     startCp: Int,
     finishCp: Int,
     onClose: () -> Unit,
-    onAddCp: (Int, String, Int) -> Unit,
+    onAddCp: (Int, String, Int, String?) -> Unit,
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     onAssignCourse: (Int, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
@@ -3063,11 +3065,15 @@ private fun ResultRowDetails(
         removedCps,
     )
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
-    val window = orientPunchWindow(row.punches, startCp, finishCp)
-    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp)
+    val addTimes = EventStore.addCpTimes(id, row.course, corrections)
+    val baseMarks = marksWithAddedStart(row.punches, startCp, addCounts, addTimes)
+    val window = orientPunchWindow(baseMarks, startCp, finishCp)
+    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp, addTimes)
     val addable = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
     var marksOpen by remember { mutableStateOf(false) }
     var courseChangeOpen by remember { mutableStateOf(false) }
+    var pendingStartCp by remember { mutableStateOf<Int?>(null) }
+    var startPunchTime by remember { mutableStateOf("") }
     var copyPrompt by remember { mutableStateOf<PunchCopyCandidate?>(null) }
     var copyTakeFrom by remember { mutableStateOf(false) }
     var extraCopyNumber by remember { mutableStateOf("") }
@@ -3217,16 +3223,29 @@ private fun ResultRowDetails(
                     cps = formatCps,
                     added = added,
                     removed = removed,
-                    onAdd = { cp -> onAddCp(id, row.course, cp) },
+                    onAdd = { cp -> onAddCp(id, row.course, cp, null) },
                     onRemove = { cp, mode -> onRemoveCp(id, cp, mode) },
                 )
             } else if (addable.isNotEmpty()) {
                 CourseChoice(
                     "Добавить взятие КП",
-                    addable.map { (cp, count) -> if (count > 1) "$cp (ещё $count)" else cp.toString() },
+                    addable.map { (cp, count) ->
+                        val label = when (cp) {
+                            startCp -> "$cp старт"
+                            finishCp -> "$cp финиш"
+                            else -> cp.toString()
+                        }
+                        if (count > 1) "$label (ещё $count)" else label
+                    },
                     "",
                 ) { value ->
-                    value.substringBefore(" ").toIntOrNull()?.let { onAddCp(id, row.course, it) }
+                    val cp = value.substringBefore(" ").toIntOrNull() ?: return@CourseChoice
+                    if (cp == startCp) {
+                        pendingStartCp = cp
+                        startPunchTime = ""
+                    } else {
+                        onAddCp(id, row.course, cp, null)
+                    }
                 }
             }
             val personal = corrections.filter {
@@ -3285,6 +3304,45 @@ private fun ResultRowDetails(
             onConfirm = { next ->
                 onAssignCourse(id, row.course, next)
                 courseChangeOpen = false
+            },
+        )
+    }
+    if (pendingStartCp != null && id != null) {
+        val normalized = normalizeStartTime(startPunchTime)
+        val timeOk = isCompleteStartTime(startPunchTime) && parseDaySeconds(normalized) != null
+        AlertDialog(
+            onDismissRequest = { pendingStartCp = null },
+            title = { Text("Время стартового КП") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Укажите время отметки старта (КП $startCp). От него считается результат.",
+                        color = Muted,
+                    )
+                    OutlinedTextField(
+                        value = startPunchTime,
+                        onValueChange = { startPunchTime = filterStartTime(it) },
+                        singleLine = true,
+                        label = { Text("Время старта") },
+                        placeholder = { Text("ЧЧ:ММ:СС") },
+                        supportingText = { Text("Только цифры, двоеточия подставятся сами") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = timeOk,
+                    onClick = {
+                        val cp = pendingStartCp ?: return@TextButton
+                        pendingStartCp = null
+                        onAddCp(id, row.course, cp, normalized)
+                    },
+                ) { Text("Добавить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingStartCp = null }) { Text("Отмена") }
             },
         )
     }
@@ -3965,13 +4023,15 @@ fun CorrectionsScreen(
     corrections: List<CorrectionEntity>,
     startCp: Int,
     finishCp: Int,
-    onAddCp: (Int, String, Int) -> Unit,
+    onAddCp: (Int, String, Int, String?) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
     sportKind: String = SPORT_ORIENT,
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
     legendCps: List<Int> = emptyList(),
 ) {
     val rogaine = isRogaine(sportKind)
+    var pendingStart by remember { mutableStateOf<Triple<Int, String, Int>?>(null) }
+    var startPunchTime by remember { mutableStateOf("") }
     val personal = corrections.filter { row ->
         row.logicalId != null && (
             row.type == "add_cp" ||
@@ -4021,7 +4081,7 @@ fun CorrectionsScreen(
                             cps = formatCps,
                             added = added,
                             removed = removedPersonal,
-                            onAdd = { cp -> onAddCp(id, selected.course, cp) },
+                            onAdd = { cp -> onAddCp(id, selected.course, cp, null) },
                             onRemove = { cp, mode -> onRemoveCp(id, cp, mode) },
                         )
                     }
@@ -4045,7 +4105,7 @@ fun CorrectionsScreen(
             val selected = candidates.find { it.second == personId }
             val missed = selected?.third.orEmpty()
             Text(
-                "Только участники с невзятыми КП. После выбора появляется список пропущенных пунктов — как в финишном протоколе.",
+                "Только участники с невзятыми КП. После выбора появляется список пропущенных пунктов — как в финишном протоколе. Для старта нужно указать время.",
                 color = Muted,
             )
             if (candidates.isEmpty()) {
@@ -4071,7 +4131,14 @@ fun CorrectionsScreen(
                         options = missed,
                         current = missed.find { it.first == addCp },
                         placeholder = "Выберите КП",
-                        optionLabel = { (cp, count) -> if (count > 1) "$cp (ещё $count)" else "КП $cp" },
+                        optionLabel = { (cp, count) ->
+                            val label = when (cp) {
+                                startCp -> "КП $cp старт"
+                                finishCp -> "КП $cp финиш"
+                                else -> "КП $cp"
+                            }
+                            if (count > 1) "$label (ещё $count)" else label
+                        },
                         onSelect = { addCp = it.first },
                     )
                     Button(
@@ -4079,12 +4146,56 @@ fun CorrectionsScreen(
                         onClick = {
                             val id = personId ?: return@Button
                             val cp = addCp ?: return@Button
-                            onAddCp(id, selected.first.course, cp)
+                            if (cp == startCp) {
+                                pendingStart = Triple(id, selected.first.course, cp)
+                                startPunchTime = ""
+                            } else {
+                                onAddCp(id, selected.first.course, cp, null)
+                            }
                             addCp = null
                         },
                     ) { Text("Добавить взятие КП") }
                 }
             }
+        }
+        if (pendingStart != null) {
+            val normalized = normalizeStartTime(startPunchTime)
+            val timeOk = isCompleteStartTime(startPunchTime) && parseDaySeconds(normalized) != null
+            AlertDialog(
+                onDismissRequest = { pendingStart = null },
+                title = { Text("Время стартового КП") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Укажите время отметки старта (КП $startCp).",
+                            color = Muted,
+                        )
+                        OutlinedTextField(
+                            value = startPunchTime,
+                            onValueChange = { startPunchTime = filterStartTime(it) },
+                            singleLine = true,
+                            label = { Text("Время старта") },
+                            placeholder = { Text("ЧЧ:ММ:СС") },
+                            supportingText = { Text("Только цифры, двоеточия подставятся сами") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = timeOk,
+                        onClick = {
+                            val target = pendingStart ?: return@TextButton
+                            pendingStart = null
+                            onAddCp(target.first, target.second, target.third, normalized)
+                        },
+                    ) { Text("Добавить") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingStart = null }) { Text("Отмена") }
+                },
+            )
         }
         if (personal.isEmpty()) {
             Text("Персональных корректировок нет", color = Muted)
@@ -4389,16 +4500,28 @@ private fun StartModeRow(
 
 private fun displayStartTime(raw: String): String = raw.trim()
 
-private fun filterStartTime(raw: String): String =
-    raw.filter { it.isDigit() || it == ':' }.take(8)
+/** Маска ЧЧ:ММ:СС: двоеточия подставляются сами, вводятся только цифры. */
+private fun filterStartTime(raw: String): String {
+    val digits = raw.filter { it.isDigit() }.take(6)
+    return buildString {
+        digits.forEachIndexed { index, ch ->
+            if (index == 2 || index == 4) append(':')
+            append(ch)
+        }
+    }
+}
+
+private fun isCompleteStartTime(raw: String): Boolean =
+    raw.filter { it.isDigit() }.length == 6
 
 private fun normalizeStartTime(raw: String): String {
-    val parts = raw.trim().split(':').map { it.trim() }.filter { it.isNotEmpty() }
-    if (parts.isEmpty()) return ""
-    val hour = parts.getOrNull(0)?.toIntOrNull() ?: return ""
-    val minute = parts.getOrNull(1)?.toIntOrNull() ?: 0
-    val second = parts.getOrNull(2)?.toIntOrNull() ?: 0
-    if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return raw.trim()
+    val digits = raw.filter { it.isDigit() }
+    if (digits.isEmpty()) return ""
+    val full = digits.padEnd(6, '0').take(6)
+    val hour = full.substring(0, 2).toIntOrNull() ?: return ""
+    val minute = full.substring(2, 4).toIntOrNull() ?: return ""
+    val second = full.substring(4, 6).toIntOrNull() ?: return ""
+    if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return ""
     return "%02d:%02d:%02d".format(hour, minute, second)
 }
 
@@ -4534,9 +4657,19 @@ private fun addableCpsFor(
         removedCps,
     )
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
-    val window = orientPunchWindow(row.punches, startCp, finishCp)
-    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp)
-    return addableCourseCps(courseProgress(expanded.map { it.cp }, required))
+    val addTimes = EventStore.addCpTimes(id, row.course, corrections)
+    val base = marksWithAddedStart(row.punches, startCp, addCounts, addTimes)
+    val window = orientPunchWindow(base, startCp, finishCp)
+    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp, addTimes)
+    val fromCourse = addableCourseCps(courseProgress(expanded.map { it.cp }, required))
+    val startMissing = startCp > 0 &&
+        row.punches.none { it.cp == startCp } &&
+        (addCounts[startCp] ?: 0) == 0
+    return if (startMissing) {
+        listOf(startCp to 1) + fromCourse.filter { it.first != startCp }
+    } else {
+        fromCourse
+    }
 }
 
 @Composable
@@ -4605,7 +4738,11 @@ private fun formatCp(cp: Int, settings: EventSettings): String = when (cp) {
 internal fun correctionLabel(row: CorrectionEntity, rogaine: Boolean = false): String = when (row.type) {
     COPY_PUNCHES -> "отметки с № ${EventStore.copiedFromLogicalId(row.logicalId, listOf(row)) ?: "—"}"
     DID_NOT_FINISH -> "не финишировал"
-    "add_cp" -> "добавлен КП ${EventStore.correctionCp(row) ?: "—"}"
+    "add_cp" -> {
+        val cp = EventStore.correctionCp(row) ?: "—"
+        val time = EventStore.correctionTime(row)
+        if (time.isNotBlank()) "добавлен КП $cp ($time)" else "добавлен КП $cp"
+    }
     "assign_course" -> "дистанция «${EventStore.correctionCourse(row)}»"
     "remove_cp" -> {
         val cp = EventStore.correctionCp(row) ?: "—"

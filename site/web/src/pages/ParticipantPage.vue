@@ -33,7 +33,7 @@ type PathPoint = {
   kind?: string | null;
 };
 
-type Mark = { seq: number; cp_number: number; mark_time: string };
+type Mark = { seq: number; cp_number: number; mark_time: string; added?: boolean };
 
 type SourceId = number | string;
 
@@ -201,7 +201,12 @@ const courseControls = computed(() => {
 const classifiedPunches = computed(() => {
   if (!isOrient.value) return [];
   return classifyCoursePunches(
-    personMarks.value,
+    personMarks.value.map((mark) => ({
+      seq: mark.seq,
+      cp_number: mark.cp_number,
+      mark_time: mark.mark_time,
+      added: mark.added,
+    })),
     courseControls.value,
     startCp.value,
     finishCp.value,
@@ -405,6 +410,7 @@ const orientSplitView = computed(() => {
     pace: string | null;
     wrong: boolean;
     note: string;
+    added: boolean;
   }> = [];
   let cpOrder = 1;
   punches.forEach((row, index) => {
@@ -428,12 +434,13 @@ const orientSplitView = computed(() => {
         key: row.seq != null ? `s-${row.seq}` : `start-${index}`,
         role: "start",
         n: null,
-        label: "Старт",
+        label: row.added ? "Старт*" : "Старт",
         time: fmtMarkTime(row.mark_time) || "—",
         split: "",
         pace: null,
         wrong: false,
-        note: "",
+        note: row.added ? "добавлено вручную" : "",
+        added: row.added === true,
       });
       return;
     }
@@ -442,12 +449,17 @@ const orientSplitView = computed(() => {
       key: row.seq != null ? `s-${row.seq}` : `p-${index}-${row.cp}`,
       role: finishRow ? "finish" : "cp",
       n: finishRow ? null : cpOrder++,
-      label: finishRow ? "Финиш" : formatCpParen(row.cp),
+      label: finishRow
+        ? row.added
+          ? "Финиш*"
+          : "Финиш"
+        : formatCpParen(row.cp, row.added === true),
       time: formatRaceTime(elapsedSec),
       split: splitSec == null ? "" : formatSplitMmSs(splitSec),
       pace,
       wrong: row.kind === "extra" || row.kind === "out_of_order",
-      note: punchKindNote(row.kind),
+      note: row.added ? "добавлено вручную" : punchKindNote(row.kind),
+      added: row.added === true,
     });
   });
   const elapsed = selectedResult.value?.elapsed_seconds ?? person.value?.elapsed_seconds ?? null;
@@ -520,6 +532,7 @@ function asMarks(raw: unknown): Mark[] {
       seq: Number.isFinite(seq) && seq > 0 ? seq : out.length + 1,
       cp_number: cp,
       mark_time: String(row.mark_time ?? row.markTime ?? ""),
+      added: row.added === true,
     });
   }
   return out.sort((a, b) => a.seq - b.seq);
@@ -1002,6 +1015,7 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
                     'is-wrong': mark.wrong,
                     'is-start': mark.role === 'start',
                     'is-finish': mark.role === 'finish',
+                    'is-added': mark.added,
                   }"
                 >
                   <td class="col-n">{{ mark.n ?? "" }}</td>

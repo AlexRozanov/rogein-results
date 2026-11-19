@@ -32,6 +32,7 @@ import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.applyRogaineFormat
 import ru.rogein.chip.parse.assignPlaces
 import ru.rogein.chip.parse.assignRogaineTeamPlaces
+import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.calculateOrientResult
 import ru.rogein.chip.parse.COPY_PUNCHES
 import ru.rogein.chip.parse.DID_NOT_FINISH
@@ -43,8 +44,10 @@ import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.marksWithAddedStart
 import ru.rogein.chip.parse.remapCourseLegMeters
 import ru.rogein.chip.parse.orientCourseLegs
+import ru.rogein.chip.parse.orientPunchWindow
 import ru.rogein.chip.parse.personAwardAge
 import ru.rogein.chip.parse.personAwardCategories
 import ru.rogein.chip.parse.protocolStatusRank
@@ -200,13 +203,23 @@ class EventStore(
         )
     }
 
-    suspend fun addMissingCp(logicalId: Int, courseName: String, cp: Int) {
+    suspend fun addMissingCp(logicalId: Int, courseName: String, cp: Int, time: String? = null) {
+        val payload = JSONObject().put("cp_number", cp)
+        val normalized = time?.trim().orEmpty()
+        if (normalized.isNotEmpty()) {
+            if (parseDaySeconds(normalized) == null) {
+                error("Время отметки: ЧЧ:ММ:СС")
+            }
+            payload.put("time", normalized)
+        } else if (cp == settingsNow().startCp) {
+            error("Для стартового КП укажите время отметки")
+        }
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "add_cp",
                 logicalId = logicalId,
                 courseName = courseName,
-                payloadJson = JSONObject().put("cp_number", cp).toString(),
+                payloadJson = payload.toString(),
             ),
         )
     }
@@ -505,6 +518,7 @@ class EventStore(
             courses,
             scored,
             removed,
+            corrections,
             requireResults = false,
         )
         putLive(settings.apiBaseUrl, slug, payload, settings.publishToken)
@@ -585,7 +599,7 @@ class EventStore(
         val scored = score(items, people, courses, settings, corrections, exclusions)
         if (scored.isEmpty()) error("Нет считанных результатов")
         val removed = removedCps(corrections)
-        val payload = buildPublishJson(settings, title, people, courses, scored, removed)
+        val payload = buildPublishJson(settings, title, people, courses, scored, removed, corrections)
         val url = "${normalizeBase(settings.apiBaseUrl)}/api/events/$slug"
         val (code, body) = request("PUT", url, payload, settings.publishToken)
         if (code !in 200..299) error("публикация $code: ${body.take(200)}")
@@ -629,6 +643,7 @@ class EventStore(
                 val course = assigned.ifBlank { item.courseName.ifBlank { person?.currentCourse.orEmpty() } }
                 val punches = parsePunches(item.punchesJson)
                 val adds = addCpCounts(item.logicalId, course, corrections)
+                val addTimes = addCpTimes(item.logicalId, course, corrections)
                 val dnf = isDidNotFinish(item.logicalId, corrections)
                 val calc = if (dnf) {
                     OrientCalc(STATUS_DNF, 0, 0, listOf(DID_NOT_FINISH))
@@ -654,6 +669,7 @@ class EventStore(
                         removed,
                         rules,
                         adds,
+                        addTimes,
                     )
                 }
                 ScoredResult(
@@ -777,6 +793,26 @@ class EventStore(
             }
             return out
         }
+
+        fun addCpTimes(logicalId: Int?, courseName: String, corrections: List<CorrectionEntity>): Map<Int, Int> {
+            if (logicalId == null) return emptyMap()
+            val out = HashMap<Int, Int>()
+            for (row in corrections) {
+                if (row.type != "add_cp" || row.logicalId != logicalId) continue
+                if (row.courseName.isNotBlank() && !row.courseName.equals(courseName, true)) continue
+                val cp = payloadInt(row.payloadJson, "cp_number") ?: continue
+                if (out.containsKey(cp)) continue
+                val seconds = correctionTimeSeconds(row) ?: continue
+                out[cp] = seconds
+            }
+            return out
+        }
+
+        fun correctionTime(row: CorrectionEntity): String =
+            payloadString(row.payloadJson, "time")
+
+        fun correctionTimeSeconds(row: CorrectionEntity): Int? =
+            parseDaySeconds(correctionTime(row))
 
         private fun parsePunches(json: String): List<OrientMark> {
             return try {
@@ -1422,6 +1458,43 @@ class EventStore(
             return null
         }
 
+        private fun publishExpandedPunches(
+            row: ScoredResult,
+            settings: EventSettings,
+            courses: List<StartCourse>,
+            corrections: List<CorrectionEntity>,
+            removed: Set<Int>,
+        ): List<OrientMark> {
+            if (isRogaine(settings.sportKind)) return row.punches
+            val adds = addCpCounts(row.logicalId, row.course, corrections)
+            val addTimes = addCpTimes(row.logicalId, row.course, corrections)
+            val required = filterCourseCps(
+                courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+                removed,
+            )
+            val base = marksWithAddedStart(row.punches, settings.startCp, adds, addTimes)
+            val window = orientPunchWindow(base, settings.startCp, settings.finishCp)
+            return applyAddedCps(window, required, adds, settings.startCp, settings.finishCp, addTimes)
+        }
+
+        private fun publishAddedCpsJson(
+            row: ScoredResult,
+            settings: EventSettings,
+            corrections: List<CorrectionEntity>,
+        ): JSONObject {
+            val out = JSONObject()
+            if (isRogaine(settings.sportKind)) {
+                for (cp in rogaineAddedCps(row.logicalId, corrections)) {
+                    out.put(cp.toString(), 1)
+                }
+            } else {
+                for ((cp, count) in addCpCounts(row.logicalId, row.course, corrections)) {
+                    out.put(cp.toString(), count)
+                }
+            }
+            return out
+        }
+
         private fun buildPublishJson(
             settings: EventSettings,
             title: String,
@@ -1429,6 +1502,7 @@ class EventStore(
             courses: List<StartCourse>,
             scored: List<ScoredResult>,
             removed: Set<Int>,
+            corrections: List<CorrectionEntity>,
             requireResults: Boolean = true,
         ): String {
             val groups = JSONArray()
@@ -1457,19 +1531,23 @@ class EventStore(
                 val person = row.logicalId?.let { id -> people.find { it.id == id } }
                 val birth = storedBirthDate(person?.birthDate.orEmpty())
                     .takeIf { it.matches(Regex("""^\d{4}-\d{2}-\d{2}$""")) }
+                val expanded = publishExpandedPunches(row, settings, courses, corrections, removed)
                 val marks = JSONArray()
-                row.punches.forEachIndexed { seq, punch ->
+                expanded.forEachIndexed { seq, punch ->
                     val h = punch.seconds / 3600
                     val m = (punch.seconds % 3600) / 60
                     val s = punch.seconds % 60
-                    marks.put(
-                        JSONObject()
-                            .put("seq", seq + 1)
-                            .put("cp_number", punch.cp)
-                            .put("mark_time", "%sT%02d:%02d:%02d".format(Locale.US, settings.competitionDate, h, m, s)),
-                    )
+                    val obj = JSONObject()
+                        .put("seq", seq + 1)
+                        .put("cp_number", punch.cp)
+                        .put(
+                            "mark_time",
+                            "%sT%02d:%02d:%02d".format(Locale.US, settings.competitionDate, h, m, s),
+                        )
+                    if (punch.added) obj.put("added", true)
+                    marks.put(obj)
                 }
-                val path = livePath(row.punches, mapPoints, settings.startCp, settings.finishCp)
+                val path = livePath(expanded, mapPoints, settings.startCp, settings.finishCp)
                 val distanceM = liveDistanceM(
                     path,
                     settings.mapWidth?.toDouble(),
@@ -1491,7 +1569,7 @@ class EventStore(
                         .put("marks", marks)
                         .put("path", path)
                         .put("distance_m", distanceM ?: JSONObject.NULL)
-                        .put("added_cps", JSONObject()),
+                        .put("added_cps", publishAddedCpsJson(row, settings, corrections)),
                 )
                 return sourceId
             }

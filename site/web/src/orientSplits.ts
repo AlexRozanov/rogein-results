@@ -1,6 +1,8 @@
 export type SplitMark = {
   cp_number: number;
   mark_time: string;
+  added?: boolean;
+  seq?: number;
 };
 
 export type SplitCol = {
@@ -21,10 +23,23 @@ export function asMarks(raw: unknown): SplitMark[] {
   const out: SplitMark[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
-    const row = item as { cp_number?: unknown; mark_time?: unknown };
-    const cp = Number(row.cp_number);
+    const row = item as {
+      cp_number?: unknown;
+      cp?: unknown;
+      mark_time?: unknown;
+      markTime?: unknown;
+      added?: unknown;
+      seq?: unknown;
+    };
+    const cp = Number(row.cp_number ?? row.cp);
     if (!Number.isFinite(cp)) continue;
-    out.push({ cp_number: cp, mark_time: String(row.mark_time ?? "") });
+    const seq = Number(row.seq);
+    out.push({
+      cp_number: cp,
+      mark_time: String(row.mark_time ?? row.markTime ?? ""),
+      added: row.added === true,
+      seq: Number.isFinite(seq) && seq > 0 ? seq : undefined,
+    });
   }
   return out;
 }
@@ -95,12 +110,14 @@ export type ClassifiedPunch = {
   cp: number;
   seq: number | null;
   mark_time: string;
+  added?: boolean;
 };
 
 type PunchInput = {
   seq?: number;
   cp_number: number;
   mark_time?: string;
+  added?: boolean;
 };
 
 function markWindowIdx(marks: PunchInput[], startCp: number | null, finishCp: number | null) {
@@ -125,6 +142,7 @@ function emitPunch(mark: PunchInput, kind: PunchKind): ClassifiedPunch {
     cp: mark.cp_number,
     seq: Number.isFinite(Number(mark.seq)) ? Number(mark.seq) : null,
     mark_time: String(mark.mark_time ?? ""),
+    added: mark.added === true,
   };
 }
 
@@ -360,8 +378,9 @@ export function asOptionalIntList(raw: unknown): Array<number | null> {
   });
 }
 
-export function formatCpParen(cp: number): string {
-  return cp < 100 ? `( ${cp})` : `(${cp})`;
+export function formatCpParen(cp: number, added = false): string {
+  const body = cp < 100 ? `( ${cp})` : `(${cp})`;
+  return added ? `${body}*` : body;
 }
 
 export function buildSplitCells(

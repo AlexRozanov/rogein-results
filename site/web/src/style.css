@@ -1195,6 +1195,19 @@ th { color: #64748b; font-weight: 600; }
   background: #fef2f2;
 }
 
+.marks-table tr.is-added td {
+  background: color-mix(in srgb, var(--green) 8%, #fff);
+}
+
+.marks-table tr.is-added .col-cp {
+  font-weight: 650;
+}
+
+.marks-table tr.is-added .mark-note {
+  color: var(--slate);
+  font-weight: 600;
+}
+
 .mark-note {
   display: inline-block;
   margin-left: 6px;
