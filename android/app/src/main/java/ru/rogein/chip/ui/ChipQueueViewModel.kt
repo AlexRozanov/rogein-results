@@ -32,6 +32,7 @@ import ru.rogein.chip.parse.classifyIssueUid
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.Punch
+import ru.rogein.chip.parse.StationActiveSpeed
 import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.parse.SfrChipParser
 import ru.rogein.chip.parse.StationCheckReport
@@ -158,6 +159,7 @@ data class StationWritePrompt(
     val order: BlockOrder,
     val oldPointerEnd: Int?,
     val blockCount: Int,
+    val activeSpeed: StationActiveSpeed = StationActiveSpeed.DEFAULT,
 )
 
 interface CsvPicker {
@@ -181,6 +183,7 @@ interface ChipIo {
         oldPointerEnd: Int?,
         blockCount: Int,
         clock: LocalTime,
+        activeSpeed: StationActiveSpeed = StationActiveSpeed.DEFAULT,
     )
 }
 
@@ -276,6 +279,8 @@ class ChipQueueViewModel(
 
     private val _stationProgram = MutableStateFlow(StationProgram.Control)
     val stationProgram = _stationProgram.asStateFlow()
+    private val _stationActiveSpeed = MutableStateFlow(StationActiveSpeed.DEFAULT)
+    val stationActiveSpeed = _stationActiveSpeed.asStateFlow()
 
     private val _stationInspect = MutableStateFlow<String?>(null)
     val stationInspect = _stationInspect.asStateFlow()
@@ -919,6 +924,12 @@ class ChipQueueViewModel(
         promptStatus()
     }
 
+    fun setStationActiveSpeed(speed: StationActiveSpeed) {
+        _stationActiveSpeed.value = speed
+        _stationWritePrompt.value = null
+        promptStatus()
+    }
+
     fun onStationControlNumber(value: String) {
         _stationControlNumber.value = value.filter { it.isDigit() }.take(3)
         _stationWritePrompt.value = null
@@ -1230,11 +1241,15 @@ class ChipQueueViewModel(
         return n.takeIf { it in 1..255 && it != CP_START && it != CP_FINISH && it != CP_CLEAR }
     }
 
-    private fun stationProgramLabel(program: StationProgram, controlNumber: Int?): String =
-        if (program == StationProgram.Control) {
-            controlNumber?.let { "КП $it" } ?: "КП"
-        } else {
-            program.title
+    private fun stationProgramLabel(
+        program: StationProgram,
+        controlNumber: Int?,
+        activeSpeed: StationActiveSpeed = _stationActiveSpeed.value,
+    ): String =
+        when (program) {
+            StationProgram.Control -> controlNumber?.let { "КП $it" } ?: "КП"
+            StationProgram.Active -> "${program.title} ${activeSpeed.label}"
+            else -> program.title
         }
 
     fun markReading() {
@@ -1298,7 +1313,7 @@ class ChipQueueViewModel(
                 _chipReady.value = true
                 _chipLogicalId.value = dump.logicalId
                 _chipStationLabel.value = SfrChipParser.stationRole(blocks)?.let {
-                    SfrChipParser.stationCommandLabel(it.command, it.cp)
+                    SfrChipParser.stationCommandLabel(it)
                 }
                 val station = _chipStationLabel.value
                 val label = when {
@@ -2081,6 +2096,7 @@ class ChipQueueViewModel(
             order = order,
             oldPointerEnd = oldEnd.takeIf { it >= 5 },
             blockCount = count,
+            activeSpeed = _stationActiveSpeed.value,
         )
         _status.value = "Чип на месте. Подтвердите запись станции «${stationProgramLabel(program, controlNumber)}»."
     }
@@ -2100,8 +2116,10 @@ class ChipQueueViewModel(
             return
         }
         val command = pending.program.command ?: return
-        val label = stationProgramLabel(pending.program, pending.controlNumber)
+        val label = stationProgramLabel(pending.program, pending.controlNumber, pending.activeSpeed)
         val setsClock = stationSetsClock(command)
+        // Сразу пишем на чип now+3 с и параллельно крутим отсчёт до этого момента.
+        // По нулю — приложить чип к станции (с телефона можно убрать после записи).
         val deadline = if (setsClock) System.currentTimeMillis() + STATION_CLOCK_LEAD_MS else 0L
         val clock = if (setsClock) {
             Instant.ofEpochMilli(deadline).atZone(ZoneId.systemDefault()).toLocalTime()
@@ -2119,6 +2137,7 @@ class ChipQueueViewModel(
                     pending.oldPointerEnd,
                     pending.blockCount,
                     clock,
+                    pending.activeSpeed,
                 )
                 if (setsClock) {
                     val current = _stationCountdown.value

@@ -379,7 +379,7 @@ export function asOptionalIntList(raw: unknown): Array<number | null> {
 }
 
 export function formatCpParen(cp: number, added = false): string {
-  const body = cp < 100 ? `( ${cp})` : `(${cp})`;
+  const body = `(${cp})`;
   return added ? `${body}*` : body;
 }
 

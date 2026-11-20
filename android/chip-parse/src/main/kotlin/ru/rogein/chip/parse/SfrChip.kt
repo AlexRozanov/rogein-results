@@ -78,7 +78,7 @@ enum class StationCommand {
     val modeBlock: ByteArray
         get() = when (this) {
             Control, Start, Finish, Clear -> STATION_MODE_BLOCK
-            Active -> STATION_ACTIVE_BLOCK
+            Active -> stationActiveBlock()
             Passive -> STATION_PASSIVE_BLOCK
             Battery -> STATION_BATTERY_BLOCK
         }
@@ -97,10 +97,43 @@ enum class StationCommand {
 data class StationRole(
     val command: StationCommand,
     val cp: Int?,
+    val activeSpeed: StationActiveSpeed? = null,
 )
 
 val STATION_MODE_BLOCK = byteArrayOf(0x00, 0x01, 0x00, 0x00)
 val STATION_PARAM_BLOCK = byteArrayOf(0x00, 0x25, 0x00, 0x00)
-val STATION_ACTIVE_BLOCK = byteArrayOf(0x02, 0x02, 0x00, 0x00)
+
+/**
+ * Скорость опроса чипов в активном режиме станции.
+ * Первый байт блока 4: 01=100%, 02=50%, 03=30%, 05=20%, 09=10%.
+ */
+enum class StationActiveSpeed(val percent: Int, val code: Int) {
+    Full(100, 0x01),
+    Half(50, 0x02),
+    Thirty(30, 0x03),
+    Twenty(20, 0x05),
+    Ten(10, 0x09),
+    ;
+
+    val label: String get() = "$percent%"
+
+    companion object {
+        val DEFAULT = Half
+
+        fun fromCode(code: Int): StationActiveSpeed? = entries.find { it.code == code }
+
+        fun fromBlock(block: ByteArray): StationActiveSpeed? {
+            if (block.size < BLOCK_SIZE) return null
+            if ((block[1].toInt() and 0xFF) != 0x02) return null
+            if (block[2].toInt() != 0 || block[3].toInt() != 0) return null
+            return fromCode(block[0].toInt() and 0xFF)
+        }
+    }
+}
+
+fun stationActiveBlock(speed: StationActiveSpeed = StationActiveSpeed.DEFAULT): ByteArray =
+    byteArrayOf(speed.code.toByte(), 0x02, 0x00, 0x00)
+
+val STATION_ACTIVE_BLOCK = stationActiveBlock(StationActiveSpeed.DEFAULT)
 val STATION_PASSIVE_BLOCK = byteArrayOf(0x03, 0x03, 0x03, 0x03)
 val STATION_BATTERY_BLOCK = byteArrayOf(0x05, 0x05, 0x05, 0x05)

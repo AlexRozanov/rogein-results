@@ -12,10 +12,10 @@ object SfrChipMemory {
     }
 
     /**
-     * Программатор станции: как в SFR basic, всё лишнее (номер, время очистки, отметки) — нули.
-     * Иначе финиш увидит старый логический номер.
-     * Старт/финиш/очистка/КП: блоки 4–6, хвост до конца чипа — нули.
-     * Активный/пассивный/батарея: только блок 4, 5–6 обнуляются.
+     * Программатор станции: блоки 4–6 (режим/КП/время) и обнуление заголовка 0–3.
+     * Хвост с отметками участника не трогаем — полная очистка 64–128 блоков
+     * не успевала за 3 с отсчёта, и чип приходилось держать на телефоне до нуля.
+     * Время на блоке 5 = момент «ноль» отсчёта (обычно now+3 с).
      */
     @Suppress("UNUSED_PARAMETER")
     fun stationProgramPlan(
@@ -26,17 +26,16 @@ object SfrChipMemory {
         oldPointerEnd: Int?,
         blockCount: Int = BLOCK_COUNT,
         controlNumber: Int? = null,
+        activeSpeed: StationActiveSpeed = StationActiveSpeed.DEFAULT,
     ): List<Pair<Int, ByteArray>> {
         require(blockCount in MIN_BLOCK_COUNT..BLOCK_COUNT) { "blockCount $blockCount" }
         val zeros = ByteArray(BLOCK_SIZE)
-        val lastWritable = blockCount - 1
         val cp = when (command) {
             StationCommand.Control -> controlNumber?.also(::requireStationControlNumber)
             else -> command.controlCp
         }
-        val plan = ArrayList<Pair<Int, ByteArray>>(lastWritable + 4)
-        // Блоки режима — первыми. Иначе длинная очистка хвоста не успевает,
-        // чип убирают на нуле отсчёта, и на нём остаётся прежний программатор.
+        val plan = ArrayList<Pair<Int, ByteArray>>(8)
+        // Сначала режим/КП/время — чип уже программатор, даже если запись оборвётся.
         if (cp != null) {
             plan += 4 to STATION_MODE_BLOCK.copyOf()
             plan += 5 to punchBlock(cp, hour, minute, second)
@@ -45,7 +44,12 @@ object SfrChipMemory {
             require(command.controlCp == null && command != StationCommand.Control) {
                 "для КП нужен номер 1…255, кроме $CP_START, $CP_FINISH, $CP_CLEAR"
             }
-            plan += 4 to command.modeBlock.copyOf()
+            val mode = if (command == StationCommand.Active) {
+                stationActiveBlock(activeSpeed)
+            } else {
+                command.modeBlock.copyOf()
+            }
+            plan += 4 to mode
             plan += 5 to zeros.copyOf()
             plan += 6 to zeros.copyOf()
         }
@@ -53,11 +57,6 @@ object SfrChipMemory {
         plan += 0 to zeros.copyOf()
         plan += 1 to zeros.copyOf()
         plan += 2 to zeros.copyOf()
-        if (cp != null) {
-            for (block in 7..lastWritable) {
-                plan += block to zeros.copyOf()
-            }
-        }
         return plan
     }
 

@@ -23,6 +23,16 @@ class ChipIdentityTest {
     }
 
     @Test
+    fun sameUidOtherLogicalIsFreshNotOverwrite() {
+        // Тот же физический чип выдали другому участнику — новый финиш, не перезапись №1.
+        val existing = listOf(ref("q1", "04AA", 1, "D1"))
+        assertEquals(
+            FinishEnqueueKind.Fresh,
+            classifyFinishEnqueue("04AA", 2, "D1", existing),
+        )
+    }
+
+    @Test
     fun sameUidOtherCourseIsFresh() {
         val existing = listOf(ref("q1", "04AA", 10, "6ч"))
         assertEquals(

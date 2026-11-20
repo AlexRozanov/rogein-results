@@ -80,8 +80,8 @@ class ChipCellLogTest {
         assertTrue(log.isService)
         assertEquals(StationCommand.Active, log.stationRole?.command)
         assertTrue(log.format().contains("тип=служебный"))
-        assertTrue(log.format().contains("карта включения активного режима станции"))
-        assertEquals("режим: активный", log.cells[4].label)
+        assertTrue(log.format().contains("карта включения активного режима станции (50%)"))
+        assertEquals("режим: активный 50%", log.cells[4].label)
         assertEquals("пусто", log.cells[5].label)
         assertNull(log.pointerEnd)
         assertNull(log.logicalId)
@@ -89,7 +89,18 @@ class ChipCellLogTest {
         val nfc = hid.map { it.reversed4() }
         val flipped = ChipCellLog.fromRaw("uid", nfc, nfc.size)
         assertEquals(StationCommand.Active, flipped.stationRole?.command)
-        assertEquals("режим: активный", flipped.cells[4].label)
+        assertEquals("режим: активный 50%", flipped.cells[4].label)
+    }
+
+    @Test
+    fun stationActiveSpeedVariantsAreDetected() {
+        for (speed in StationActiveSpeed.entries) {
+            val hid = stationBlocks(StationCommand.Active).map { it.copyOf() }.toMutableList()
+            hid[4] = stationActiveBlock(speed)
+            val log = ChipCellLog.fromRaw("uid", hid, hid.size)
+            assertEquals(StationCommand.Active, log.stationRole?.command)
+            assertEquals("режим: активный ${speed.label}", log.cells[4].label)
+        }
     }
 
     @Test

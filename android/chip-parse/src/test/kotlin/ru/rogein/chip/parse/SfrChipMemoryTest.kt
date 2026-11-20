@@ -63,17 +63,14 @@ class SfrChipMemoryTest {
         val byBlock = plan.associate { it.first to it.second }
         assertArrayEquals(ByteArray(4), byBlock[3])
         assertArrayEquals(ByteArray(4), byBlock[0])
-        assertArrayEquals(ByteArray(4), byBlock[7])
-        assertArrayEquals(ByteArray(4), byBlock[8])
-        assertArrayEquals(ByteArray(4), byBlock[9])
-        assertArrayEquals(ByteArray(4), byBlock[63])
-        assertFalse(byBlock.containsKey(64))
+        assertNull(byBlock[7])
+        assertNull(byBlock[63])
         assertArrayEquals(byteArrayOf(0x00, 0x01, 0x00, 0x00), byBlock[4])
         assertArrayEquals(byteArrayOf(CP_START.toByte(), 0x12, 0x00, 0x00), byBlock[5])
         assertArrayEquals(byteArrayOf(0x00, 0x25, 0x00, 0x00), byBlock[6])
         assertEquals(4, plan.first().first)
         assertTrue(plan.indexOfFirst { it.first == 4 } < plan.indexOfFirst { it.first == 3 })
-        assertTrue(plan.indexOfFirst { it.first == 6 } < plan.indexOfFirst { it.first == 7 })
+        assertEquals(7, plan.size)
     }
 
     @Test
@@ -103,6 +100,16 @@ class SfrChipMemoryTest {
             StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
         ).associate { it.first to it.second }
         assertArrayEquals(STATION_ACTIVE_BLOCK, active[4])
+        val activeFull = SfrChipMemory.stationProgramPlan(
+            StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
+            activeSpeed = StationActiveSpeed.Full,
+        ).associate { it.first to it.second }
+        assertArrayEquals(stationActiveBlock(StationActiveSpeed.Full), activeFull[4])
+        val activeTen = SfrChipMemory.stationProgramPlan(
+            StationCommand.Active, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
+            activeSpeed = StationActiveSpeed.Ten,
+        ).associate { it.first to it.second }
+        assertArrayEquals(stationActiveBlock(StationActiveSpeed.Ten), activeTen[4])
         val passive = SfrChipMemory.stationProgramPlan(
             StationCommand.Passive, 0, 0, 0, oldPointerEnd = 7, blockCount = 64,
         ).associate { it.first to it.second }

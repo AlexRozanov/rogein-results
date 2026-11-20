@@ -31,7 +31,7 @@ class ReceiptTextTest {
         assertTrue(text.contains("Дистанция D1"))
         assertTrue(text.contains("№ 8  Иванов Иван"))
         assertTrue(text.contains("Старт: 10:00:00"))
-        assertTrue(text.contains("( 31)"))
+        assertTrue(text.contains("(31)"))
         assertTrue(text.contains("Финиш:"))
         assertTrue(!text.contains("241"))
         assertTrue(!text.contains("240"))
@@ -124,7 +124,7 @@ class ReceiptTextTest {
             ),
         )
         assertTrue(text.contains("Старт: 10:00:00"))
-        assertTrue(text.contains("( 32)"))
+        assertTrue(text.contains("(32)"))
         assertTrue(text.contains("/км"))
         assertTrue(text.contains("Средняя скорость"))
         assertTrue(text.contains("Финиш:"))

@@ -29,6 +29,7 @@ import ru.rogein.chip.nfc.formatUid
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipMemory
+import ru.rogein.chip.parse.StationActiveSpeed
 import ru.rogein.chip.parse.StationCommand
 import ru.rogein.chip.queue.ChipQueueRepository
 import ru.rogein.chip.ui.ChipFeedback
@@ -222,6 +223,7 @@ class MainActivity : ComponentActivity() {
                 oldPointerEnd: Int?,
                 blockCount: Int,
                 clock: LocalTime,
+                activeSpeed: StationActiveSpeed,
             ) {
                 val tag = sessionTag ?: error("Чип убран")
                 val plan = SfrChipMemory.stationProgramPlan(
@@ -232,6 +234,7 @@ class MainActivity : ComponentActivity() {
                     oldPointerEnd,
                     blockCount,
                     controlNumber,
+                    activeSpeed = activeSpeed,
                 )
                 write(tag, order, plan) { done, total ->
                     runOnUiThread { viewModel.reportProgress("Запись станции $done/$total") }

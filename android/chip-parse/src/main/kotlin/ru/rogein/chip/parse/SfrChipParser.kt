@@ -145,7 +145,7 @@ object SfrChipParser {
     }
 
     private fun formatStationMode(role: StationRole, logicalBlock5: ByteArray?): String {
-        val label = stationCommandLabel(role.command, role.cp)
+        val label = stationCommandLabel(role)
         val hasClock = role.command == StationCommand.Control ||
             role.command == StationCommand.Start ||
             role.command == StationCommand.Finish ||
@@ -164,12 +164,26 @@ object SfrChipParser {
     private fun unrecognizedChip(): String =
         "Режим чипа не распознан. Это не карта станции."
 
-    fun stationCommandLabel(command: StationCommand, cp: Int? = command.controlCp): String = when (command) {
+    fun stationCommandLabel(role: StationRole): String =
+        stationCommandLabel(role.command, role.cp, role.activeSpeed)
+
+    fun stationCommandLabel(
+        command: StationCommand,
+        cp: Int? = command.controlCp,
+        activeSpeed: StationActiveSpeed? = null,
+    ): String = when (command) {
         StationCommand.Control -> "программатор станции КП ${cp ?: "—"}"
         StationCommand.Start -> "программатор станции «старт» (КП $CP_START)"
         StationCommand.Finish -> "программатор станции «финиш» (КП $CP_FINISH)"
         StationCommand.Clear -> "программатор станции «очистка» (КП $CP_CLEAR)"
-        StationCommand.Active -> "карта включения активного режима станции"
+        StationCommand.Active -> {
+            val speed = activeSpeed?.label
+            if (speed != null) {
+                "карта включения активного режима станции ($speed)"
+            } else {
+                "карта включения активного режима станции"
+            }
+        }
         StationCommand.Passive -> "карта пассивного режима станции"
         StationCommand.Battery -> "карта сброса и проверки батареи станции"
     }
@@ -184,8 +198,9 @@ object SfrChipParser {
     private data class OrientedStation(val role: StationRole, val block5: ByteArray?, val flipped: Boolean)
 
     private fun matchStation(block4: ByteArray, block5: ByteArray?, block6: ByteArray?): StationRole? {
-        if (block4.contentEquals(STATION_ACTIVE_BLOCK)) {
-            return StationRole(StationCommand.Active, null)
+        val activeSpeed = StationActiveSpeed.fromBlock(block4)
+        if (activeSpeed != null) {
+            return StationRole(StationCommand.Active, null, activeSpeed)
         }
         if (block4.contentEquals(STATION_PASSIVE_BLOCK)) {
             return StationRole(StationCommand.Passive, null)

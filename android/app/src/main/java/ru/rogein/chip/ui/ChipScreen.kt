@@ -38,12 +38,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
@@ -92,6 +96,7 @@ import ru.rogein.chip.parse.CP_START
 import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipMemoryLog
 import ru.rogein.chip.parse.SPORT_ORIENT
+import ru.rogein.chip.parse.StationActiveSpeed
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.nextFreeLogicalId
 import ru.rogein.chip.parse.nextFreeTeamId
@@ -143,6 +148,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     val courseCheckName by viewModel.courseCheckName.collectAsStateWithLifecycle()
     val courseCheckReport by viewModel.courseCheckReport.collectAsStateWithLifecycle()
     val stationControlNumber by viewModel.stationControlNumber.collectAsStateWithLifecycle()
+    val stationActiveSpeed by viewModel.stationActiveSpeed.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
     val selectedId by viewModel.selectedId.collectAsStateWithLifecycle()
     val addingNew by viewModel.addingNew.collectAsStateWithLifecycle()
@@ -298,8 +304,10 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     stationProgram = stationProgram,
                     stationInspect = stationInspect,
                     stationControlNumber = stationControlNumber,
+                    stationActiveSpeed = stationActiveSpeed,
                     onStationProgram = viewModel::setStationProgram,
                     onStationControlNumber = viewModel::onStationControlNumber,
+                    onStationActiveSpeed = viewModel::setStationActiveSpeed,
                     onDeleteQueued = viewModel::deleteQueued,
                     liveReady = EventStore.liveReady(settings),
                     sportKind = settings.sportKind,
@@ -521,7 +529,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             onDismissRequest = viewModel::cancelStationWrite,
             title = { Text("Записать станцию?") },
             text = {
-                Text(stationWriteConfirmText(prompt.program, prompt.controlNumber))
+                Text(stationWriteConfirmText(prompt.program, prompt.controlNumber, prompt.activeSpeed))
             },
             confirmButton = {
                 TextButton(onClick = viewModel::confirmStationWrite) {
@@ -764,8 +772,10 @@ private fun ChipSection(
     stationProgram: StationProgram,
     stationInspect: String?,
     stationControlNumber: String,
+    stationActiveSpeed: StationActiveSpeed,
     onStationProgram: (StationProgram) -> Unit,
     onStationControlNumber: (String) -> Unit,
+    onStationActiveSpeed: (StationActiveSpeed) -> Unit,
     onDeleteQueued: (String) -> Unit,
     liveReady: Boolean,
     sportKind: String,
@@ -848,8 +858,10 @@ private fun ChipSection(
                 program = stationProgram,
                 inspect = stationInspect,
                 controlNumber = stationControlNumber,
+                activeSpeed = stationActiveSpeed,
                 onProgram = onStationProgram,
                 onControlNumber = onStationControlNumber,
+                onActiveSpeed = onStationActiveSpeed,
                 modifier = Modifier.weight(1f),
             )
         } else if (mode == ChipMode.Tests) {
@@ -1231,13 +1243,16 @@ private fun IssueTeamField(value: String, onValue: (String) -> Unit, nextId: Int
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StationPanel(
     program: StationProgram,
     inspect: String?,
     controlNumber: String,
+    activeSpeed: StationActiveSpeed,
     onProgram: (StationProgram) -> Unit,
     onControlNumber: (String) -> Unit,
+    onActiveSpeed: (StationActiveSpeed) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1288,6 +1303,12 @@ private fun StationPanel(
             program = program,
             onProgram = onProgram,
         )
+        if (program == StationProgram.Active) {
+            StationActiveSpeedBox(
+                speed = activeSpeed,
+                onSpeed = onActiveSpeed,
+            )
+        }
         if (program == StationProgram.Inspect && inspect != null) {
             Text(
                 inspect,
@@ -1300,6 +1321,46 @@ private fun StationPanel(
             color = Color(0xFF5C5C5C),
             style = MaterialTheme.typography.bodySmall,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StationActiveSpeedBox(
+    speed: StationActiveSpeed,
+    onSpeed: (StationActiveSpeed) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        OutlinedTextField(
+            value = speed.label,
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text("Скорость опроса") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            StationActiveSpeed.entries.forEach { item ->
+                DropdownMenuItem(
+                    text = { Text(item.label) },
+                    onClick = {
+                        onSpeed(item)
+                        expanded = false
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -1345,11 +1406,11 @@ private fun stationProgramTitle(item: StationProgram): String = when (item) {
 
 private fun stationProgramHint(program: StationProgram): String = when (program) {
     StationProgram.Control ->
-        "Введите номер КП, приложите чип и подтвердите запись. На чип уйдёт время на 3 секунды вперёд. Крупные цифры покажут, когда приложить чип к станции."
+        "Введите номер КП, приложите чип и подтвердите. Сразу запишется время +3 с и пойдёт отсчёт — по нулю приложите чип к станции."
     StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
-        "Выберите тип, приложите чип и подтвердите запись. На чип уйдёт время на 3 секунды вперёд. Крупные цифры покажут, когда приложить чип к станции."
+        "Выберите тип, приложите чип и подтвердите. Сразу запишется время +3 с и пойдёт отсчёт — по нулю приложите чип к станции."
     StationProgram.Active ->
-        "Станция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
+        "Станция будет постоянно искать чип, без нажатия кнопки. Выше скорость — быстрее отметка, меньше время работы батареи. Карта многоразовая."
     StationProgram.Passive ->
         "Станция снова ждёт нажатия кнопки. Карта многоразовая — удобно на снятие дистанции."
     StationProgram.Battery ->
@@ -1408,7 +1469,8 @@ private fun StationCountdownOverlay(countdown: StationClockCountdown) {
                     when {
                         ready -> "Сейчас приложите чип к станции"
                         atZero -> "Запись ещё идёт. Не убирайте чип с телефона."
-                        else -> "На нуле приложите чип к станции. До нуля не убирайте его."
+                        !countdown.writeFinished -> "Идёт запись… Не убирайте чип с телефона."
+                        else -> "На нуле приложите чип к станции"
                     },
                     color = Color.White,
                     style = MaterialTheme.typography.titleMedium,
@@ -1419,23 +1481,31 @@ private fun StationCountdownOverlay(countdown: StationClockCountdown) {
     }
 }
 
-private fun stationWriteConfirmText(program: StationProgram, controlNumber: Int?): String {
+private fun stationWriteConfirmText(
+    program: StationProgram,
+    controlNumber: Int?,
+    activeSpeed: StationActiveSpeed = StationActiveSpeed.DEFAULT,
+): String {
     if (program == StationProgram.Inspect) return "Чип не изменится."
-    val wipe =
-        "Отметки и номер участника на этом чипе будут стёрты. Операция только из раздела «Станция»."
     val body = when (program) {
         StationProgram.Control ->
-            "На чип будет записана программа станции КП ${controlNumber ?: "—"}."
+            "На чип сразу запишется программа КП ${controlNumber ?: "—"} и время +3 с.\nПойдёт отсчёт — по нулю приложите чип к станции."
         StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
-            "На чип будет записана программа станции «${program.title}» (КП ${program.command?.controlCp})."
+            "На чип сразу запишется программа «${program.title}» (КП ${program.command?.controlCp}) и время +3 с.\nПойдёт отсчёт — по нулю приложите чип к станции."
         StationProgram.Inspect ->
             "Чип не изменится."
         StationProgram.Active ->
-            "На чип будет записана карта активного режима.\nСтанция будет постоянно искать чип, без нажатия кнопки. Сильно расходует батарею. Карта многоразовая."
+            "На чип будет записана карта активного режима (${activeSpeed.label}).\nСтанция будет постоянно искать чип, без нажатия кнопки. Выше скорость — быстрее отметка, меньше время работы батареи. Карта многоразовая."
         StationProgram.Passive ->
             "На чип будет записана карта пассивного режима.\nСтанция снова будет ждать нажатия кнопки. Карта многоразовая."
         StationProgram.Battery ->
             "На чип будет записана карта сброса и проверки батареи.\nПосле отметки на станции около 30 секунд горит светодиод, затем 1–15 миганий. Меньше 7 — заменить батарею. Часы станции сбросятся. Карта одноразовая."
+    }
+    val wipe = when (program) {
+        StationProgram.Control, StationProgram.Start, StationProgram.Finish, StationProgram.Clear ->
+            "Номер участника на чипе будет обнулён. Операция только из раздела «Станция»."
+        else ->
+            "Номер участника на чипе будет обнулён. Операция только из раздела «Станция»."
     }
     return "$body\n\n$wipe"
 }
@@ -1699,13 +1769,17 @@ private fun PersonHits(
             .groupBy({ it.first }, { it.second })
     }
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = modifier.fillMaxWidth(),
         contentPadding = PaddingValues(bottom = 8.dp),
     ) {
         if (people.isEmpty()) {
             item {
-                Text(emptyText, color = Color(0xFF5C5C5C), style = MaterialTheme.typography.bodySmall)
+                Text(
+                    emptyText,
+                    color = Color(0xFF5C5C5C),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
             }
         }
         items(people, key = { it.id }) { person ->

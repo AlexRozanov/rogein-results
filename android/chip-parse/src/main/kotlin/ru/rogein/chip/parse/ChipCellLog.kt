@@ -22,7 +22,7 @@ data class ChipMemoryLog(
     val isService: Boolean get() = stationRole != null
     val kindLine: String?
         get() = stationRole?.let {
-            "Служебный чип: ${SfrChipParser.stationCommandLabel(it.command, it.cp)}"
+            "Служебный чип: ${SfrChipParser.stationCommandLabel(it)}"
         }
 
     fun fileName(): String {
@@ -38,7 +38,7 @@ data class ChipMemoryLog(
         appendLine("uid=$uid")
         if (stationRole != null) {
             appendLine("тип=служебный")
-            appendLine("роль=${SfrChipParser.stationCommandLabel(stationRole.command, stationRole.cp)}")
+            appendLine("роль=${SfrChipParser.stationCommandLabel(stationRole)}")
         }
         appendLine("номер=${logicalId ?: "—"}")
         appendLine("очистка=${clearedAt ?: "—"}")
@@ -143,7 +143,7 @@ object ChipCellLog {
             0, 2 -> "служебный"
             1 -> if (blank) "пусто" else headerClearLabel(block)
             3 -> if (blank) "пусто" else headerIdLabel(block)
-            4 -> stationModeLabel(role.command)
+            4 -> stationModeLabel(role.command, block)
             5 -> when {
                 blank -> "пусто"
                 role.command.isService -> "остаток: ${punchLabel(block)}"
@@ -163,8 +163,11 @@ object ChipCellLog {
         return ChipCellLine(index, hex, label, afterPointer = false)
     }
 
-    private fun stationModeLabel(command: StationCommand): String = when (command) {
-        StationCommand.Active -> "режим: активный"
+    private fun stationModeLabel(command: StationCommand, block: ByteArray): String = when (command) {
+        StationCommand.Active -> {
+            val speed = StationActiveSpeed.fromBlock(block)
+            if (speed != null) "режим: активный ${speed.label}" else "режим: активный"
+        }
         StationCommand.Passive -> "режим: пассивный"
         StationCommand.Battery -> "режим: батарея"
         StationCommand.Control, StationCommand.Start, StationCommand.Finish, StationCommand.Clear ->

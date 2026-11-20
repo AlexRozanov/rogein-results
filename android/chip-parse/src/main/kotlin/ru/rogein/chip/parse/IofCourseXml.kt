@@ -107,6 +107,9 @@ fun formatPaceMinPerKm(meters: Int?, seconds: Int?): String? {
     return "%d:%02d/км".format(min, sec)
 }
 
+/** Ширина колонки «№ + КП» на чеке, чтобы время/сплит/темп совпадали у КП и Финиша. */
+private const val SPLIT_LABEL_WIDTH = 8
+
 fun punchSplitLine(
     order: String,
     cp: String,
@@ -114,9 +117,17 @@ fun punchSplitLine(
     split: String?,
     pace: String?,
 ): String {
-    val left = order.padStart(2) + " " + cp.padEnd(6)
+    // Ширина чека 32 символа (ESC/POS Font A на 58 мм).
+    // Один пробел после ")", два перед темпом: "99:59/км" → ≤32.
+    // Финиш: подпись слева, время/темп в тех же колонках, что у КП.
+    val label = if (order.isEmpty()) {
+        "$cp "
+    } else {
+        order.padStart(2) + " " + cp + " "
+    }
+    val left = if (label.length >= SPLIT_LABEL_WIDTH) label else label.padEnd(SPLIT_LABEL_WIDTH)
     val times = buildString {
-        append(elapsed.padStart(8))
+        append(elapsed)
         if (split != null) {
             append(' ')
             append(split.padStart(5))
@@ -131,8 +142,7 @@ fun punchSplitLine(
 
 fun formatCpParen(cp: Int, added: Boolean = false): String {
     val star = if (added) "*" else ""
-    val body = if (cp < 100) "( ${cp})" else "(${cp})"
-    return body + star
+    return "(${cp})$star"
 }
 
 data class OrientSplitPrintRow(

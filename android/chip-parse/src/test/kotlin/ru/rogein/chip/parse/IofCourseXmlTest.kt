@@ -63,11 +63,25 @@ class IofCourseXmlTest {
         assertEquals("7:30/км", formatPaceMinPerKm(80, 36))
         assertEquals("0:01:28", formatRaceTime(88))
         assertEquals("01:28", formatSplitMmSs(88))
-        assertEquals("( 32)", formatCpParen(32))
+        assertEquals("(32)", formatCpParen(32))
         assertEquals(
-            " 1 ( 32)  0:00:50 00:50  6:31/км",
+            " 1 (32) 0:00:50 00:50  6:31/км",
             punchSplitLine("1", formatCpParen(32), "0:00:50", "00:50", "6:31/км"),
         )
+        val slow = punchSplitLine("2", formatCpParen(31), "0:04:53", "03:11", "10:57/км")
+        assertEquals(" 2 (31) 0:04:53 03:11  10:57/км", slow)
+        assertTrue(slow.length <= ReceiptText.WIDTH)
+        val verySlow = punchSplitLine("10", formatCpParen(38), "0:40:04", "06:58", "84:58/км")
+        assertEquals("10 (38) 0:40:04 06:58  84:58/км", verySlow)
+        assertTrue(verySlow.length <= ReceiptText.WIDTH)
+        val finish = punchSplitLine("", "Финиш:", "1:21:47", "02:21", "10:24/км")
+        assertEquals("Финиш:  1:21:47 02:21  10:24/км", finish)
+        assertTrue(finish.startsWith("Финиш:"))
+        assertTrue(finish.length <= ReceiptText.WIDTH)
+        val cpLine = punchSplitLine("1", formatCpParen(32), "0:00:50", "00:50", "6:31/км")
+        assertEquals(cpLine.indexOf("0:00:50"), finish.indexOf("1:21:47"))
+        assertEquals(cpLine.lastIndexOf("00:50"), finish.indexOf("02:21"))
+        assertEquals(cpLine.indexOf("6:31/км"), finish.indexOf("10:24/км"))
         assertEquals(133, courseLegMeters(listOf(32, 43), meters.map { it }, 241, 32, 241, 240))
         assertEquals(177, courseLegMeters(listOf(32, 43), meters.map { it }, 32, 43, 241, 240))
         assertNull(courseLegMeters(listOf(32, 43), meters.map { it }, 32, 36, 241, 240))

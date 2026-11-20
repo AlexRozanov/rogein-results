@@ -200,6 +200,21 @@ class SfrChipParserTest {
     }
 
     @Test
+    fun detectsAllActiveSpeedBlocks() {
+        for (speed in StationActiveSpeed.entries) {
+            val hid = stationChip(StationCommand.Active).map { it.copyOf() }.toMutableList()
+            hid[4] = stationActiveBlock(speed)
+            assertEquals(StationCommand.Active, SfrChipParser.stationCommand(hid))
+            val text = SfrChipParser.describeChipMode(hid)
+            assertTrue(text.contains("активного режима"))
+            assertTrue(text.contains(speed.label), "expected ${speed.label} in $text")
+            val nfc = hid.map { it.reversed4() }
+            assertEquals(StationCommand.Active, SfrChipParser.stationCommand(nfc))
+            assertTrue(SfrChipParser.describeChipMode(nfc).contains(speed.label))
+        }
+    }
+
+    @Test
     fun describesLoadedStationAndAthleteChips() {
         val control = stationChip(StationCommand.Control, 31)
         val controlText = SfrChipParser.describeChipMode(control)

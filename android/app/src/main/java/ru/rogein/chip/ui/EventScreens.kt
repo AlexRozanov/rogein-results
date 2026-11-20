@@ -247,35 +247,63 @@ internal fun PersonProtocolLine(
 ) {
     val courseMark = person.currentCourse.ifBlank { emptyCourseLabel }
     val teamMark = person.teamLabel
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        if (showTeamBrace) {
-            TeamBrace(teamPos, Modifier.fillMaxHeight())
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .background(if (selected) Cream else Color.Transparent)
+                .clickable(onClick = onClick)
+                .padding(
+                    start = if (showTeamBrace) 4.dp else 12.dp,
+                    end = 12.dp,
+                    top = 8.dp,
+                    bottom = 8.dp,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (showTeamBrace) {
+                TeamBrace(teamPos, Modifier.fillMaxHeight())
+            }
+            Text(
+                person.id.toString(),
+                modifier = Modifier.width(44.dp),
+                textAlign = TextAlign.End,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                buildString {
+                    append(person.displayName.ifBlank { "—" })
+                    if (teamMark.isNotEmpty()) append("  $teamMark")
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                courseMark,
+                color = Muted,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 96.dp),
+            )
+            Text(
+                status.label,
+                color = protocolStatusColor(status),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                modifier = Modifier.padding(start = 6.dp),
+                textAlign = TextAlign.End,
+            )
         }
-        Text(
-            text = buildString {
-                append("${person.id}  ${person.displayName}  $courseMark")
-                if (teamMark.isNotEmpty()) append("  $teamMark")
-            },
-            style = if (selected) {
-                MaterialTheme.typography.titleMedium
-            } else {
-                MaterialTheme.typography.bodyLarge
-            },
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = status.label,
-            color = protocolStatusColor(status),
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        HorizontalDivider()
     }
 }
 
@@ -1148,11 +1176,10 @@ fun ProtocolScreen(
         }
         if (pane == ProtocolPane.People) {
             LazyColumn(
-                verticalArrangement = if (rogaine) Arrangement.Top else Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp),
+                contentPadding = PaddingValues(bottom = 16.dp),
             ) {
                 if (filtered.isEmpty()) {
                     item {
@@ -1164,7 +1191,7 @@ fun ProtocolScreen(
                             },
                             color = Muted,
                             style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(vertical = 12.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
                         )
                     }
                 }

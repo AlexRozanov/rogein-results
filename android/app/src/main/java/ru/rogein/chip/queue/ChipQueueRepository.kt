@@ -461,11 +461,15 @@ class ChipQueueRepository(
         items: List<QueuedChipEntity>,
     ): QueuedChipEntity? {
         val nuid = normalizeChipUid(dump.uid)
+        val logicalId = dump.logicalId
         if (nuid.isNotEmpty()) {
-            items.find { normalizeChipUid(it.uid) == nuid && it.courseName.equals(course, ignoreCase = true) }
-                ?.let { return it }
+            items.find { row ->
+                normalizeChipUid(row.uid) == nuid &&
+                    row.courseName.equals(course, ignoreCase = true) &&
+                    (logicalId == null || row.logicalId == null || row.logicalId == logicalId)
+            }?.let { return it }
         }
-        val logicalId = dump.logicalId ?: return null
+        if (logicalId == null) return null
         return items.find { it.logicalId == logicalId && it.courseName.equals(course, ignoreCase = true) }
     }
 

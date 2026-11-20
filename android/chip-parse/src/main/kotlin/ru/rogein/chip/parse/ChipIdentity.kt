@@ -25,8 +25,14 @@ fun classifyFinishEnqueue(
     val nuid = normalizeChipUid(uid)
     val course = courseName.trim()
     fun sameCourse(row: FinishQueueRef) = row.courseName.trim().equals(course, ignoreCase = true)
+    // Один физический чип можно выдать другому логическому номеру — это новый финиш,
+    // а не перечитывание. SameChip только при том же UID (или пустом UID) и том же №.
+    fun sameAthlete(row: FinishQueueRef): Boolean = when {
+        logicalId == null || row.logicalId == null -> true
+        else -> row.logicalId == logicalId
+    }
     if (nuid.isNotEmpty()) {
-        if (existing.any { normalizeChipUid(it.uid) == nuid && sameCourse(it) }) {
+        if (existing.any { normalizeChipUid(it.uid) == nuid && sameCourse(it) && sameAthlete(it) }) {
             return FinishEnqueueKind.SameChip
         }
     } else if (logicalId != null) {
