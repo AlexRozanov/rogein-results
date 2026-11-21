@@ -1,7 +1,9 @@
 package ru.rogein.chip
 
+import android.Manifest
 import android.content.ClipData
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.nfc.NfcAdapter
@@ -13,17 +15,22 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.getSystemService
 import androidx.core.os.bundleOf
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.rogein.chip.nfc.Iso15693MemoryReader
 import ru.rogein.chip.nfc.formatUid
 import ru.rogein.chip.parse.BlockOrder
@@ -31,6 +38,8 @@ import ru.rogein.chip.parse.Punch
 import ru.rogein.chip.parse.SfrChipMemory
 import ru.rogein.chip.parse.StationActiveSpeed
 import ru.rogein.chip.parse.StationCommand
+import ru.rogein.chip.parse.field.FieldSyncMode
+import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.queue.ChipQueueRepository
 import ru.rogein.chip.ui.ChipFeedback
 import ru.rogein.chip.ui.ChipIo
@@ -60,6 +69,10 @@ class MainActivity : ComponentActivity() {
     private var sessionTag: Tag? = null
     private var misses = 0
     private var pendingCsvKind: CsvImportKind? = null
+    private val requestNotifications = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* FGS works even if denied; notification may be hidden */ }
+
     private val openCsv = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val kind = pendingCsvKind ?: return@registerForActivityResult
         pendingCsvKind = null
@@ -260,8 +273,31 @@ class MainActivity : ComponentActivity() {
                     background = Color(0xFFF4F1EA),
                 ),
             ) {
+                val syncState by viewModel.fieldSyncState.collectAsStateWithLifecycle()
+                val hostAlive = syncState.running &&
+                    syncState.mode == FieldSyncMode.LAN &&
+                    syncState.role == FieldSyncRole.HOST
+                LaunchedEffect(hostAlive) {
+                    if (hostAlive) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        ensureNotificationPermission()
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
                 ChipScreen(viewModel, csvPicker, csvShare)
             }
+        }
+    }
+
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 

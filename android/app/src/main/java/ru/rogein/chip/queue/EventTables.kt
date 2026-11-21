@@ -30,6 +30,7 @@ data class ExclusionEntity(
     val fromCp: Int,
     val toCp: Int,
     val maxLegSeconds: Int?,
+    val syncId: String = "",
 )
 
 @Dao

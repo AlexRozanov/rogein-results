@@ -2,6 +2,9 @@ package ru.rogein.chip.queue
 
 import android.content.Context
 import androidx.room.Room
+import ru.rogein.chip.field.FieldJournal
+import ru.rogein.chip.field.FieldOpApplier
+import ru.rogein.chip.field.FieldSyncEngine
 import ru.rogein.chip.parse.COPY_PUNCHES
 import ru.rogein.chip.parse.ChipDump
 import ru.rogein.chip.parse.CsvImport
@@ -57,6 +60,8 @@ class ChipQueueRepository(
     val event: EventStore,
     private val archive: StartArchiveStore,
     val printer: PrinterStore,
+    val fieldJournal: FieldJournal,
+    val fieldSync: FieldSyncEngine,
 ) {
     fun observeAll() = dao.observeAll()
 
@@ -81,6 +86,7 @@ class ChipQueueRepository(
         courseName: String = "",
         replace: Boolean = false,
         publish: Boolean = true,
+        source: String = "nfc",
     ): EnqueueResult {
         val course = courseName.trim()
         val items = dao.listAll()
@@ -95,6 +101,7 @@ class ChipQueueRepository(
                         rawHex = rawHex.ifBlank { synthetic.rawHex },
                     ),
                 )
+                rememberChipRead(synthetic.id, dump, course, replace, source)
                 return savedEnqueue(synthetic.id, dump.uid, dump.logicalId, course, refs, publish)
             }
             kind = FinishEnqueueKind.SameChip
@@ -115,6 +122,7 @@ class ChipQueueRepository(
                     rawHex = rawHex.ifBlank { keep.rawHex },
                 ),
             )
+            rememberChipRead(keep.id, dump, course, replace, source)
             return savedEnqueue(keep.id, uid, keep.logicalId, course, refs, publish)
         }
         val id = keep?.id ?: UUID.randomUUID().toString()
@@ -140,6 +148,7 @@ class ChipQueueRepository(
         if (dump.punches.isNotEmpty()) {
             dump.logicalId?.let { event.clearDidNotFinish(it) }
         }
+        rememberChipRead(id, dump, course, replace, source)
         val nextRefs = refs.filter { it.id != id } + FinishQueueRef(id, dump.uid, dump.logicalId, course)
         val numberConflict = id in numberConflictIds(nextRefs)
         val otherUid = nextRefs.find { row ->
@@ -150,6 +159,23 @@ class ChipQueueRepository(
             numberConflict = numberConflict,
             otherUid = otherUid,
         )
+    }
+
+    suspend fun recordChipIssue(
+        logicalId: Int,
+        uid: String,
+        course: String,
+        overwrite: Boolean,
+    ) {
+        runCatching {
+            fieldJournal.recordChipIssue(
+                logicalId = logicalId,
+                uid = uid,
+                course = course,
+                eventSlug = event.settingsNow().slug,
+                overwrite = overwrite,
+            )
+        }
     }
 
     suspend fun reassignFinishNumber(queueId: String, newLogicalId: Int): String? {
@@ -179,8 +205,31 @@ class ChipQueueRepository(
         val course = item.courseName.ifBlank { person?.currentCourse.orEmpty() }
         dao.updateFinishIdentity(queueId, newLogicalId, name, course)
         startList.rebindIssuedUid(current, newLogicalId, item.uid)
+        runCatching {
+            fieldJournal.recordFinishReassign(
+                queueId = queueId,
+                oldLogicalId = current,
+                newLogicalId = newLogicalId,
+                uid = item.uid,
+                eventSlug = event.settingsNow().slug,
+            )
+        }
         event.markLivePending()
         return publishSnapshot()
+    }
+
+    suspend fun applyFinishReassign(
+        queueId: String,
+        oldLogicalId: Int?,
+        newLogicalId: Int,
+        uid: String,
+    ) {
+        val item = dao.byId(queueId) ?: return
+        val person = startList.person(newLogicalId)
+        val name = person?.name?.takeIf { it.isNotBlank() } ?: item.personName
+        val course = item.courseName.ifBlank { person?.currentCourse.orEmpty() }
+        dao.updateFinishIdentity(queueId, newLogicalId, name, course)
+        startList.rebindIssuedUid(oldLogicalId ?: item.logicalId, newLogicalId, uid.ifBlank { item.uid })
     }
 
     suspend fun copyTeamPunches(sourceQueueId: String, targetLogicalId: Int): String {
@@ -314,6 +363,7 @@ class ChipQueueRepository(
                 courseName = row.courseName,
                 replace = overwrite,
                 publish = false,
+                source = "csv",
             )
         }
         publishSnapshot()
@@ -326,23 +376,51 @@ class ChipQueueRepository(
 
     suspend fun deleteQueued(id: String): String? {
         dao.deleteById(id)
+        runCatching {
+            fieldJournal.recordQueueDrop(id, event.settingsNow().slug)
+        }
         event.markLivePending()
         return publishSnapshot()
     }
 
-    suspend fun clear(): String? {
-        dao.clear()
-        return publishSnapshot()
+    suspend fun applyQueueDrop(queueId: String) {
+        dao.deleteById(queueId)
     }
 
     suspend fun resetForNewStart(sport: String): String {
         val message = archive.createNewStart(sport)
         startList.forgetUsbPack()
+        clearFieldJournal("новый старт")
         publishSnapshot()
         return message
     }
 
+    suspend fun clearFieldJournal(reason: String = "вручную"): String {
+        fieldJournal.clearAll()
+        fieldSync.onJournalCleared()
+        return "Журнал обмена очищен ($reason)."
+    }
+
+    suspend fun exportFieldJournal(): Pair<String, String> {
+        val ops = fieldJournal.listAllEnvelopes()
+        val arr = org.json.JSONArray()
+        ops.forEach { arr.put(ru.rogein.chip.parse.field.fieldOpEnvelopeToJson(it)) }
+        val body = org.json.JSONObject()
+            .put("schema", ru.rogein.chip.parse.field.FIELD_OP_SCHEMA)
+            .put("device_id", fieldJournal.deviceId())
+            .put("exported_at", System.currentTimeMillis())
+            .put("op_count", ops.size)
+            .put("ops", arr)
+            .toString(2)
+        val stamp = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+        return "field-journal-$stamp.json" to body
+    }
+
     suspend fun openStart(id: Long): String {
+        if (fieldJournal.device.fieldSyncEnabled) {
+            error("Пока включён полевой обмен, нельзя открыть другой старт из архива")
+        }
         val message = archive.openStart(id)
         publishSnapshot()
         event.markLivePending()
@@ -350,6 +428,9 @@ class ChipQueueRepository(
     }
 
     suspend fun deleteStart(id: Long): String {
+        if (fieldJournal.device.fieldSyncEnabled) {
+            error("Пока включён полевой обмен, нельзя удалить старт из архива")
+        }
         val message = archive.deleteStart(id)
         publishSnapshot()
         event.markLivePending()
@@ -376,7 +457,22 @@ class ChipQueueRepository(
     }
 
     private suspend fun flushLiveOnce() {
+        val device = fieldJournal.device
+        // При lan live шлёт только хост — иначе два PUT затирают друг друга.
+        if (device.lanEnabled && !device.isHost) {
+            event.setLiveNote("при обмене live шлёт только хост")
+            return
+        }
+        // Cloud: только издатель.
+        if (device.cloudEnabled && !device.cloudPublisher) {
+            event.setLiveNote("при облачном обмене live шлёт только издатель")
+            return
+        }
         val settings = event.settingsNow()
+        if (!settings.livePublishEnabled) {
+            event.setLiveNote("публикация на сайт выключена")
+            return
+        }
         event.sendLiveSnapshot(
             settings,
             startList.peopleNow(),
@@ -412,6 +508,25 @@ class ChipQueueRepository(
             null
         } catch (e: Exception) {
             e.message ?: "не удалось записать снимок"
+        }
+    }
+
+    private suspend fun rememberChipRead(
+        queueId: String,
+        dump: ChipDump,
+        course: String,
+        replace: Boolean,
+        source: String = "nfc",
+    ) {
+        runCatching {
+            fieldJournal.recordChipRead(
+                queueId = queueId,
+                dump = dump,
+                courseHint = course,
+                eventSlug = event.settingsNow().slug,
+                replace = replace,
+                source = source,
+            )
         }
     }
 
@@ -493,16 +608,37 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_7_8,
                     ChipQueueDatabase.MIGRATION_8_9,
                     ChipQueueDatabase.MIGRATION_9_10,
+                    ChipQueueDatabase.MIGRATION_10_11,
+                    ChipQueueDatabase.MIGRATION_11_12,
                 )
                 .build()
+            val fieldJournal = FieldJournal.create(appContext, db.fieldJournalDao())
+            val event = EventStore(appContext.filesDir, db.eventDao(), fieldJournal)
+            val startList = StartListStore(
+                appContext,
+                db.startListDao(),
+                fieldJournal,
+                eventSlug = { event.settingsNow().slug },
+                chipQueue = db.dao(),
+            )
+            val fieldSync = FieldSyncEngine(
+                context = appContext,
+                journal = fieldJournal,
+                applier = FieldOpApplier(startList, db.dao(), event),
+                eventSlug = { event.settingsNow().slug },
+                siteBaseUrl = { event.settingsNow().apiBaseUrl },
+                publishToken = { event.settingsNow().publishToken },
+            )
             return ChipQueueRepository(
                 db.dao(),
                 ChipQueueSnapshotWriter(appContext),
                 appContext,
-                StartListStore(appContext, db.startListDao()),
-                EventStore(appContext.filesDir, db.eventDao()),
+                startList,
+                event,
                 StartArchiveStore(db),
                 PrinterStore(appContext),
+                fieldJournal,
+                fieldSync,
             )
         }
     }

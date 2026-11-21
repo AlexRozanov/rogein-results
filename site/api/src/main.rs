@@ -1,6 +1,7 @@
 mod admin;
 mod auth;
 mod bulletin;
+mod field;
 mod mail;
 mod map_image;
 mod models;
@@ -231,6 +232,11 @@ async fn serve() -> anyhow::Result<()> {
             get(get_live_participant),
         )
         .route("/api/live/{slug}/stream", get(live_stream))
+        .route("/api/field/{slug}/hello", get(field::field_hello))
+        .route(
+            "/api/field/{slug}/ops",
+            get(field::get_field_ops).post(field::post_field_ops),
+        )
         .route("/api/packs/{slug}", get(get_event_pack).put(put_event_pack))
         .route(
             "/api/packs/{slug}/map",
@@ -262,7 +268,7 @@ fn unauthorized() -> (StatusCode, String) {
     (StatusCode::UNAUTHORIZED, "Invalid publish token".into())
 }
 
-fn check_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+pub(crate) fn check_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let expected = format!("Bearer {}", state.publish_token);
     let got = headers
         .get("authorization")

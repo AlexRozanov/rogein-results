@@ -3670,6 +3670,7 @@ fun StartsScreen(
     onDelete: (Long) -> Unit,
     onExport: (Long) -> Unit,
     onNewStart: () -> Unit,
+    archiveLocked: Boolean = false,
 ) {
     var pendingDelete by remember { mutableStateOf<SavedStart?>(null) }
     LazyColumn(
@@ -3682,6 +3683,14 @@ fun StartsScreen(
                 "Текущий старт не удаляется при «Новый старт» — он остаётся в этом списке. CSV читает десктоп: финишный дамп, стартовый протокол и дистанции.",
                 color = Muted,
             )
+        }
+        if (archiveLocked) {
+            item {
+                Text(
+                    "Полевой обмен включён: открыть или удалить другой старт нельзя — сначала выключите обмен.",
+                    color = Danger,
+                )
+            }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3701,7 +3710,9 @@ fun StartsScreen(
                         Column(
                             modifier = Modifier
                                 .weight(1f)
-                                .clickable(enabled = !start.current) { onOpen(start.id) },
+                                .clickable(enabled = !start.current && !archiveLocked) {
+                                    onOpen(start.id)
+                                },
                         ) {
                             Text(start.label, style = MaterialTheme.typography.titleMedium)
                             val bits = buildList {
@@ -3711,13 +3722,16 @@ fun StartsScreen(
                                 if (start.current) add("текущий")
                             }
                             Text(bits.joinToString(" · "), color = Muted, style = MaterialTheme.typography.bodySmall)
-                            if (!start.current) {
+                            if (!start.current && !archiveLocked) {
                                 Text("Нажмите, чтобы открыть", color = OkGreen, style = MaterialTheme.typography.bodySmall)
                             }
                         }
                         CompactTextButton("CSV", onClick = { onExport(start.id) })
                         if (!start.current) {
-                            IconButton(onClick = { pendingDelete = start }) {
+                            IconButton(
+                                onClick = { pendingDelete = start },
+                                enabled = !archiveLocked,
+                            ) {
                                 Icon(Icons.Default.Delete, contentDescription = "Удалить старт", tint = Danger)
                             }
                         }
@@ -3764,6 +3778,8 @@ fun MoreMenu(onOpen: (MorePage) -> Unit, sportKind: String = SPORT_ORIENT) {
         MorePage.Corrections to "Персональные корректировки",
         MorePage.Publish to "Публикация на сайт",
         MorePage.Settings to "Настройки старта",
+        MorePage.FieldSync to "Настройки обмена",
+        MorePage.FieldJournal to "Журнал обмена",
     )
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -4248,6 +4264,8 @@ fun CorrectionsScreen(
 fun PublishScreen(
     settings: EventSettings,
     busy: Boolean,
+    showLivePublishToggle: Boolean,
+    livePublishHint: String? = null,
     onSave: (EventSettings) -> Unit,
     onTest: (String) -> Unit,
     onGenerateSlug: (EventSettings) -> Unit,
@@ -4258,6 +4276,16 @@ fun PublishScreen(
     var token by remember(settings.publishToken) { mutableStateOf(settings.publishToken) }
     var slug by remember(settings.slug) { mutableStateOf(settings.slug) }
     var title by remember(settings.title) { mutableStateOf(settings.title) }
+    var livePublish by remember(settings.livePublishEnabled) {
+        mutableStateOf(settings.livePublishEnabled)
+    }
+    fun draft(publish: Boolean = livePublish) = settings.copy(
+        apiBaseUrl = api,
+        publishToken = token,
+        slug = slug,
+        title = title,
+        livePublishEnabled = publish,
+    )
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -4269,6 +4297,27 @@ fun PublishScreen(
             "Адрес — корень сайта, как в браузере: https://malahit-sprint.ru (без :18790). Адрес и токен остаются на телефоне после «Новый старт».",
             color = Muted,
         )
+        if (showLivePublishToggle) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Checkbox(
+                    checked = livePublish,
+                    onCheckedChange = { livePublish = it },
+                )
+                Text(
+                    "Публиковать результаты на сайт",
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Text(
+                "Если выключено — этот телефон не отправляет live, даже при настроенном токене.",
+                color = Muted,
+            )
+        } else if (!livePublishHint.isNullOrBlank()) {
+            Text(livePublishHint, color = Muted)
+        }
         Text("Доступ к серверу", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = api,
@@ -4288,7 +4337,7 @@ fun PublishScreen(
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
-                onClick = { onSave(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title)) },
+                onClick = { onSave(draft()) },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
             ) { Text("Сохранить") }
@@ -4301,7 +4350,7 @@ fun PublishScreen(
         Text("Этот старт", style = MaterialTheme.typography.titleMedium)
         OutlinedButton(
             onClick = {
-                onSave(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title))
+                onSave(draft())
                 onPickFromSite(api)
             },
             enabled = !busy,
@@ -4322,27 +4371,22 @@ fun PublishScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         TextButton(
-            onClick = {
-                onGenerateSlug(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title))
-            },
+            onClick = { onGenerateSlug(draft()) },
             enabled = !busy,
         ) { Text("Собрать slug из даты и названия") }
         val previewUrl = EventStore.liveViewerUrl(api, slug)
         if (previewUrl != null) {
             LiveLinkRow(
                 url = previewUrl,
-                shareText = EventStore.liveShareText(
-                    settings.copy(apiBaseUrl = api, slug = slug, title = title),
-                ) ?: previewUrl,
+                shareText = EventStore.liveShareText(draft()) ?: previewUrl,
             )
         } else {
             Text("Ссылка на результаты появится, когда заполнены адрес сайта и slug.", color = Muted)
         }
+        val canPublish = !showLivePublishToggle || livePublish
         Button(
-            onClick = {
-                onPublish(settings.copy(apiBaseUrl = api, publishToken = token, slug = slug, title = title))
-            },
-            enabled = !busy,
+            onClick = { onPublish(draft()) },
+            enabled = !busy && canPublish,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Опубликовать") }
     }

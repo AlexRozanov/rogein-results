@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">SFR чип</string>
+    <string name="field_host_notification_channel">Хост обмена</string>
+    <string name="field_host_notification_channel_desc">Держит полевой обмен, пока экран выключен</string>
+    <string name="field_host_notification_title">Хост полевого обмена</string>
+    <string name="field_host_notification_text">Слушает порт %1$d · экран можно погасить</string>
 </resources>

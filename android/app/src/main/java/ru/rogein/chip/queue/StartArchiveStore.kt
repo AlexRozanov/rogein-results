@@ -473,7 +473,9 @@ private fun EventSnapshot.toCsvFiles(): List<Pair<String, String>> {
         FinishCsvRow(
             chipRawId = chip.uid,
             bibId = bib.toString(),
-            name = chip.personName.ifBlank { person?.name.orEmpty() }.ifBlank { "без ФИО" },
+            name = person?.name?.takeIf { it.isNotBlank() }
+                ?: chip.personName.takeIf { it.isNotBlank() }
+                ?: "без ФИО",
             course = chip.courseName.ifBlank { person?.currentCourse.orEmpty() },
             punches = punches,
         )

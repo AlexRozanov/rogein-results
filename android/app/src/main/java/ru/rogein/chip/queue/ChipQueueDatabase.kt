@@ -12,6 +12,9 @@ import androidx.room.Update
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
+import ru.rogein.chip.field.FieldJournalDao
+import ru.rogein.chip.field.FieldMetaEntity
+import ru.rogein.chip.field.FieldOpEntity
 
 @Entity(tableName = "chip_queue")
 data class QueuedChipEntity(
@@ -101,6 +104,15 @@ interface ChipQueueDao {
         """,
     )
     suspend fun updateFinishIdentity(id: String, logicalId: Int?, personName: String, courseName: String)
+
+    @Query(
+        """
+        UPDATE chip_queue
+        SET personName = :personName
+        WHERE logicalId = :logicalId
+        """,
+    )
+    suspend fun updatePersonNameByLogicalId(logicalId: Int, personName: String)
 
     @Query(
         """
@@ -214,14 +226,17 @@ interface StartArchiveDao {
         SettingEntity::class,
         CorrectionEntity::class,
         ExclusionEntity::class,
+        FieldOpEntity::class,
+        FieldMetaEntity::class,
     ],
-        version = 10,
+    version = 12,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
     abstract fun startListDao(): StartListDao
     abstract fun eventDao(): EventDao
     abstract fun startArchiveDao(): StartArchiveDao
+    abstract fun fieldJournalDao(): FieldJournalDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -327,6 +342,46 @@ abstract class ChipQueueDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE start_courses ADD COLUMN lengthMeters INTEGER")
                 db.execSQL("ALTER TABLE start_courses ADD COLUMN climbMeters INTEGER")
                 db.execSQL("ALTER TABLE start_courses ADD COLUMN legsJson TEXT NOT NULL DEFAULT '[]'")
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS field_ops (
+                        opId TEXT NOT NULL PRIMARY KEY,
+                        schemaVersion INTEGER NOT NULL,
+                        deviceId TEXT NOT NULL,
+                        deviceSeq INTEGER NOT NULL,
+                        eventSlug TEXT NOT NULL,
+                        clockMs INTEGER NOT NULL,
+                        actor TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        payloadJson TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_field_ops_deviceId_deviceSeq ON field_ops(deviceId, deviceSeq)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS field_meta (
+                        `key` TEXT NOT NULL PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE event_exclusions ADD COLUMN syncId TEXT NOT NULL DEFAULT ''",
+                )
             }
         }
 

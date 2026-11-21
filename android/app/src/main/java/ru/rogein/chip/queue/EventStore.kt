@@ -52,6 +52,9 @@ import ru.rogein.chip.parse.personAwardAge
 import ru.rogein.chip.parse.personAwardCategories
 import ru.rogein.chip.parse.protocolStatusRank
 import ru.rogein.chip.parse.storedBirthDate
+import ru.rogein.chip.field.FieldJournal
+import ru.rogein.chip.parse.field.correctionIdFromLocalPayload
+import ru.rogein.chip.parse.field.newCorrectionId
 import ru.rogein.chip.parse.parseDaySeconds
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
@@ -81,6 +84,8 @@ data class EventSettings(
     val title: String = "",
     val liveNote: String = "",
     val livePending: Boolean = false,
+    /** Этот телефон шлёт live на сайт (если обмен LAN — только хост видит и учитывает флаг). */
+    val livePublishEnabled: Boolean = true,
     val sportKind: String = SPORT_ORIENT,
     val metersPerPixel: Double? = null,
     val mapWidth: Int? = null,
@@ -142,6 +147,7 @@ data class ResultGroup(
 class EventStore(
     private val filesDir: File,
     private val eventDao: EventDao,
+    private val fieldJournal: FieldJournal? = null,
 ) {
     private val liveSending = AtomicBoolean(false)
     val settings: Flow<EventSettings> = eventDao.observeSettings().map { it.toSettings() }
@@ -155,6 +161,7 @@ class EventStore(
     suspend fun exclusionsNow(): List<ExclusionEntity> = eventDao.listExclusions()
 
     suspend fun saveSettings(next: EventSettings) {
+        val prev = settingsNow()
         eventDao.upsertSetting(SettingEntity("start_cp", next.startCp.toString()))
         eventDao.upsertSetting(SettingEntity("finish_cp", next.finishCp.toString()))
         eventDao.upsertSetting(SettingEntity("control_minutes", next.controlMinutes.toString()))
@@ -167,10 +174,14 @@ class EventStore(
         eventDao.upsertSetting(SettingEntity("publish_token", next.publishToken.trim()))
         eventDao.upsertSetting(SettingEntity("slug", next.slug.trim()))
         eventDao.upsertSetting(SettingEntity("title", next.title.trim()))
+        eventDao.upsertSetting(
+            SettingEntity("live_publish", if (next.livePublishEnabled) "1" else "0"),
+        )
         eventDao.upsertSetting(SettingEntity("sport_kind", normalizeSportKind(next.sportKind)))
         eventDao.upsertSetting(SettingEntity("meters_per_pixel", next.metersPerPixel?.toString().orEmpty()))
         eventDao.upsertSetting(SettingEntity("map_image_width", next.mapWidth?.toString().orEmpty()))
         eventDao.upsertSetting(SettingEntity("map_image_height", next.mapHeight?.toString().orEmpty()))
+        rememberEventConfigIfChanged(prev, next)
     }
 
     fun saveChipLog(text: String, logicalId: Int?, uid: String): File {
@@ -193,18 +204,26 @@ class EventStore(
             it.type == "remove_cp" && it.logicalId == null && payloadInt(it.payloadJson, "cp_number") == cp
         }
         if (exists) return
+        val correctionId = newCorrectionId()
+        val payload = JSONObject()
+            .put("correction_id", correctionId)
+            .put("cp_number", cp)
+            .put("remove_mode", "from_course")
+            .toString()
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "remove_cp",
                 logicalId = null,
                 courseName = "",
-                payloadJson = JSONObject().put("cp_number", cp).put("remove_mode", "from_course").toString(),
+                payloadJson = payload,
             ),
         )
+        rememberRemoveCp(correctionId, null, cp, "from_course")
     }
 
     suspend fun addMissingCp(logicalId: Int, courseName: String, cp: Int, time: String? = null) {
-        val payload = JSONObject().put("cp_number", cp)
+        val correctionId = newCorrectionId()
+        val payload = JSONObject().put("correction_id", correctionId).put("cp_number", cp)
         val normalized = time?.trim().orEmpty()
         if (normalized.isNotEmpty()) {
             if (parseDaySeconds(normalized) == null) {
@@ -222,6 +241,7 @@ class EventStore(
                 payloadJson = payload.toString(),
             ),
         )
+        rememberAddCp(correctionId, logicalId, cp, courseName, normalized)
     }
 
     suspend fun addRogainePersonalCp(logicalId: Int, cp: Int) {
@@ -230,14 +250,16 @@ class EventStore(
             it.type == "add_cp" && it.logicalId == logicalId && payloadInt(it.payloadJson, "cp_number") == cp
         }
         if (exists) error("Для № $logicalId корректировка добавления КП $cp уже есть")
+        val correctionId = newCorrectionId()
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "add_cp",
                 logicalId = logicalId,
                 courseName = "",
-                payloadJson = JSONObject().put("cp_number", cp).toString(),
+                payloadJson = JSONObject().put("correction_id", correctionId).put("cp_number", cp).toString(),
             ),
         )
+        rememberAddCp(correctionId, logicalId, cp, "", "")
     }
 
     suspend fun addRogaineRemoveCp(logicalId: Int?, cp: Int, removeMode: String) {
@@ -250,37 +272,154 @@ class EventStore(
             val who = logicalId?.let { "для № $it" } ?: "для всех"
             error("Корректировка удаления КП $cp $who уже есть")
         }
+        val correctionId = newCorrectionId()
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "remove_cp",
                 logicalId = logicalId,
                 courseName = "",
-                payloadJson = JSONObject().put("cp_number", cp).put("remove_mode", mode).toString(),
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("cp_number", cp)
+                    .put("remove_mode", mode)
+                    .toString(),
             ),
         )
+        rememberRemoveCp(correctionId, logicalId, cp, mode)
     }
 
     suspend fun setDidNotFinish(logicalId: Int) {
         if (logicalId <= 0) return
         if (isDidNotFinish(logicalId, eventDao.listCorrections())) return
+        val correctionId = newCorrectionId()
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = DID_NOT_FINISH,
                 logicalId = logicalId,
                 courseName = "",
-                payloadJson = "{}",
+                payloadJson = JSONObject().put("correction_id", correctionId).toString(),
+            ),
+        )
+        rememberDnf(correctionId, logicalId)
+    }
+
+    suspend fun clearDidNotFinish(logicalId: Int) {
+        val rows = eventDao.listCorrections()
+            .filter { it.type == DID_NOT_FINISH && it.logicalId == logicalId }
+        if (rows.isEmpty()) return
+        rows.forEach { eventDao.deleteCorrection(it.id) }
+        rememberClearDnf(logicalId)
+    }
+
+    suspend fun setCopyPunchesNote(logicalId: Int, fromLogicalId: Int) {
+        if (logicalId <= 0 || fromLogicalId <= 0 || logicalId == fromLogicalId) return
+        eventDao.listCorrections()
+            .filter { it.type == COPY_PUNCHES && it.logicalId == logicalId }
+            .forEach { row ->
+                val syncId = correctionIdFromLocalPayload(row.payloadJson)
+                eventDao.deleteCorrection(row.id)
+                if (syncId.isNotBlank()) rememberDeleteCorrection(syncId)
+            }
+        val correctionId = newCorrectionId()
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = COPY_PUNCHES,
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("from_logical_id", fromLogicalId)
+                    .toString(),
+            ),
+        )
+        rememberCopyPunches(correctionId, logicalId, fromLogicalId)
+    }
+
+    suspend fun assignCourse(logicalId: Int, fromCourse: String, toCourse: String) {
+        val correctionId = newCorrectionId()
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = "assign_course",
+                logicalId = logicalId,
+                courseName = fromCourse,
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("course", toCourse)
+                    .toString(),
+            ),
+        )
+        rememberAssignCourse(correctionId, logicalId, fromCourse, toCourse)
+    }
+
+    suspend fun deleteCorrection(id: Long) {
+        val row = eventDao.listCorrections().find { it.id == id } ?: return
+        val syncId = correctionIdFromLocalPayload(row.payloadJson).ifBlank { "local-$id" }
+        eventDao.deleteCorrection(id)
+        rememberDeleteCorrection(syncId)
+    }
+
+    suspend fun applyCorrectionAddCp(
+        correctionId: String,
+        logicalId: Int,
+        cp: Int,
+        course: String,
+        time: String,
+    ) {
+        if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
+        val payload = JSONObject().put("correction_id", correctionId).put("cp_number", cp)
+        if (time.isNotBlank()) payload.put("time", time)
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = "add_cp",
+                logicalId = logicalId,
+                courseName = course,
+                payloadJson = payload.toString(),
             ),
         )
     }
 
-    suspend fun clearDidNotFinish(logicalId: Int) {
+    suspend fun applyCorrectionRemoveCp(
+        correctionId: String,
+        logicalId: Int?,
+        cp: Int,
+        removeMode: String,
+    ) {
+        if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = "remove_cp",
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("cp_number", cp)
+                    .put("remove_mode", removeMode)
+                    .toString(),
+            ),
+        )
+    }
+
+    suspend fun applyCorrectionDnf(correctionId: String, logicalId: Int) {
+        if (isDidNotFinish(logicalId, eventDao.listCorrections())) return
+        if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
+        eventDao.insertCorrection(
+            CorrectionEntity(
+                type = DID_NOT_FINISH,
+                logicalId = logicalId,
+                courseName = "",
+                payloadJson = JSONObject().put("correction_id", correctionId).toString(),
+            ),
+        )
+    }
+
+    suspend fun applyCorrectionClearDnf(logicalId: Int) {
         eventDao.listCorrections()
             .filter { it.type == DID_NOT_FINISH && it.logicalId == logicalId }
             .forEach { eventDao.deleteCorrection(it.id) }
     }
 
-    suspend fun setCopyPunchesNote(logicalId: Int, fromLogicalId: Int) {
-        if (logicalId <= 0 || fromLogicalId <= 0 || logicalId == fromLogicalId) return
+    suspend fun applyCorrectionCopyPunches(correctionId: String, logicalId: Int, fromLogicalId: Int) {
+        if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
         eventDao.listCorrections()
             .filter { it.type == COPY_PUNCHES && it.logicalId == logicalId }
             .forEach { eventDao.deleteCorrection(it.id) }
@@ -289,35 +428,196 @@ class EventStore(
                 type = COPY_PUNCHES,
                 logicalId = logicalId,
                 courseName = "",
-                payloadJson = JSONObject().put("from_logical_id", fromLogicalId).toString(),
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("from_logical_id", fromLogicalId)
+                    .toString(),
             ),
         )
     }
 
-    suspend fun assignCourse(logicalId: Int, fromCourse: String, toCourse: String) {
+    suspend fun applyCorrectionAssignCourse(
+        correctionId: String,
+        logicalId: Int,
+        fromCourse: String,
+        toCourse: String,
+    ) {
+        if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "assign_course",
                 logicalId = logicalId,
                 courseName = fromCourse,
-                payloadJson = JSONObject().put("course", toCourse).toString(),
+                payloadJson = JSONObject()
+                    .put("correction_id", correctionId)
+                    .put("course", toCourse)
+                    .toString(),
             ),
         )
     }
 
-    suspend fun deleteCorrection(id: Long) = eventDao.deleteCorrection(id)
+    suspend fun applyCorrectionDelete(correctionId: String) {
+        if (correctionId.isBlank()) return
+        findByCorrectionId(correctionId)?.let { eventDao.deleteCorrection(it.id) }
+    }
+
+    private suspend fun findByCorrectionId(correctionId: String): CorrectionEntity? =
+        eventDao.listCorrections().find { correctionIdFromLocalPayload(it.payloadJson) == correctionId }
+
+    private suspend fun slug(): String = settingsNow().slug
+
+    private suspend fun rememberAddCp(
+        correctionId: String,
+        logicalId: Int,
+        cp: Int,
+        course: String,
+        time: String,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordCorrectionAddCp(correctionId, logicalId, cp, course, time, slug())
+        }
+    }
+
+    private suspend fun rememberRemoveCp(
+        correctionId: String,
+        logicalId: Int?,
+        cp: Int,
+        removeMode: String,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordCorrectionRemoveCp(correctionId, logicalId, cp, removeMode, slug())
+        }
+    }
+
+    private suspend fun rememberDnf(correctionId: String, logicalId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching { journal.recordCorrectionDnf(correctionId, logicalId, slug()) }
+    }
+
+    private suspend fun rememberClearDnf(logicalId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching { journal.recordCorrectionClearDnf(logicalId, slug()) }
+    }
+
+    private suspend fun rememberCopyPunches(correctionId: String, logicalId: Int, fromLogicalId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordCorrectionCopyPunches(correctionId, logicalId, fromLogicalId, slug())
+        }
+    }
+
+    private suspend fun rememberAssignCourse(
+        correctionId: String,
+        logicalId: Int,
+        fromCourse: String,
+        toCourse: String,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordCorrectionAssignCourse(correctionId, logicalId, fromCourse, toCourse, slug())
+        }
+    }
+
+    private suspend fun rememberDeleteCorrection(correctionId: String) {
+        val journal = fieldJournal ?: return
+        runCatching { journal.recordCorrectionDelete(correctionId, slug()) }
+    }
 
     suspend fun addExclusion(courseName: String, fromCp: Int, toCp: Int, maxLegSeconds: Int?) {
         val exists = eventDao.listExclusions().any {
             it.courseName.equals(courseName, true) && it.fromCp == fromCp && it.toCp == toCp
         }
         if (exists) error("Такой перегон уже исключён")
+        val exclusionId = UUID.randomUUID().toString()
         eventDao.insertExclusion(
-            ExclusionEntity(courseName = courseName, fromCp = fromCp, toCp = toCp, maxLegSeconds = maxLegSeconds),
+            ExclusionEntity(
+                courseName = courseName,
+                fromCp = fromCp,
+                toCp = toCp,
+                maxLegSeconds = maxLegSeconds,
+                syncId = exclusionId,
+            ),
+        )
+        rememberExclusionUpsert(exclusionId, courseName, fromCp, toCp, maxLegSeconds)
+    }
+
+    suspend fun deleteExclusion(id: Long) {
+        val row = eventDao.listExclusions().find { it.id == id } ?: return
+        eventDao.deleteExclusion(id)
+        rememberExclusionDelete(
+            exclusionId = row.syncId.ifBlank { "local-$id" },
+            courseName = row.courseName,
+            fromCp = row.fromCp,
+            toCp = row.toCp,
         )
     }
 
-    suspend fun deleteExclusion(id: Long) = eventDao.deleteExclusion(id)
+    suspend fun applyExclusionUpsert(
+        exclusionId: String,
+        courseName: String,
+        fromCp: Int,
+        toCp: Int,
+        maxLegSeconds: Int?,
+    ) {
+        val existing = eventDao.listExclusions().find { row ->
+            (exclusionId.isNotBlank() && row.syncId == exclusionId) ||
+                (row.courseName.equals(courseName, true) && row.fromCp == fromCp && row.toCp == toCp)
+        }
+        if (existing != null) {
+            eventDao.deleteExclusion(existing.id)
+        }
+        eventDao.insertExclusion(
+            ExclusionEntity(
+                courseName = courseName,
+                fromCp = fromCp,
+                toCp = toCp,
+                maxLegSeconds = maxLegSeconds,
+                syncId = exclusionId.ifBlank { UUID.randomUUID().toString() },
+            ),
+        )
+    }
+
+    suspend fun applyExclusionDelete(
+        exclusionId: String,
+        courseName: String,
+        fromCp: Int,
+        toCp: Int,
+    ) {
+        val row = eventDao.listExclusions().find { item ->
+            (exclusionId.isNotBlank() && item.syncId == exclusionId) ||
+                (item.courseName.equals(courseName, true) && item.fromCp == fromCp && item.toCp == toCp)
+        } ?: return
+        eventDao.deleteExclusion(row.id)
+    }
+
+    private suspend fun rememberExclusionUpsert(
+        exclusionId: String,
+        courseName: String,
+        fromCp: Int,
+        toCp: Int,
+        maxLegSeconds: Int?,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordExclusionUpsert(
+                exclusionId, courseName, fromCp, toCp, maxLegSeconds, slug(),
+            )
+        }
+    }
+
+    private suspend fun rememberExclusionDelete(
+        exclusionId: String,
+        courseName: String,
+        fromCp: Int,
+        toCp: Int,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordExclusionDelete(exclusionId, courseName, fromCp, toCp, slug())
+        }
+    }
 
     suspend fun clearEventRules() {
         eventDao.clearCorrections()
@@ -378,35 +678,57 @@ class EventStore(
                 mapHeight = pack.mapHeight ?: current.mapHeight,
             ),
         )
-        eventDao.upsertSetting(SettingEntity("award_groups", awardGroupsJson(pack.awardGroups)))
-        eventDao.upsertSetting(SettingEntity("cp_legends", legendsJson(pack.legends)))
-        eventDao.upsertSetting(SettingEntity("format_settings", formatsJson(pack.formats)))
-        eventDao.upsertSetting(
-            SettingEntity(
-                "map_points",
-                JSONArray().apply {
-                    pack.mapPoints.forEach { point ->
-                        put(
-                            JSONObject()
-                                .put("kind", point.kind)
-                                .put("cp", point.cp ?: JSONObject.NULL)
-                                .put("name", point.name)
-                                .put("mapX", point.mapX)
-                                .put("mapY", point.mapY),
-                        )
-                    }
-                }.toString(),
-            ),
-        )
+        val awardsJson = awardGroupsJson(pack.awardGroups)
+        val legendsPayload = legendsJson(pack.legends)
+        val formatsPayload = formatsJson(pack.formats)
+        val mapPointsPayload = JSONArray().apply {
+            pack.mapPoints.forEach { point ->
+                put(
+                    JSONObject()
+                        .put("kind", point.kind)
+                        .put("cp", point.cp ?: JSONObject.NULL)
+                        .put("name", point.name)
+                        .put("mapX", point.mapX)
+                        .put("mapY", point.mapY),
+                )
+            }
+        }.toString()
+        eventDao.upsertSetting(SettingEntity("award_groups", awardsJson))
+        eventDao.upsertSetting(SettingEntity("cp_legends", legendsPayload))
+        eventDao.upsertSetting(SettingEntity("format_settings", formatsPayload))
+        eventDao.upsertSetting(SettingEntity("map_points", mapPointsPayload))
+        runCatching {
+            fieldJournal?.recordEventConfig(
+                eventSlug = slug(),
+                formatSettingsJson = formatsPayload,
+                awardGroupsJson = awardsJson,
+                legendsJson = legendsPayload,
+                mapPointsJson = mapPointsPayload,
+            )
+        }
+        val previousExclusions = eventDao.listExclusions()
+        for (row in previousExclusions) {
+            rememberExclusionDelete(
+                exclusionId = row.syncId.ifBlank { "local-${row.id}" },
+                courseName = row.courseName,
+                fromCp = row.fromCp,
+                toCp = row.toCp,
+            )
+        }
         eventDao.clearExclusions()
         for (rule in pack.exclusions) {
+            val exclusionId = UUID.randomUUID().toString()
             eventDao.insertExclusion(
                 ExclusionEntity(
                     courseName = rule.course,
                     fromCp = rule.fromCp,
                     toCp = rule.toCp,
                     maxLegSeconds = rule.maxLegSeconds,
+                    syncId = exclusionId,
                 ),
+            )
+            rememberExclusionUpsert(
+                exclusionId, rule.course, rule.fromCp, rule.toCp, rule.maxLegSeconds,
             )
         }
     }
@@ -429,7 +751,85 @@ class EventStore(
                     .put("dqMinutes", row.dqMinutes ?: JSONObject.NULL),
             )
         }
-        eventDao.upsertSetting(SettingEntity("format_settings", root.toString()))
+        val json = root.toString()
+        eventDao.upsertSetting(SettingEntity("format_settings", json))
+        rememberFormatSettings(json)
+    }
+
+    suspend fun applyEventConfig(payloadJson: String) {
+        val obj = try {
+            JSONObject(payloadJson)
+        } catch (_: Exception) {
+            return
+        }
+        suspend fun putIf(key: String) {
+            if (!obj.has(key) || obj.isNull(key)) return
+            eventDao.upsertSetting(SettingEntity(key, obj.opt(key).toString()))
+        }
+        putIf("control_minutes")
+        putIf("start_cp")
+        putIf("finish_cp")
+        putIf("penalty_per_minute")
+        putIf("dq_minutes")
+        putIf("start_mode")
+        putIf("competition_start_time")
+        putIf("competition_date")
+        putIf("title")
+        putIf("sport_kind")
+        if (obj.has("format_settings") && !obj.isNull("format_settings")) {
+            eventDao.upsertSetting(SettingEntity("format_settings", obj.optString("format_settings")))
+        }
+        if (obj.has("award_groups") && !obj.isNull("award_groups")) {
+            eventDao.upsertSetting(SettingEntity("award_groups", obj.optString("award_groups")))
+        }
+        if (obj.has("cp_legends") && !obj.isNull("cp_legends")) {
+            eventDao.upsertSetting(SettingEntity("cp_legends", obj.optString("cp_legends")))
+        }
+        if (obj.has("map_points") && !obj.isNull("map_points")) {
+            eventDao.upsertSetting(SettingEntity("map_points", obj.optString("map_points")))
+        }
+        markLivePending()
+    }
+
+    private suspend fun rememberEventConfigIfChanged(prev: EventSettings, next: EventSettings) {
+        val journal = fieldJournal ?: return
+        val scoringChanged =
+            prev.controlMinutes != next.controlMinutes ||
+                prev.startCp != next.startCp ||
+                prev.finishCp != next.finishCp ||
+                prev.penaltyPerMinute != next.penaltyPerMinute ||
+                prev.dqMinutes != next.dqMinutes ||
+                prev.startMode != next.startMode ||
+                prev.competitionStartTime != next.competitionStartTime ||
+                prev.competitionDate != next.competitionDate ||
+                prev.title != next.title ||
+                normalizeSportKind(prev.sportKind) != normalizeSportKind(next.sportKind)
+        if (!scoringChanged) return
+        runCatching {
+            journal.recordEventConfig(
+                eventSlug = next.slug.ifBlank { prev.slug },
+                controlMinutes = next.controlMinutes,
+                startCp = next.startCp,
+                finishCp = next.finishCp,
+                penaltyPerMinute = next.penaltyPerMinute,
+                dqMinutes = next.dqMinutes,
+                startMode = next.startMode.trim().ifBlank { "station" },
+                competitionStartTime = next.competitionStartTime.trim(),
+                competitionDate = next.competitionDate.trim(),
+                title = next.title.trim(),
+                sportKind = normalizeSportKind(next.sportKind),
+            )
+        }
+    }
+
+    private suspend fun rememberFormatSettings(formatSettingsJson: String) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordEventConfig(
+                eventSlug = slug(),
+                formatSettingsJson = formatSettingsJson,
+            )
+        }
     }
 
     suspend fun mergeAwardGroups(rows: List<AwardGroupCsvRow>) {
@@ -444,7 +844,11 @@ class EventStore(
                     .put("formatNames", JSONArray(row.formats)),
             )
         }
-        eventDao.upsertSetting(SettingEntity("award_groups", root.toString()))
+        val json = root.toString()
+        eventDao.upsertSetting(SettingEntity("award_groups", json))
+        runCatching {
+            fieldJournal?.recordEventConfig(eventSlug = slug(), awardGroupsJson = json)
+        }
     }
 
     suspend fun mergeLegends(rows: List<LegendCsvRow>) {
@@ -457,7 +861,11 @@ class EventStore(
                     .put("type", row.type),
             )
         }
-        eventDao.upsertSetting(SettingEntity("cp_legends", root.toString()))
+        val json = root.toString()
+        eventDao.upsertSetting(SettingEntity("cp_legends", json))
+        runCatching {
+            fieldJournal?.recordEventConfig(eventSlug = slug(), legendsJson = json)
+        }
     }
 
     suspend fun clearLiveState() {
@@ -675,7 +1083,10 @@ class EventStore(
                 ScoredResult(
                     queueId = item.id,
                     logicalId = item.logicalId,
-                    name = item.personName.ifBlank { person?.name.orEmpty() }.ifBlank { item.logicalId?.let { "№ $it" } ?: "без номера" },
+                    name = person?.name?.takeIf { it.isNotBlank() }
+                        ?: item.personName.takeIf { it.isNotBlank() }
+                        ?: item.logicalId?.let { "№ $it" }
+                        ?: "без номера",
                     course = course,
                     uid = item.uid,
                     punches = punches,
@@ -859,6 +1270,8 @@ class EventStore(
                 title = map["title"].orEmpty(),
                 liveNote = map["live_note"].orEmpty(),
                 livePending = map["live_pending"] == "1",
+                // Нет ключа — как раньше: публиковать (обратная совместимость).
+                livePublishEnabled = map["live_publish"] != "0",
                 sportKind = normalizeSportKind(map["sport_kind"]),
                 metersPerPixel = map["meters_per_pixel"]?.toDoubleOrNull(),
                 mapWidth = map["map_image_width"]?.toIntOrNull()?.takeIf { it > 0 },

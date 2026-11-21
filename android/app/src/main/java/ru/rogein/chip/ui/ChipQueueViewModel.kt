@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.rogein.chip.event.buildEventSlug
+import ru.rogein.chip.field.FieldDeviceStore
 import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.CP_CLEAR
@@ -85,7 +86,22 @@ enum class StationProgram(val command: StationCommand?, val title: String) {
 
 enum class AppSection { Chip, Protocol, Results, More }
 
-enum class MorePage { Menu, Starts, Printer, Removed, Exclusions, Corrections, Publish, Settings }
+enum class MorePage {
+    Menu, Starts, Printer, Removed, Exclusions, Corrections, Publish, Settings, FieldSync, FieldJournal,
+}
+
+data class FieldJournalSnapshot(
+    val deviceId: String,
+    val deviceName: String,
+    val opCount: Long,
+    val ops: List<ru.rogein.chip.field.FieldOpEntity>,
+)
+
+data class FieldHostProbeUi(
+    val checking: Boolean = false,
+    val reachable: Boolean = false,
+    val error: String? = null,
+)
 
 data class PrintPrompt(
     val summary: String,
@@ -392,6 +408,7 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.ensureCurrentStart() }
             _printerName.value = repository.printer.selectedName()
+            runCatching { repository.fieldSync.start(viewModelScope) }
             while (isActive) {
                 delay(4_000)
                 runCatching { repository.republishSnapshot() }
@@ -441,6 +458,132 @@ class ChipQueueViewModel(
     fun setMorePage(page: MorePage) {
         _section.value = AppSection.More
         _morePage.value = page
+        if (page == MorePage.FieldJournal) {
+            refreshFieldJournal()
+        }
+        if (page == MorePage.FieldSync) {
+            repository.fieldSync.refreshUi()
+        }
+    }
+
+    private val _fieldJournalSnapshot = MutableStateFlow<FieldJournalSnapshot?>(null)
+    val fieldJournalSnapshot = _fieldJournalSnapshot.asStateFlow()
+    val fieldSyncState = repository.fieldSync.state
+
+    fun refreshFieldJournal() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val journal = repository.fieldJournal
+            _fieldJournalSnapshot.value = FieldJournalSnapshot(
+                deviceId = journal.deviceId(),
+                deviceName = journal.deviceName(),
+                opCount = journal.opCount(),
+                ops = journal.listNewest(200),
+            )
+        }
+    }
+
+    fun refreshFieldSync() {
+        repository.fieldSync.refreshUi()
+    }
+
+    fun saveFieldSync(
+        mode: String,
+        role: String,
+        deviceName: String,
+        startCode: String,
+        hostBaseUrl: String,
+        transport: String = ru.rogein.chip.parse.field.FieldTransport.AUTO,
+        cloudPublisher: Boolean = true,
+    ) {
+        repository.fieldSync.updateSettings(
+            mode, role, deviceName, startCode, hostBaseUrl, transport, cloudPublisher,
+        )
+        repository.fieldSync.start(viewModelScope)
+        refreshFieldJournal()
+    }
+
+    fun stopFieldSync() {
+        repository.fieldSync.stop()
+        _fieldHostProbe.value = FieldHostProbeUi()
+    }
+
+    private val _fieldHostProbe = MutableStateFlow(FieldHostProbeUi())
+    val fieldHostProbe = _fieldHostProbe.asStateFlow()
+
+    /** Проверка hello до «Запустить» на клиенте. */
+    fun probeFieldHost(hostIp: String, hostPort: Int, startCode: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val endpoint = FieldDeviceStore.buildHostEndpoint(hostIp, hostPort)
+            if (endpoint.isEmpty() || startCode.isBlank()) {
+                _fieldHostProbe.value = FieldHostProbeUi(checking = false, reachable = false)
+                return@launch
+            }
+            _fieldHostProbe.value = FieldHostProbeUi(checking = true, reachable = false)
+            val err = repository.fieldSync.probeHost(endpoint, startCode)
+            _fieldHostProbe.value = FieldHostProbeUi(
+                checking = false,
+                reachable = err == null,
+                error = err,
+            )
+        }
+    }
+
+    /** Проверка cloud hello (сайт + токен + код) до «Запустить». */
+    fun probeFieldCloud(startCode: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (startCode.isBlank()) {
+                _fieldHostProbe.value = FieldHostProbeUi(checking = false, reachable = false)
+                return@launch
+            }
+            _fieldHostProbe.value = FieldHostProbeUi(checking = true, reachable = false)
+            val err = repository.fieldSync.probeCloud(startCode)
+            _fieldHostProbe.value = FieldHostProbeUi(
+                checking = false,
+                reachable = err == null,
+                error = err,
+            )
+        }
+    }
+
+    fun becomeFieldHost() {
+        repository.fieldSync.becomeHost(viewModelScope)
+        refreshFieldJournal()
+        _status.value = "Этот телефон стал хостом. Старый хост должен быть выключен."
+    }
+
+    fun pullFieldSnapshot() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val n = repository.fieldSync.pullFullSnapshot()
+                refreshFieldJournal()
+                _status.value = "Снимок с хоста: применено $n операций."
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось забрать снимок"
+            }
+        }
+    }
+
+    fun clearFieldJournal() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _status.value = repository.clearFieldJournal("кнопка в журнале")
+                refreshFieldJournal()
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось очистить журнал"
+            }
+        }
+    }
+
+    fun exportFieldJournal() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val file = repository.exportFieldJournal()
+                _csvExport.value = listOf(file)
+                _status.value = "Журнал экспортирован: ${file.first}"
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось экспортировать журнал"
+            }
+        }
     }
 
     fun prepareCsvImport(reset: Boolean) {
@@ -589,7 +732,8 @@ class ChipQueueViewModel(
                 birthDate = storedBirthDate(_newBirth.value),
             )
             val teamNote = assignSavedPersonTeam(id)
-            runCatching { repository.publishProtocolSnapshot() }
+            repository.event.markLivePending()
+            runCatching { repository.republishSnapshot() }
             _addingNew.value = false
             _selectedId.value = null
             _newTeamWith.value = ""
@@ -1725,6 +1869,14 @@ class ChipQueueViewModel(
             repository.startList.upsertLocal(id, name, course)
             val teamNote = assignSavedPersonTeam(id)
             repository.startList.markIssued(id, course, uid)
+            runCatching {
+                repository.recordChipIssue(
+                    logicalId = id,
+                    uid = uid,
+                    course = course,
+                    overwrite = replace,
+                )
+            }
             runCatching { repository.publishProtocolSnapshot() }
             val nextMate = nextUnissuedTeammate(id)
             _query.value = ""
@@ -2248,17 +2400,6 @@ class ChipQueueViewModel(
                 "Участник убран из финишного протокола."
             } else {
                 "Убран из протокола, снимок в Загрузках не обновлён: $snapshotError"
-            }
-        }
-    }
-
-    fun clearQueue() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val snapshotError = repository.clear()
-            _status.value = if (snapshotError == null) {
-                "Очередь очищена. Приложите чип"
-            } else {
-                "Очередь очищена, снимок в Загрузках не обновлён: $snapshotError"
             }
         }
     }

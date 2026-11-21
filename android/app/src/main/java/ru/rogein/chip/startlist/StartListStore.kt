@@ -28,6 +28,8 @@ import ru.rogein.chip.parse.normalizeSportKind
 import ru.rogein.chip.parse.StartProtocolSnapshotPerson
 import ru.rogein.chip.parse.buildStartProtocolSnapshotJson
 import ru.rogein.chip.parse.parseEventPackJson
+import ru.rogein.chip.field.FieldJournal
+import ru.rogein.chip.queue.ChipQueueDao
 import ru.rogein.chip.queue.StartCourseEntity
 import ru.rogein.chip.queue.StartListDao
 import ru.rogein.chip.queue.StartMetaEntity
@@ -37,6 +39,9 @@ import java.io.File
 class StartListStore(
     private val context: Context,
     private val dao: StartListDao,
+    private val fieldJournal: FieldJournal? = null,
+    private val eventSlug: suspend () -> String = { "" },
+    private val chipQueue: ChipQueueDao? = null,
 ) {
     val people: Flow<List<StartPerson>> = dao.observePeople().map { rows -> rows.map { it.toPerson() } }
     val courses: Flow<List<StartCourse>> = dao.observeCourses().map { rows ->
@@ -94,13 +99,19 @@ class StartListStore(
     fun readEventPackJson(text: String): EventPackFile = parseEventPackJson(text)
 
     suspend fun applyEventPack(pack: EventPackFile, replace: Boolean) {
-        if (replace) {
-            dao.clearCourses()
-            dao.clearMeta()
-        }
         val formatNames = linkedSetOf<String>()
         pack.formats.forEach { formatNames += it.name }
         pack.people.map { it.format.trim() }.filter { it.isNotEmpty() }.forEach { formatNames += it }
+        if (replace) {
+            val keep = formatNames.map { it.lowercase() }.toSet()
+            for (old in dao.listCourses()) {
+                if (old.name.lowercase() !in keep) {
+                    dao.deleteCourse(old.name)
+                    rememberCourseDelete(old.name)
+                }
+            }
+            dao.clearMeta()
+        }
         for (name in formatNames) {
             val existing = dao.listCourses().find { it.name.equals(name, true) }
             val format = pack.formats.find { it.name.equals(name, true) }
@@ -112,15 +123,15 @@ class StartListStore(
                 existing != null && !replace -> parseInts(existing.controlsJson)
                 else -> emptyList()
             }
-            dao.upsertCourse(
-                StartCourseEntity(
-                    name = name,
-                    controlsJson = JSONArray(nextControls).toString(),
-                    lengthMeters = existing?.lengthMeters,
-                    climbMeters = existing?.climbMeters,
-                    legsJson = existing?.legsJson ?: "[]",
-                ),
+            val entity = StartCourseEntity(
+                name = name,
+                controlsJson = JSONArray(nextControls).toString(),
+                lengthMeters = existing?.lengthMeters,
+                climbMeters = existing?.climbMeters,
+                legsJson = existing?.legsJson ?: "[]",
             )
+            dao.upsertCourse(entity)
+            rememberCourseEntity(entity)
         }
         val peoplePack = StartPack(
             revision = pack.revision,
@@ -188,6 +199,7 @@ class StartListStore(
             for (person in dao.listPeople()) {
                 if (person.origin != ORIGIN_PHONE && person.logicalId !in packIds) {
                     dao.deletePerson(person.logicalId)
+                    rememberPersonDelete(person.logicalId)
                 }
             }
             dao.clearMeta()
@@ -207,22 +219,27 @@ class StartListStore(
                 person.currentCourse.isNotBlank() -> person.currentCourse
                 else -> union.firstOrNull().orEmpty()
             }
+            val savedName = person.name.ifBlank { local?.name.orEmpty() }
+            val savedGender = person.gender.ifBlank { local?.gender.orEmpty() }
+            val savedBirth = person.birthDate.ifBlank { local?.birthDate.orEmpty() }
+            val courses = union.toList()
             dao.upsertPerson(
                 StartPersonEntity(
                     logicalId = person.id,
-                    name = person.name.ifBlank { local?.name.orEmpty() },
+                    name = savedName,
                     currentCourse = current,
-                    coursesJson = JSONArray(union.toList()).toString(),
+                    coursesJson = JSONArray(courses).toString(),
                     origin = ORIGIN_DESKTOP,
                     localCourseTouchedAt = if (keepLocalCurrent) local!!.localCourseTouchedAt else 0L,
                     issuedAt = local?.issuedAt ?: 0L,
                     issuedCourse = local?.issuedCourse.orEmpty(),
-                    gender = person.gender.ifBlank { local?.gender.orEmpty() },
-                    birthDate = person.birthDate.ifBlank { local?.birthDate.orEmpty() },
+                    gender = savedGender,
+                    birthDate = savedBirth,
                     teamId = if (person.teamId > 0) person.teamId else local?.teamId ?: 0,
                     issuedUid = local?.issuedUid.orEmpty(),
                 ),
             )
+            rememberPersonUpsert(person.id, savedName, savedGender, savedBirth, current, courses)
         }
         dao.upsertMeta(
             StartMetaEntity(
@@ -233,10 +250,24 @@ class StartListStore(
     }
 
     private suspend fun applyCourses(pack: StartPack, replace: Boolean) {
-        if (replace) dao.clearCourses()
+        if (replace) {
+            val keep = pack.courses.map { it.name.lowercase() }.toSet()
+            for (old in dao.listCourses()) {
+                if (old.name.lowercase() !in keep) {
+                    dao.deleteCourse(old.name)
+                    rememberCourseDelete(old.name)
+                }
+            }
+        }
         for (course in pack.courses) {
-            val existing = if (replace) null else dao.listCourses().find { it.name.equals(course.name, true) }
-            dao.upsertCourse(courseEntity(course.toCsvRow(), existing))
+            val existing = if (replace) {
+                null
+            } else {
+                dao.listCourses().find { it.name.equals(course.name, true) }
+            }
+            val entity = courseEntity(course.toCsvRow(), existing)
+            dao.upsertCourse(entity)
+            rememberCourseEntity(entity)
         }
     }
 
@@ -251,6 +282,7 @@ class StartListStore(
             error("Это протокол рогейна. Начните старт «Рогейн», ориентирование его не принимает.")
         }
         val rows = CsvImport.protocol(text)
+        val previousIds = if (reset) dao.listPeople().map { it.logicalId } else emptyList()
         if (reset) {
             dao.clearPeople()
             dao.clearMeta()
@@ -258,37 +290,49 @@ class StartListStore(
         var imported = 0
         var skipped = 0
         var missingCourse = 0
+        val importedIds = linkedSetOf<Int>()
         for (row in rows) {
             if (row.id !in 1..MAX_LOGICAL_ID) {
                 skipped += 1
                 continue
             }
             if (row.course.isBlank()) missingCourse += 1
-            val existing = dao.person(row.id)
+            val existing = if (reset) null else dao.person(row.id)
             val union = linkedSetOf<String>()
             if (existing != null) union.addAll(parseNames(existing.coursesJson))
             if (row.course.isNotBlank()) union.add(row.course)
+            val courses = union.toList()
+            val current = if (reset || existing == null || existing.currentCourse.isBlank()) {
+                row.course
+            } else {
+                existing.currentCourse
+            }
+            val gender = existing?.gender.orEmpty()
+            val birth = existing?.birthDate.orEmpty()
             dao.upsertPerson(
                 StartPersonEntity(
                     logicalId = row.id,
                     name = row.name,
-                    currentCourse = if (reset || existing == null || existing.currentCourse.isBlank()) {
-                        row.course
-                    } else {
-                        existing.currentCourse
-                    },
-                    coursesJson = JSONArray(union.toList()).toString(),
+                    currentCourse = current,
+                    coursesJson = JSONArray(courses).toString(),
                     origin = existing?.origin ?: ORIGIN_PHONE,
                     localCourseTouchedAt = existing?.localCourseTouchedAt ?: 0L,
                     issuedAt = existing?.issuedAt ?: 0L,
                     issuedCourse = existing?.issuedCourse.orEmpty(),
-                    gender = existing?.gender.orEmpty(),
-                    birthDate = existing?.birthDate.orEmpty(),
+                    gender = gender,
+                    birthDate = birth,
                     teamId = existing?.teamId ?: 0,
                     issuedUid = existing?.issuedUid.orEmpty(),
                 ),
             )
+            rememberPersonUpsert(row.id, row.name, gender, birth, current, courses)
+            importedIds += row.id
             imported += 1
+        }
+        if (reset) {
+            for (id in previousIds) {
+                if (id !in importedIds) rememberPersonDelete(id)
+            }
         }
         val base = if (skipped == 0) {
             "Протокол: $imported участников."
@@ -304,6 +348,7 @@ class StartListStore(
 
     private suspend fun importRogaineProtocolCsv(text: String, reset: Boolean): String {
         val rows = CsvImport.rogaineProtocol(text)
+        val previousIds = if (reset) dao.listPeople().map { it.logicalId } else emptyList()
         if (reset) {
             dao.clearPeople()
             dao.clearMeta()
@@ -311,37 +356,49 @@ class StartListStore(
         var imported = 0
         var skipped = 0
         var missingFormat = 0
+        val importedIds = linkedSetOf<Int>()
         for (row in rows) {
             if (row.id !in 1..MAX_LOGICAL_ID) {
                 skipped += 1
                 continue
             }
             if (row.format.isBlank()) missingFormat += 1
-            val existing = dao.person(row.id)
+            val existing = if (reset) null else dao.person(row.id)
             val union = linkedSetOf<String>()
             if (existing != null) union.addAll(parseNames(existing.coursesJson))
             if (row.format.isNotBlank()) union.add(row.format)
+            val courses = union.toList()
+            val current = if (reset || existing == null || existing.currentCourse.isBlank()) {
+                row.format
+            } else {
+                existing.currentCourse
+            }
+            val gender = row.gender.ifBlank { existing?.gender.orEmpty() }
+            val birth = row.birth.ifBlank { existing?.birthDate.orEmpty() }
             dao.upsertPerson(
                 StartPersonEntity(
                     logicalId = row.id,
                     name = row.name,
-                    currentCourse = if (reset || existing == null || existing.currentCourse.isBlank()) {
-                        row.format
-                    } else {
-                        existing.currentCourse
-                    },
-                    coursesJson = JSONArray(union.toList()).toString(),
+                    currentCourse = current,
+                    coursesJson = JSONArray(courses).toString(),
                     origin = existing?.origin ?: ORIGIN_PHONE,
                     localCourseTouchedAt = existing?.localCourseTouchedAt ?: 0L,
                     issuedAt = existing?.issuedAt ?: 0L,
                     issuedCourse = existing?.issuedCourse.orEmpty(),
-                    gender = row.gender.ifBlank { existing?.gender.orEmpty() },
-                    birthDate = row.birth.ifBlank { existing?.birthDate.orEmpty() },
+                    gender = gender,
+                    birthDate = birth,
                     teamId = existing?.teamId ?: 0,
                     issuedUid = existing?.issuedUid.orEmpty(),
                 ),
             )
+            rememberPersonUpsert(row.id, row.name, gender, birth, current, courses)
+            importedIds += row.id
             imported += 1
+        }
+        if (reset) {
+            for (id in previousIds) {
+                if (id !in importedIds) rememberPersonDelete(id)
+            }
         }
         val base = if (skipped == 0) {
             "Протокол: $imported участников."
@@ -366,36 +423,58 @@ class StartListStore(
             for (row in rows) {
                 val old = existing.find { it.name.equals(row.name, true) }
                 if (old == null) {
-                    dao.upsertCourse(courseEntity(row, null))
+                    val entity = courseEntity(row, null)
+                    dao.upsertCourse(entity)
+                    rememberCourseEntity(entity)
                     continue
                 }
                 val merged = mergeCourseGeometry(old.toCsvRow(), row)
-                dao.upsertCourse(courseEntity(merged, old))
+                val entity = courseEntity(merged, old)
+                dao.upsertCourse(entity)
+                rememberCourseEntity(entity)
             }
             return "Дистанции: длины и перегоны дописаны для ${rows.size}."
         }
-        if (reset) dao.clearCourses()
+        if (reset) {
+            val keep = rows.map { it.name.lowercase() }.toSet()
+            for (old in existing) {
+                if (old.name.lowercase() !in keep) {
+                    dao.deleteCourse(old.name)
+                    rememberCourseDelete(old.name)
+                }
+            }
+        }
         for (row in rows) {
             val old = if (reset) null else dao.listCourses().find { it.name.equals(row.name, true) }
-            dao.upsertCourse(courseEntity(row, old))
+            val entity = courseEntity(row, old)
+            dao.upsertCourse(entity)
+            rememberCourseEntity(entity)
         }
         return "Дистанции: ${rows.size}, КП загружены."
     }
 
     suspend fun importFormatsCsv(text: String, reset: Boolean): Pair<String, List<FormatCsvRow>> {
         val rows = CsvImport.formats(text)
-        if (reset) dao.clearCourses()
+        if (reset) {
+            val keep = rows.map { it.name.lowercase() }.toSet()
+            for (old in dao.listCourses()) {
+                if (old.name.lowercase() !in keep) {
+                    dao.deleteCourse(old.name)
+                    rememberCourseDelete(old.name)
+                }
+            }
+        }
         for (row in rows) {
             val existing = dao.listCourses().find { it.name.equals(row.name, true) }
-            dao.upsertCourse(
-                StartCourseEntity(
-                    name = row.name,
-                    controlsJson = existing?.controlsJson ?: JSONArray().toString(),
-                    lengthMeters = existing?.lengthMeters,
-                    climbMeters = existing?.climbMeters,
-                    legsJson = existing?.legsJson ?: "[]",
-                ),
+            val entity = StartCourseEntity(
+                name = row.name,
+                controlsJson = existing?.controlsJson ?: JSONArray().toString(),
+                lengthMeters = existing?.lengthMeters,
+                climbMeters = existing?.climbMeters,
+                legsJson = existing?.legsJson ?: "[]",
             )
+            dao.upsertCourse(entity)
+            rememberCourseEntity(entity)
         }
         return "Форматы: ${rows.size}." to rows
     }
@@ -409,12 +488,15 @@ class StartListStore(
         if (next.isEmpty()) return
         for (course in dao.listCourses()) {
             if (parseInts(course.controlsJson).isNotEmpty()) continue
-            dao.upsertCourse(course.copy(controlsJson = JSONArray(next).toString()))
+            val entity = course.copy(controlsJson = JSONArray(next).toString())
+            dao.upsertCourse(entity)
+            rememberCourseEntity(entity)
         }
     }
 
     suspend fun deletePerson(id: Int) {
         dao.deletePerson(id)
+        rememberPersonDelete(id)
     }
 
     suspend fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
@@ -454,6 +536,17 @@ class StartListStore(
             }
             dao.deleteCourse(previous)
         }
+        val saved = dao.listCourses().find { it.name.equals(trimmed, true) }
+        if (saved != null) {
+            rememberCourseUpsert(
+                name = saved.name,
+                previousName = if (renaming) previous else "",
+                controls = parseInts(saved.controlsJson),
+                lengthMeters = saved.lengthMeters,
+                climbMeters = saved.climbMeters,
+                legsJson = saved.legsJson.ifBlank { "[]" },
+            )
+        }
     }
 
     suspend fun copyCourse(sourceName: String, newName: String): String {
@@ -464,11 +557,101 @@ class StartListStore(
         val clash = dao.listCourses().any { it.name.equals(trimmed, ignoreCase = true) }
         if (clash) error("Дистанция «$trimmed» уже есть")
         dao.upsertCourse(source.copy(name = trimmed))
+        rememberCourseUpsert(
+            name = trimmed,
+            previousName = "",
+            controls = parseInts(source.controlsJson),
+            lengthMeters = source.lengthMeters,
+            climbMeters = source.climbMeters,
+            legsJson = source.legsJson.ifBlank { "[]" },
+        )
         return trimmed
     }
 
     suspend fun deleteCourse(name: String) {
+        val trimmed = name.trim()
+        dao.deleteCourse(trimmed)
+        rememberCourseDelete(trimmed)
+    }
+
+    suspend fun applyCourseUpsert(
+        name: String,
+        previousName: String,
+        controls: List<Int>,
+        lengthMeters: Int?,
+        climbMeters: Int?,
+        legsJson: String,
+    ) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        val previous = previousName.trim()
+        val renaming = previous.isNotEmpty() && !previous.equals(trimmed, ignoreCase = true)
+        dao.upsertCourse(
+            StartCourseEntity(
+                name = trimmed,
+                controlsJson = JSONArray(controls).toString(),
+                lengthMeters = lengthMeters,
+                climbMeters = climbMeters,
+                legsJson = legsJson.ifBlank { "[]" },
+            ),
+        )
+        if (renaming) {
+            for (person in dao.listPeople()) {
+                val names = parseNames(person.coursesJson).map { if (it.equals(previous, true)) trimmed else it }
+                val current = if (person.currentCourse.equals(previous, true)) trimmed else person.currentCourse
+                val issued = if (person.issuedCourse.equals(previous, true)) trimmed else person.issuedCourse
+                dao.upsertPerson(
+                    person.copy(
+                        currentCourse = current,
+                        issuedCourse = issued,
+                        coursesJson = JSONArray(names).toString(),
+                    ),
+                )
+            }
+            dao.deleteCourse(previous)
+        }
+    }
+
+    suspend fun applyCourseDelete(name: String) {
         dao.deleteCourse(name.trim())
+    }
+
+    private suspend fun rememberCourseEntity(entity: StartCourseEntity) {
+        rememberCourseUpsert(
+            name = entity.name,
+            previousName = "",
+            controls = parseInts(entity.controlsJson),
+            lengthMeters = entity.lengthMeters,
+            climbMeters = entity.climbMeters,
+            legsJson = entity.legsJson,
+        )
+    }
+
+    private suspend fun rememberCourseUpsert(
+        name: String,
+        previousName: String,
+        controls: List<Int>,
+        lengthMeters: Int?,
+        climbMeters: Int?,
+        legsJson: String,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordCourseUpsert(
+                name = name,
+                previousName = previousName,
+                controls = controls,
+                lengthMeters = lengthMeters,
+                climbMeters = climbMeters,
+                legsJson = legsJson,
+                eventSlug = eventSlug(),
+            )
+        }
+    }
+
+    private suspend fun rememberCourseDelete(name: String) {
+        val journal = fieldJournal ?: return
+        runCatching { journal.recordCourseDelete(name, eventSlug()) }
     }
 
     suspend fun upsertLocal(
@@ -484,22 +667,28 @@ class StartListStore(
         if (existing != null) union.addAll(parseNames(existing.coursesJson))
         union.addAll(extraCourses)
         if (course.isNotBlank()) union.add(course)
+        val courses = union.toList()
+        val savedName = name.trim()
+        val savedCourse = course.trim()
+        val savedGender = gender ?: existing?.gender.orEmpty()
+        val savedBirth = birthDate ?: existing?.birthDate.orEmpty()
         dao.upsertPerson(
             StartPersonEntity(
                 logicalId = id,
-                name = name.trim(),
-                currentCourse = course.trim(),
-                coursesJson = JSONArray(union.toList()).toString(),
+                name = savedName,
+                currentCourse = savedCourse,
+                coursesJson = JSONArray(courses).toString(),
                 origin = existing?.origin ?: ORIGIN_PHONE,
                 localCourseTouchedAt = System.currentTimeMillis(),
                 issuedAt = existing?.issuedAt ?: 0L,
                 issuedCourse = existing?.issuedCourse.orEmpty(),
-                gender = gender ?: existing?.gender.orEmpty(),
-                birthDate = birthDate ?: existing?.birthDate.orEmpty(),
+                gender = savedGender,
+                birthDate = savedBirth,
                 teamId = existing?.teamId ?: 0,
                 issuedUid = existing?.issuedUid.orEmpty(),
             ),
         )
+        rememberPersonUpsert(id, savedName, savedGender, savedBirth, savedCourse, courses)
     }
 
     suspend fun joinTeam(id: Int, otherId: Int): Int {
@@ -509,10 +698,12 @@ class StartListStore(
         }
         val first = dao.person(id) ?: error("№ $id нет в протоколе")
         val second = dao.person(otherId) ?: error("№ $otherId нет в протоколе")
+        var droppedTeamId = 0
         val teamId = when {
             first.teamId > 0 && second.teamId > 0 -> minOf(first.teamId, second.teamId).also { keep ->
                 val drop = maxOf(first.teamId, second.teamId)
                 if (keep != drop) {
+                    droppedTeamId = drop
                     for (person in dao.listPeople()) {
                         if (person.teamId == drop) {
                             dao.upsertPerson(person.copy(teamId = keep))
@@ -527,6 +718,7 @@ class StartListStore(
         if (first.teamId != teamId) dao.upsertPerson(first.copy(teamId = teamId))
         val secondNow = dao.person(otherId) ?: second
         if (secondNow.teamId != teamId) dao.upsertPerson(secondNow.copy(teamId = teamId))
+        rememberTeamJoin(id, otherId, teamId, droppedTeamId)
         return teamId
     }
 
@@ -536,6 +728,7 @@ class StartListStore(
         if (person.teamId != teamId) {
             dao.upsertPerson(person.copy(teamId = teamId))
         }
+        rememberTeamAssign(id, teamId)
         return teamId
     }
 
@@ -544,7 +737,65 @@ class StartListStore(
         if (person.teamId <= 0) return 0
         val teamId = person.teamId
         dao.upsertPerson(person.copy(teamId = 0))
+        rememberTeamLeave(id, teamId)
         return teamId
+    }
+
+    /** Применить чужой join без повторной записи в журнал. */
+    suspend fun applyTeamJoin(logicalId: Int, otherLogicalId: Int, teamId: Int, droppedTeamId: Int) {
+        if (teamId <= 0) return
+        if (droppedTeamId > 0 && droppedTeamId != teamId) {
+            for (person in dao.listPeople()) {
+                if (person.teamId == droppedTeamId) {
+                    dao.upsertPerson(person.copy(teamId = teamId))
+                }
+            }
+        }
+        dao.person(logicalId)?.let { if (it.teamId != teamId) dao.upsertPerson(it.copy(teamId = teamId)) }
+        dao.person(otherLogicalId)?.let { if (it.teamId != teamId) dao.upsertPerson(it.copy(teamId = teamId)) }
+    }
+
+    suspend fun applyTeamAssign(logicalId: Int, teamId: Int) {
+        if (teamId <= 0) return
+        val person = dao.person(logicalId) ?: return
+        if (person.teamId != teamId) dao.upsertPerson(person.copy(teamId = teamId))
+    }
+
+    suspend fun applyTeamLeave(logicalId: Int) {
+        val person = dao.person(logicalId) ?: return
+        if (person.teamId > 0) dao.upsertPerson(person.copy(teamId = 0))
+    }
+
+    private suspend fun rememberTeamJoin(
+        logicalId: Int,
+        otherLogicalId: Int,
+        teamId: Int,
+        droppedTeamId: Int,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonTeamJoin(
+                logicalId = logicalId,
+                otherLogicalId = otherLogicalId,
+                teamId = teamId,
+                droppedTeamId = droppedTeamId,
+                eventSlug = eventSlug(),
+            )
+        }
+    }
+
+    private suspend fun rememberTeamAssign(logicalId: Int, teamId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonTeamAssign(logicalId, teamId, eventSlug())
+        }
+    }
+
+    private suspend fun rememberTeamLeave(logicalId: Int, teamId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonTeamLeave(logicalId, teamId, eventSlug())
+        }
     }
 
     suspend fun protocolSnapshotJson(): String {
@@ -600,13 +851,115 @@ class StartListStore(
         if (course.isNotBlank() && union.none { it.equals(course, ignoreCase = true) }) {
             union.add(course)
         }
+        val savedCourse = course.trim()
         dao.upsertPerson(
             existing.copy(
-                currentCourse = course.trim(),
+                currentCourse = savedCourse,
                 coursesJson = JSONArray(union).toString(),
                 localCourseTouchedAt = System.currentTimeMillis(),
             ),
         )
+        rememberPersonCourse(id, savedCourse, union)
+    }
+
+    /** Применить чужой upsert без повторной записи в журнал (issued* не трогаем). */
+    suspend fun applyPersonUpsert(
+        logicalId: Int,
+        name: String,
+        gender: String,
+        birthDate: String,
+        course: String,
+        courses: List<String>,
+    ) {
+        val existing = dao.person(logicalId)
+        val union = linkedSetOf<String>()
+        courses.forEach { if (it.isNotBlank()) union.add(it) }
+        if (course.isNotBlank()) union.add(course)
+        if (union.isEmpty() && existing != null) union.addAll(parseNames(existing.coursesJson))
+        val savedName = name.trim()
+        dao.upsertPerson(
+            StartPersonEntity(
+                logicalId = logicalId,
+                name = savedName,
+                currentCourse = course.trim().ifBlank { existing?.currentCourse.orEmpty() },
+                coursesJson = JSONArray(union.toList()).toString(),
+                origin = existing?.origin ?: ORIGIN_PHONE,
+                localCourseTouchedAt = System.currentTimeMillis(),
+                issuedAt = existing?.issuedAt ?: 0L,
+                issuedCourse = existing?.issuedCourse.orEmpty(),
+                gender = gender.trim().ifBlank { existing?.gender.orEmpty() },
+                birthDate = birthDate.trim().ifBlank { existing?.birthDate.orEmpty() },
+                teamId = existing?.teamId ?: 0,
+                issuedUid = existing?.issuedUid.orEmpty(),
+            ),
+        )
+        syncFinishPersonName(logicalId, savedName)
+    }
+
+    /** ФИО в финишной очереди — снимок; держим в синхроне со стартовым протоколом. */
+    private suspend fun syncFinishPersonName(logicalId: Int, name: String) {
+        if (name.isBlank()) return
+        runCatching { chipQueue?.updatePersonNameByLogicalId(logicalId, name) }
+    }
+
+    suspend fun applyPersonCourse(logicalId: Int, course: String, courses: List<String>) {
+        val existing = dao.person(logicalId) ?: return
+        val union = linkedSetOf<String>()
+        courses.forEach { if (it.isNotBlank()) union.add(it) }
+        if (course.isNotBlank()) union.add(course)
+        if (union.isEmpty()) union.addAll(parseNames(existing.coursesJson))
+        dao.upsertPerson(
+            existing.copy(
+                currentCourse = course.trim().ifBlank { existing.currentCourse },
+                coursesJson = JSONArray(union.toList()).toString(),
+                localCourseTouchedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun applyPersonDelete(logicalId: Int) {
+        dao.deletePerson(logicalId)
+    }
+
+    private suspend fun rememberPersonUpsert(
+        logicalId: Int,
+        name: String,
+        gender: String,
+        birthDate: String,
+        course: String,
+        courses: List<String>,
+    ) {
+        syncFinishPersonName(logicalId, name)
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonUpsert(
+                logicalId = logicalId,
+                name = name,
+                gender = gender,
+                birthDate = birthDate,
+                course = course,
+                courses = courses,
+                eventSlug = eventSlug(),
+            )
+        }
+    }
+
+    private suspend fun rememberPersonCourse(
+        logicalId: Int,
+        course: String,
+        courses: List<String>,
+    ) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonCourse(logicalId, course, courses, eventSlug())
+        }
+    }
+
+    private suspend fun rememberPersonDelete(logicalId: Int) {
+        val journal = fieldJournal ?: return
+        runCatching {
+            journal.recordPersonDelete(logicalId, eventSlug())
+        }
     }
 
     suspend fun resetAll() {

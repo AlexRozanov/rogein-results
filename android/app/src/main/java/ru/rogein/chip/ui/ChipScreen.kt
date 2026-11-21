@@ -97,6 +97,8 @@ import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipMemoryLog
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.StationActiveSpeed
+import ru.rogein.chip.parse.field.FieldSyncMode
+import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.nextFreeLogicalId
 import ru.rogein.chip.parse.nextFreeTeamId
@@ -431,13 +433,17 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         onTest = viewModel::testPrinter,
                         loadBonded = viewModel::bondedPrinters,
                     )
-                    MorePage.Starts -> StartsScreen(
-                        starts = visibleStarts,
-                        onOpen = viewModel::openStart,
-                        onDelete = viewModel::deleteStart,
-                        onExport = { viewModel.exportCsv(it) },
-                        onNewStart = { confirmNewStart = true },
-                    )
+                    MorePage.Starts -> {
+                        val syncState by viewModel.fieldSyncState.collectAsStateWithLifecycle()
+                        StartsScreen(
+                            starts = visibleStarts,
+                            onOpen = viewModel::openStart,
+                            onDelete = viewModel::deleteStart,
+                            onExport = { viewModel.exportCsv(it) },
+                            onNewStart = { confirmNewStart = true },
+                            archiveLocked = syncState.mode == FieldSyncMode.LAN,
+                        )
+                    }
                     MorePage.Removed -> RemovedCpsScreen(
                         courses = courses,
                         corrections = corrections,
@@ -470,20 +476,64 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         onRemoveCp = viewModel::addRogaineRemoveCp,
                         legendCps = EventStore.legendCps(settings),
                     )
-                    MorePage.Publish -> PublishScreen(
-                        settings = settings,
-                        busy = busy,
-                        onSave = viewModel::saveSettings,
-                        onTest = viewModel::testSite,
-                        onGenerateSlug = viewModel::saveAndGenerateSlug,
-                        onPublish = viewModel::requestPublish,
-                        onPickFromSite = viewModel::openUpcomingPicker,
-                    )
+                    MorePage.Publish -> {
+                        val syncState by viewModel.fieldSyncState.collectAsStateWithLifecycle()
+                        val lanOn = syncState.mode == FieldSyncMode.LAN
+                        val cloudOn = syncState.mode == FieldSyncMode.CLOUD
+                        val isHost = syncState.role == FieldSyncRole.HOST
+                        val canPublishLive = when {
+                            lanOn -> isHost
+                            cloudOn -> syncState.cloudPublisher
+                            else -> true
+                        }
+                        PublishScreen(
+                            settings = settings,
+                            busy = busy,
+                            showLivePublishToggle = canPublishLive,
+                            livePublishHint = when {
+                                lanOn && !isHost ->
+                                    "При полевом обмене результаты на сайт шлёт только хост."
+                                cloudOn && !syncState.cloudPublisher ->
+                                    "При облачном обмене live шлёт только издатель (включите в «Обмен»)."
+                                else -> null
+                            },
+                            onSave = viewModel::saveSettings,
+                            onTest = viewModel::testSite,
+                            onGenerateSlug = viewModel::saveAndGenerateSlug,
+                            onPublish = viewModel::requestPublish,
+                            onPickFromSite = viewModel::openUpcomingPicker,
+                        )
+                    }
                     MorePage.Settings -> EventSettingsScreen(
                         settings = settings,
                         busy = busy,
                         onSave = viewModel::saveSettings,
                     )
+                    MorePage.FieldSync -> {
+                        val syncState by viewModel.fieldSyncState.collectAsStateWithLifecycle()
+                        val hostProbe by viewModel.fieldHostProbe.collectAsStateWithLifecycle()
+                        FieldSyncScreen(
+                            state = syncState,
+                            eventSlug = settings.slug,
+                            hostProbe = hostProbe,
+                            onRefresh = viewModel::refreshFieldSync,
+                            onSaveAndApply = viewModel::saveFieldSync,
+                            onStop = viewModel::stopFieldSync,
+                            onBecomeHost = viewModel::becomeFieldHost,
+                            onPullSnapshot = viewModel::pullFieldSnapshot,
+                            onProbeHost = viewModel::probeFieldHost,
+                            onProbeCloud = viewModel::probeFieldCloud,
+                        )
+                    }
+                    MorePage.FieldJournal -> {
+                        val journalSnapshot by viewModel.fieldJournalSnapshot.collectAsStateWithLifecycle()
+                        FieldJournalScreen(
+                            snapshot = journalSnapshot,
+                            onRefresh = viewModel::refreshFieldJournal,
+                            onClear = viewModel::clearFieldJournal,
+                            onExport = viewModel::exportFieldJournal,
+                        )
+                    }
                 }
             }
         }
@@ -494,7 +544,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
             title = { Text("Новый старт") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Текущий сохранится в списке стартов. Выберите тип.")
+                    Text("Текущий сохранится в списке стартов. Журнал обмена очистится. Выберите тип.")
                     Button(
                         onClick = {
                             confirmNewStart = false
@@ -948,6 +998,8 @@ private fun topTitle(section: AppSection, morePage: MorePage, sportKind: String)
         MorePage.Corrections -> "Персональные корректировки"
         MorePage.Publish -> "Публикация на сайт"
         MorePage.Settings -> "Настройки старта"
+        MorePage.FieldSync -> "Настройки обмена"
+        MorePage.FieldJournal -> "Журнал обмена"
     }
 }
 
