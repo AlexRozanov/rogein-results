@@ -237,6 +237,11 @@ async fn serve() -> anyhow::Result<()> {
             "/api/field/{slug}/ops",
             get(field::get_field_ops).post(field::post_field_ops),
         )
+        .route(
+            "/api/field/{slug}/publisher",
+            axum::routing::post(field::claim_field_publisher)
+                .delete(field::release_field_publisher),
+        )
         .route("/api/packs/{slug}", get(get_event_pack).put(put_event_pack))
         .route(
             "/api/packs/{slug}/map",

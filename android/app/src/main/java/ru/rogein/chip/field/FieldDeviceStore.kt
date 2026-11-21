@@ -53,9 +53,9 @@ class FieldDeviceStore(context: Context) {
             prefs.edit().putString(KEY_SYNC_ROLE, next).apply()
         }
 
-    /** В cloud: этот телефон шлёт PUT /api/live (один издатель на старт). */
+    /** В cloud: этот телефон шлёт PUT /api/live (один издатель на старт). По умолчанию выкл. */
     var cloudPublisher: Boolean
-        get() = prefs.getBoolean(KEY_CLOUD_PUBLISHER, true)
+        get() = prefs.getBoolean(KEY_CLOUD_PUBLISHER, false)
         set(value) {
             prefs.edit().putBoolean(KEY_CLOUD_PUBLISHER, value).apply()
         }

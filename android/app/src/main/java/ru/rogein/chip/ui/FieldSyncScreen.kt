@@ -102,6 +102,9 @@ fun FieldSyncScreen(
     onPullSnapshot: () -> Unit = {},
     onProbeHost: (hostIp: String, hostPort: Int, startCode: String) -> Unit = { _, _, _ -> },
     onProbeCloud: (startCode: String) -> Unit = {},
+    onClaimPublisher: (force: Boolean) -> Unit = {},
+    /** Сохранить режим в prefs без запуска (после Стоп при переключении чипа). */
+    onDraftMode: (mode: String, cloudPublisher: Boolean) -> Unit = { _, _ -> },
 ) {
     LaunchedEffect(Unit) { onRefresh() }
     val context = LocalContext.current
@@ -122,7 +125,21 @@ fun FieldSyncScreen(
     var networkHintOpen by remember { mutableStateOf(false) }
     var becomeHostConfirm by remember { mutableStateOf(false) }
     var transportHintOpen by remember { mutableStateOf(false) }
+    var stealPublisherConfirm by remember { mutableStateOf(false) }
     val slug = eventSlug.ifBlank { state.eventSlug }
+
+    fun selectMode(next: String) {
+        if (next == mode) return
+        if (state.running) onStop()
+        mode = next
+        val publisher = if (next == FieldSyncMode.CLOUD) {
+            cloudPublisher = false
+            false
+        } else {
+            cloudPublisher
+        }
+        onDraftMode(next, publisher)
+    }
 
     fun applyJoinPayload(raw: String) {
         val join = FieldDeviceStore.parseJoinUri(raw)
@@ -190,33 +207,27 @@ fun FieldSyncScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(
-            when (mode) {
-                FieldSyncMode.CLOUD ->
-                    "Журнал через сайт: все телефоны шлют операции на API и fold локально. " +
-                        "Нужны адрес сайта и токен публикации (настройки live). Live PUT — только у издателя."
-                FieldSyncMode.LAN ->
-                    "Один хост в локальной Wi‑Fi. Клиенты шлют выдачу и финиш хосту и забирают чужие операции. Публикация на сайт — отдельно."
-                else ->
-                    "Полевой обмен выключен. Можно включить локальную сеть или облако через сайт."
-            },
-            color = Muted,
-        )
+        if (mode == FieldSyncMode.LAN) {
+            Text(
+                "Один хост в локальной Wi‑Fi. Клиенты шлют выдачу и финиш хосту и забирают чужие операции. Публикация на сайт — отдельно.",
+                color = Muted,
+            )
+        }
         Text("Режим", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = mode == FieldSyncMode.OFF,
-                onClick = { mode = FieldSyncMode.OFF },
+                onClick = { selectMode(FieldSyncMode.OFF) },
                 label = { Text("Выкл") },
             )
             FilterChip(
                 selected = mode == FieldSyncMode.LAN,
-                onClick = { mode = FieldSyncMode.LAN },
+                onClick = { selectMode(FieldSyncMode.LAN) },
                 label = { Text("Локальная сеть") },
             )
             FilterChip(
                 selected = mode == FieldSyncMode.CLOUD,
-                onClick = { mode = FieldSyncMode.CLOUD },
+                onClick = { selectMode(FieldSyncMode.CLOUD) },
                 label = { Text("Облако") },
             )
         }
@@ -449,18 +460,36 @@ fun FieldSyncScreen(
                 )
                 Switch(
                     checked = cloudPublisher,
-                    onCheckedChange = { cloudPublisher = it },
+                    onCheckedChange = { want ->
+                        if (want && state.cloudPublisherName.isNotBlank() &&
+                            !state.cloudPublisherName.equals(deviceName, ignoreCase = true) &&
+                            state.cloudPublisherName != state.deviceId
+                        ) {
+                            stealPublisherConfirm = true
+                        } else {
+                            cloudPublisher = want
+                            if (want && state.running) onClaimPublisher(false)
+                        }
+                    },
                 )
             }
-            Text(
-                if (cloudPublisher) {
-                    "Этот телефон будет слать PUT live. На остальных издавание выключите."
-                } else {
-                    "Live с этого телефона не уходит — только синхронизация журнала."
-                },
-                color = Muted,
-                style = MaterialTheme.typography.bodySmall,
-            )
+            when {
+                cloudPublisher -> Text(
+                    "Этот телефон — единственный live-издатель (роль держится на сайте).",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                state.cloudPublisherName.isNotBlank() -> Text(
+                    "Сейчас издатель: ${state.cloudPublisherName}",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                else -> Text(
+                    "Live с этого телефона не уходит — только журнал.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             when {
                 hostProbe.checking -> Text("Проверка связи с сайтом…", color = Muted)
                 hostProbe.reachable -> Text("Сайт отвечает — можно запускать.", color = Color(0xFF1B4D3E))
@@ -593,6 +622,30 @@ fun FieldSyncScreen(
             },
             dismissButton = {
                 TextButton(onClick = { becomeHostConfirm = false }) { Text("Отмена") }
+            },
+        )
+    }
+    if (stealPublisherConfirm) {
+        AlertDialog(
+            onDismissRequest = { stealPublisherConfirm = false },
+            title = { Text("Перехватить online?") },
+            text = {
+                Text(
+                    "Сейчас online шлёт «${state.cloudPublisherName}». " +
+                        "Два издателя затрут друг друга — перехватить роль на этот телефон?",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        stealPublisherConfirm = false
+                        cloudPublisher = true
+                        onClaimPublisher(true)
+                    },
+                ) { Text("Перехватить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { stealPublisherConfirm = false }) { Text("Отмена") }
             },
         )
     }

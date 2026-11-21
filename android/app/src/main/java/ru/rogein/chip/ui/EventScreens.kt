@@ -4293,10 +4293,6 @@ fun PublishScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(
-            "Адрес — корень сайта, как в браузере: https://malahit-sprint.ru (без :18790). Адрес и токен остаются на телефоне после «Новый старт».",
-            color = Muted,
-        )
         if (showLivePublishToggle) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,

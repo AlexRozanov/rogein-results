@@ -116,6 +116,42 @@ async fn authorize_field(
     ensure_session(&state.pool, slug, &code).await
 }
 
+fn device_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-rogein-device-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn device_name(headers: &HeaderMap) -> String {
+    headers
+        .get("x-rogein-device-name")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+async fn load_publisher(pool: &PgPool, slug: &str) -> Result<(Option<String>, String), (StatusCode, String)> {
+    let row: Option<(Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT publisher_device_id, COALESCE(publisher_name, '')
+        FROM field_sessions
+        WHERE slug = $1
+        "#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(internal)?;
+    Ok(match row {
+        Some((id, name)) => (id.filter(|s| !s.is_empty()), name),
+        None => (None, String::new()),
+    })
+}
+
 pub async fn field_hello(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -128,6 +164,7 @@ pub async fn field_hello(
         .fetch_one(&state.pool)
         .await
         .map_err(internal)?;
+    let (publisher_id, publisher_name) = load_publisher(&state.pool, &slug).await?;
     Ok(Json(json!({
         "ok": true,
         "protocol_version": FIELD_PROTOCOL_VERSION,
@@ -135,6 +172,98 @@ pub async fn field_hello(
         "event_slug": slug,
         "op_count": op_count,
         "mode": "cloud",
+        "publisher_device_id": publisher_id,
+        "publisher_name": publisher_name,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublisherClaimBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Захватить роль live-издателя. 409 если занято другим и force=false.
+pub async fn claim_field_publisher(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PublisherClaimBody>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let slug = normalize_slug(&slug)?;
+    authorize_field(&state, &headers, &slug).await?;
+    let me = device_id(&headers);
+    if me.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "нужен X-RogeIn-Device-Id".into()));
+    }
+    let name = device_name(&headers);
+    let (current_id, current_name) = load_publisher(&state.pool, &slug).await?;
+    if let Some(other) = current_id.as_ref() {
+        if other != &me && !body.force {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "издатель уже: {} ({})",
+                    if current_name.is_empty() { other.as_str() } else { current_name.as_str() },
+                    other
+                ),
+            ));
+        }
+    }
+    sqlx::query(
+        r#"
+        UPDATE field_sessions
+        SET publisher_device_id = $2,
+            publisher_name = $3,
+            publisher_claimed_at = now(),
+            updated_at = now()
+        WHERE slug = $1
+        "#,
+    )
+    .bind(&slug)
+    .bind(&me)
+    .bind(&name)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(json!({
+        "ok": true,
+        "publisher_device_id": me,
+        "publisher_name": name,
+    })))
+}
+
+/// Снять роль издателя (только владелец).
+pub async fn release_field_publisher(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let slug = normalize_slug(&slug)?;
+    authorize_field(&state, &headers, &slug).await?;
+    let me = device_id(&headers);
+    if me.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "нужен X-RogeIn-Device-Id".into()));
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE field_sessions
+        SET publisher_device_id = NULL,
+            publisher_name = '',
+            publisher_claimed_at = NULL,
+            updated_at = now()
+        WHERE slug = $1
+          AND publisher_device_id = $2
+        "#,
+    )
+    .bind(&slug)
+    .bind(&me)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(json!({
+        "ok": true,
+        "released": result.rows_affected() > 0,
     })))
 }
 

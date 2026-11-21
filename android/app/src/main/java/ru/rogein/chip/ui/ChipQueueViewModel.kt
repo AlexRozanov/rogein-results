@@ -15,6 +15,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.rogein.chip.event.buildEventSlug
 import ru.rogein.chip.field.FieldDeviceStore
+import ru.rogein.chip.parse.field.FieldSyncMode
 import ru.rogein.chip.parse.BLOCK_COUNT
 import ru.rogein.chip.parse.BlockOrder
 import ru.rogein.chip.parse.CP_CLEAR
@@ -493,13 +494,53 @@ class ChipQueueViewModel(
         startCode: String,
         hostBaseUrl: String,
         transport: String = ru.rogein.chip.parse.field.FieldTransport.AUTO,
-        cloudPublisher: Boolean = true,
+        cloudPublisher: Boolean = false,
     ) {
         repository.fieldSync.updateSettings(
             mode, role, deviceName, startCode, hostBaseUrl, transport, cloudPublisher,
         )
         repository.fieldSync.start(viewModelScope)
         refreshFieldJournal()
+    }
+
+    fun draftFieldMode(mode: String, cloudPublisher: Boolean) {
+        val s = repository.fieldSync.state.value
+        repository.fieldSync.updateSettings(
+            mode = mode,
+            role = s.role,
+            deviceName = s.deviceName,
+            startCode = s.startCode,
+            hostBaseUrl = s.hostBaseUrl,
+            transport = s.transport,
+            cloudPublisher = cloudPublisher,
+        )
+    }
+
+    fun claimFieldPublisher(force: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val s = repository.fieldSync.state.value
+                repository.fieldSync.updateSettings(
+                    mode = FieldSyncMode.CLOUD,
+                    role = s.role,
+                    deviceName = s.deviceName,
+                    startCode = s.startCode,
+                    hostBaseUrl = s.hostBaseUrl,
+                    transport = s.transport,
+                    cloudPublisher = true,
+                )
+                val conflict = repository.fieldSync.claimCloudPublisher(force)
+                if (conflict != null) {
+                    _status.value = conflict
+                } else {
+                    _status.value = "Этот телефон — издатель online"
+                }
+                repository.fieldSync.refreshUi()
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось стать издателем"
+                repository.fieldSync.refreshUi()
+            }
+        }
     }
 
     fun stopFieldSync() {

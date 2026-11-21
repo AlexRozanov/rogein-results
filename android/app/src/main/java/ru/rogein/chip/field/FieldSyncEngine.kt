@@ -67,7 +67,9 @@ data class FieldSyncUiState(
     /** Фактически используемый канал: websocket / http / cloud / "". */
     val activeChannel: String = "",
     /** Cloud: этот телефон — издатель live. */
-    val cloudPublisher: Boolean = true,
+    val cloudPublisher: Boolean = false,
+    /** Имя текущего cloud-издателя на сайте (если есть). */
+    val cloudPublisherName: String = "",
 )
 
 /**
@@ -93,6 +95,7 @@ class FieldSyncEngine(
     private var scope: CoroutineScope? = null
     private var cachedSlug: String = ""
     private var activeChannel: String = ""
+    private var remotePublisherName: String = ""
     private val liveWs = AtomicReference<WebSocket?>(null)
     private val okHttp by lazy {
         OkHttpClient.Builder()
@@ -166,6 +169,15 @@ class FieldSyncEngine(
         }
         if (device.cloudEnabled) {
             loopJob = scope.launch(Dispatchers.IO) {
+                runCatching { prepareCloudPublisher() }
+                    .onFailure { err ->
+                        device.cloudPublisher = false
+                        _state.value = readUiState(
+                            running = true,
+                            status = "облако…",
+                            lastError = err.message,
+                        )
+                    }
                 cloudPollLoop()
             }
             _state.value = readUiState(running = true, status = "облако…")
@@ -208,7 +220,14 @@ class FieldSyncEngine(
     }
 
     fun stop() {
+        val wasCloudPublisher = device.cloudEnabled && device.cloudPublisher
+        val releaseScope = scope
         stopInternal()
+        if (wasCloudPublisher && releaseScope != null) {
+            releaseScope.launch(Dispatchers.IO) {
+                runCatching { releaseCloudPublisher() }
+            }
+        }
         _state.value = readUiState(
             running = false,
             status = if (device.fieldSyncEnabled) "остановлен" else "выкл",
@@ -444,8 +463,67 @@ class FieldSyncEngine(
             }
             val remoteSlug = obj.optString("event_slug").trim()
             cachedSlug = remoteSlug.ifBlank { cachedSlug }
+            remotePublisherName = obj.optString("publisher_name").trim()
+                .ifBlank { obj.optString("publisher_device_id").trim() }
         } finally {
             conn.disconnect()
+        }
+    }
+
+    /**
+     * Захват роли издателя на сайте. При 409 без force — сбрасываем локальный флаг.
+     * @return null если ок / не нужен; иначе текст конфликта (для UI force).
+     */
+    suspend fun claimCloudPublisher(force: Boolean = false): String? {
+        if (!device.cloudEnabled) return null
+        helloCloud()
+        val base = cloudFieldBase()
+        val conn = open(base, "/publisher", "POST", bearer = true)
+        try {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            val payload = JSONObject().put("force", force).toString()
+                .toByteArray(StandardCharsets.UTF_8)
+            conn.outputStream.use { it.write(payload) }
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText().orEmpty()
+            if (code == 409) {
+                device.cloudPublisher = false
+                return body.ifBlank { "издатель уже занят" }
+            }
+            if (code == 401) error("неверный токен или пароль")
+            if (code !in 200..299) error("publisher HTTP $code: $body")
+            device.cloudPublisher = true
+            remotePublisherName = device.deviceName
+            return null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    suspend fun releaseCloudPublisher() {
+        if (!device.cloudEnabled) return
+        runCatching {
+            val base = cloudFieldBase()
+            val conn = open(base, "/publisher", "DELETE", bearer = true)
+            try {
+                conn.responseCode
+            } finally {
+                conn.disconnect()
+            }
+        }
+        if (remotePublisherName == device.deviceName) remotePublisherName = ""
+    }
+
+    private suspend fun prepareCloudPublisher() {
+        if (!device.cloudPublisher) {
+            helloCloud()
+            return
+        }
+        val conflict = claimCloudPublisher(force = false)
+        if (conflict != null) {
+            error(conflict)
         }
     }
 
@@ -865,6 +943,7 @@ class FieldSyncEngine(
             transport = device.transport,
             activeChannel = activeChannel,
             cloudPublisher = device.cloudPublisher,
+            cloudPublisherName = remotePublisherName,
         )
     }
 }
