@@ -66,13 +66,14 @@ build:android:
     - apt-get update -qq && apt-get install -y -qq wget unzip > /dev/null
     - mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
     - |
+      set -euo pipefail
       if [[ ! -x "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]]; then
         wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdtools.zip
         unzip -q /tmp/cmdtools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
         mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
       fi
-    - yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-    - "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+      yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
   script:
     - |
       set -euo pipefail
@@ -88,15 +89,10 @@ build:android:
       ./gradlew :app:assembleRelease "${ARGS[@]}"
       mkdir -p ../dist-android
       cp app/build/outputs/apk/release/app-release.apk ../dist-android/rogein-chip.apk
-      # versionName/Code из собранного манифеста не читаем — пишем из gradle defaults / tag
       VNAME="${NAME:-$(sed -n 's/.*versionName = .*?: \"\([^\"]*\)\".*/\1/p' app/build.gradle.kts | head -1)}"
       VCODE="$(sed -n 's/.*versionCode = .*?: \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -1)"
-      printf '%s\n' "{" \
-        "  \"versionName\": \"${VNAME}\"," \
-        "  \"versionCode\": ${VCODE}," \
-        "  \"url\": \"/api/admin/app/download\"," \
-        "  \"updatedAt\": \"$(date -u +%Y-%m-%d)\"" \
-        "}" > ../dist-android/version.json
+      printf '%s\n' "{\"versionName\":\"${VNAME}\",\"versionCode\":${VCODE},\"url\":\"/api/admin/app/download\",\"updatedAt\":\"$(date -u +%Y-%m-%d)\"}" \
+        > ../dist-android/version.json
   artifacts:
     when: on_success
     expire_in: 30 days
