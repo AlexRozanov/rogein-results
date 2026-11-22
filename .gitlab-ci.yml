@@ -7,6 +7,7 @@ default:
 variables:
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm"
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
 
 cache:
   key: "$CI_JOB_NAME"
@@ -14,6 +15,7 @@ cache:
     - .npm/
     - .cargo/
     - tauri-vue-sqlite/src-tauri/target/
+    - .android-sdk/
 
 build:windows:
   stage: build
@@ -51,3 +53,53 @@ build:macos:
     paths:
       - tauri-vue-sqlite/src-tauri/target/release/bundle/macos/**/*
       - tauri-vue-sqlite/src-tauri/target/release/bundle/dmg/**/*
+
+# Внутренний APK для команды (раздача через /admin/app).
+build:android:
+  stage: build
+  image: eclipse-temurin:17-jdk-jammy
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^android-v/
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq wget unzip > /dev/null
+    - mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+    - |
+      if [[ ! -x "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]]; then
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdtools.zip
+        unzip -q /tmp/cmdtools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+        mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+      fi
+    - yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+    - "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+  script:
+    - |
+      set -euo pipefail
+      NAME=""
+      CODE=""
+      if [[ "${CI_COMMIT_TAG:-}" == android-v* ]]; then
+        NAME="${CI_COMMIT_TAG#android-v}"
+      fi
+      ARGS=()
+      if [[ -n "${NAME}" ]]; then ARGS+=(-PversionName="${NAME}"); fi
+      if [[ -n "${CODE}" ]]; then ARGS+=(-PversionCode="${CODE}"); fi
+      cd android
+      ./gradlew :app:assembleRelease "${ARGS[@]}"
+      mkdir -p ../dist-android
+      cp app/build/outputs/apk/release/app-release.apk ../dist-android/rogein-chip.apk
+      # versionName/Code из собранного манифеста не читаем — пишем из gradle defaults / tag
+      VNAME="${NAME:-$(sed -n 's/.*versionName = .*?: \"\([^\"]*\)\".*/\1/p' app/build.gradle.kts | head -1)}"
+      VCODE="$(sed -n 's/.*versionCode = .*?: \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -1)"
+      printf '%s\n' "{" \
+        "  \"versionName\": \"${VNAME}\"," \
+        "  \"versionCode\": ${VCODE}," \
+        "  \"url\": \"/api/admin/app/download\"," \
+        "  \"updatedAt\": \"$(date -u +%Y-%m-%d)\"" \
+        "}" > ../dist-android/version.json
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    paths:
+      - dist-android/rogein-chip.apk
+      - dist-android/version.json
