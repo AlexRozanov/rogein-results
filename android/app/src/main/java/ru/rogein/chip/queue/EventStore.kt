@@ -53,6 +53,8 @@ import ru.rogein.chip.parse.personAwardCategories
 import ru.rogein.chip.parse.protocolStatusRank
 import ru.rogein.chip.parse.storedBirthDate
 import ru.rogein.chip.field.FieldJournal
+import ru.rogein.chip.field.FieldNetPrefer
+import ru.rogein.chip.field.FieldNetworkPaths
 import ru.rogein.chip.parse.field.correctionIdFromLocalPayload
 import ru.rogein.chip.parse.field.newCorrectionId
 import ru.rogein.chip.parse.parseDaySeconds
@@ -1488,8 +1490,35 @@ class EventStore(
 
         private data class ByteDownload(val bytes: ByteArray, val fileName: String)
 
+        private fun openSiteConnection(url: String, forceWifi: Boolean = false): HttpURLConnection {
+            val paths = FieldNetworkPaths.getOrNull()
+            return when {
+                paths == null -> URL(url).openConnection() as HttpURLConnection
+                forceWifi -> paths.openWifiSiteConnection(url)
+                else -> paths.openConnection(url, FieldNetPrefer.SITE)
+            }
+        }
+
         private fun requestBytes(method: String, url: String, token: String): ByteDownload? {
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            return try {
+                requestBytesOnce(method, url, token, forceWifi = false)
+            } catch (e: Exception) {
+                val paths = FieldNetworkPaths.getOrNull()
+                if (paths != null && paths.siteUplinkIsCellular()) {
+                    requestBytesOnce(method, url, token, forceWifi = true)
+                } else {
+                    throw e
+                }
+            }
+        }
+
+        private fun requestBytesOnce(
+            method: String,
+            url: String,
+            token: String,
+            forceWifi: Boolean,
+        ): ByteDownload? {
+            val connection = openSiteConnection(url, forceWifi).apply {
                 requestMethod = method
                 connectTimeout = 12_000
                 readTimeout = 30_000
@@ -1511,7 +1540,26 @@ class EventStore(
         }
 
         private fun request(method: String, url: String, body: String?, token: String?): Pair<Int, String> {
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            return try {
+                requestOnce(method, url, body, token, forceWifi = false)
+            } catch (e: Exception) {
+                val paths = FieldNetworkPaths.getOrNull()
+                if (paths != null && paths.siteUplinkIsCellular()) {
+                    requestOnce(method, url, body, token, forceWifi = true)
+                } else {
+                    throw e
+                }
+            }
+        }
+
+        private fun requestOnce(
+            method: String,
+            url: String,
+            body: String?,
+            token: String?,
+            forceWifi: Boolean,
+        ): Pair<Int, String> {
+            val connection = openSiteConnection(url, forceWifi).apply {
                 requestMethod = method
                 connectTimeout = 12_000
                 readTimeout = 20_000

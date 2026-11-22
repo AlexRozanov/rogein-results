@@ -126,12 +126,55 @@ fn device_id(headers: &HeaderMap) -> String {
 }
 
 fn device_name(headers: &HeaderMap) -> String {
-    headers
+    let raw = headers
         .get("x-rogein-device-name")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .trim()
-        .to_string()
+        .trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    percent_decode_utf8(raw)
+}
+
+/// Percent-decode UTF-8 (как Android URLEncoder для X-RogeIn-Device-Name).
+fn percent_decode_utf8(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let h = from_hex(bytes[i + 1]);
+                let l = from_hex(bytes[i + 2]);
+                if let (Some(hi), Some(lo)) = (h, l) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                    continue;
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 async fn load_publisher(pool: &PgPool, slug: &str) -> Result<(Option<String>, String), (StatusCode, String)> {
@@ -147,7 +190,15 @@ async fn load_publisher(pool: &PgPool, slug: &str) -> Result<(Option<String>, St
     .await
     .map_err(internal)?;
     Ok(match row {
-        Some((id, name)) => (id.filter(|s| !s.is_empty()), name),
+        // Старые записи могли сохранить percent-encoded имя из заголовка.
+        Some((id, name)) => (
+            id.filter(|s| !s.is_empty()),
+            if name.is_empty() {
+                name
+            } else {
+                percent_decode_utf8(&name)
+            },
+        ),
         None => (None, String::new()),
     })
 }

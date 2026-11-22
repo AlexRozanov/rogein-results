@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use chrono::{DateTime, NaiveDate, Utc};
 use image::GenericImageView;
@@ -675,4 +676,58 @@ fn conflict_or_internal(err: sqlx::Error, conflict: &str) -> (StatusCode, String
         }
     }
     internal(err)
+}
+
+/// Метаданные APK для личного кабинета (любой вошедший пользователь).
+pub async fn android_app_version(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = state.android_app_dir.join("version.json");
+    let raw = tokio::fs::read_to_string(&path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            "version.json не найден — выложите APK (publish-android-apk.sh)".into(),
+        )
+    })?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "битый version.json".into(),
+        )
+    })?;
+    let apk_ok = state.android_app_dir.join("rogein-chip.apk").is_file();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("apkAvailable".into(), serde_json::json!(apk_ok));
+        obj.insert("url".into(), serde_json::json!("/api/admin/app/download"));
+    }
+    Ok(Json(value))
+}
+
+/// Скачивание APK только из сессии админки.
+pub async fn android_app_download(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<Response, (StatusCode, String)> {
+    let path = state.android_app_dir.join("rogein-chip.apk");
+    let raw = tokio::fs::read(&path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            "APK не найден — выложите файл через publish-android-apk.sh и деплой".into(),
+        )
+    })?;
+    let mut res = Response::new(axum::body::Body::from(raw));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.android.package-archive"),
+    );
+    res.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"rogein-chip.apk\""),
+    );
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok(res)
 }

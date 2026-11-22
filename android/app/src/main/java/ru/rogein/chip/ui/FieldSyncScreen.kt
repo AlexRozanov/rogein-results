@@ -62,6 +62,7 @@ import kotlinx.coroutines.delay
 import ru.rogein.chip.field.FieldDeviceStore
 import ru.rogein.chip.field.FieldPeerView
 import ru.rogein.chip.field.FieldSyncUiState
+import ru.rogein.chip.parse.field.FieldSiteUplink
 import ru.rogein.chip.parse.field.FieldSyncMode
 import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.parse.field.FieldTransport
@@ -82,6 +83,46 @@ private const val NETWORK_HINT =
         "Если интернет раздаёт другой телефон — смотрите строку «Раздающий Wi‑Fi». " +
         "Пока хост запущен, экран не гаснет, а в шторке висит уведомление — так Android не усыпляет Wi‑Fi."
 
+private const val MODE_HINT =
+    "Выкл — обмен между телефонами не используется, один аппарат как раньше.\n\n" +
+        "Локальная сеть — телефоны в одной Wi‑Fi (раздача с телефона или карманный роутер). " +
+        "Один хост принимает данные, остальные — клиенты. Работает без интернета.\n\n" +
+        "Облако — журнал через сайт, нужен интернет у каждого. Live шлёт только издатель.\n\n" +
+        "На одном старте выбирайте один режим на всех телефонах."
+
+private const val ROLE_HINT =
+    "Хост — главный телефон: слушает порт обмена, принимает выдачу и финиш с клиентов, " +
+        "обычно он же шлёт результаты на сайт. На старте ровно один хост.\n\n" +
+        "Клиент — подключается к хосту по IP или QR, шлёт свои операции и забирает чужие.\n\n" +
+        "Хост принимает и WebSocket, и HTTP; выбор канала связи — только на клиентах."
+
+private const val SITE_UPLINK_HINT =
+    "Куда этот хост отправляет результаты на сайт (обмен между телефонами всегда по Wi‑Fi).\n\n" +
+        "Авто — если у Wi‑Fi (роутера) есть интернет, шлёт через него; иначе через LTE.\n\n" +
+        "LTE — всегда мобильный интернет.\n\n" +
+        "Wi‑Fi — всегда через роутер (у роутера должен быть интернет).\n\n" +
+        "Менять можно на лету, хост перезапускать не нужно."
+
+@Composable
+private fun FieldSectionTitle(
+    title: String,
+    onInfo: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onInfo, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Default.Info, contentDescription = "Справка: $title", tint = Muted)
+        }
+    }
+}
+
 @Composable
 fun FieldSyncScreen(
     state: FieldSyncUiState,
@@ -96,6 +137,7 @@ fun FieldSyncScreen(
         hostBaseUrl: String,
         transport: String,
         cloudPublisher: Boolean,
+        siteUplink: String,
     ) -> Unit,
     onStop: () -> Unit,
     onBecomeHost: () -> Unit = {},
@@ -105,6 +147,8 @@ fun FieldSyncScreen(
     onClaimPublisher: (force: Boolean) -> Unit = {},
     /** Сохранить режим в prefs без запуска (после Стоп при переключении чипа). */
     onDraftMode: (mode: String, cloudPublisher: Boolean) -> Unit = { _, _ -> },
+    /** Сменить канал сайта/live без рестарта хоста. */
+    onSiteUplink: (siteUplink: String) -> Unit = {},
 ) {
     LaunchedEffect(Unit) { onRefresh() }
     val context = LocalContext.current
@@ -121,11 +165,15 @@ fun FieldSyncScreen(
     }
     var transport by remember(state.transport) { mutableStateOf(state.transport) }
     var cloudPublisher by remember(state.cloudPublisher) { mutableStateOf(state.cloudPublisher) }
+    var siteUplink by remember(state.siteUplink) { mutableStateOf(state.siteUplink) }
     var passwordHintOpen by remember { mutableStateOf(false) }
     var networkHintOpen by remember { mutableStateOf(false) }
     var becomeHostConfirm by remember { mutableStateOf(false) }
     var transportHintOpen by remember { mutableStateOf(false) }
     var stealPublisherConfirm by remember { mutableStateOf(false) }
+    var modeHintOpen by remember { mutableStateOf(false) }
+    var roleHintOpen by remember { mutableStateOf(false) }
+    var siteUplinkHintOpen by remember { mutableStateOf(false) }
     val slug = eventSlug.ifBlank { state.eventSlug }
 
     fun selectMode(next: String) {
@@ -207,13 +255,7 @@ fun FieldSyncScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (mode == FieldSyncMode.LAN) {
-            Text(
-                "Один хост в локальной Wi‑Fi. Клиенты шлют выдачу и финиш хосту и забирают чужие операции. Публикация на сайт — отдельно.",
-                color = Muted,
-            )
-        }
-        Text("Режим", style = MaterialTheme.typography.titleMedium)
+        FieldSectionTitle("Режим", onInfo = { modeHintOpen = true })
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = mode == FieldSyncMode.OFF,
@@ -240,7 +282,7 @@ fun FieldSyncScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         if (mode == FieldSyncMode.LAN) {
-            Text("Роль", style = MaterialTheme.typography.titleMedium)
+            FieldSectionTitle("Роль", onInfo = { roleHintOpen = true })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = role == FieldSyncRole.HOST,
@@ -324,12 +366,6 @@ fun FieldSyncScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-            } else if (role == FieldSyncRole.HOST) {
-                Text(
-                    "Хост всегда принимает и WebSocket, и HTTP. Выбор канала — на клиентах.",
-                    color = Muted,
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
             if (role == FieldSyncRole.CLIENT) {
                 val exampleIp = state.gatewayIp.ifBlank { state.localIp }.ifBlank { "192.168.43.1" }
@@ -416,6 +452,31 @@ fun FieldSyncScreen(
                     slug = slug,
                     startCode = startCode,
                 )
+            }
+            if (role == FieldSyncRole.HOST) {
+                FieldSectionTitle("Куда слать online", onInfo = { siteUplinkHintOpen = true })
+                fun pickUplink(next: String) {
+                    if (siteUplink == next) return
+                    siteUplink = next
+                    onSiteUplink(next)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = siteUplink == FieldSiteUplink.AUTO,
+                        onClick = { pickUplink(FieldSiteUplink.AUTO) },
+                        label = { Text("Авто") },
+                    )
+                    FilterChip(
+                        selected = siteUplink == FieldSiteUplink.CELLULAR,
+                        onClick = { pickUplink(FieldSiteUplink.CELLULAR) },
+                        label = { Text("LTE") },
+                    )
+                    FilterChip(
+                        selected = siteUplink == FieldSiteUplink.WIFI,
+                        onClick = { pickUplink(FieldSiteUplink.WIFI) },
+                        label = { Text("Wi‑Fi") },
+                    )
+                }
             }
             if (state.running && role == FieldSyncRole.HOST) {
                 FieldPeersBlock(peers = state.peers)
@@ -507,9 +568,23 @@ fun FieldSyncScreen(
                 )
             }
         }
-        Text("Статус: ${state.status}", style = MaterialTheme.typography.bodyMedium)
+        Text("Статус", style = MaterialTheme.typography.titleMedium)
+        val statusLines = remember(state.status) {
+            state.status
+                .split(" · ")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .ifEmpty { listOf(state.status.ifBlank { "—" }) }
+        }
+        statusLines.forEachIndexed { index, line ->
+            Text(
+                if (index == 0) line else "· $line",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         if (!state.lastError.isNullOrBlank()) {
-            Text(state.lastError, color = Danger)
+            Text(state.lastError!!, color = Danger, modifier = Modifier.fillMaxWidth())
         }
         Text(
             "device_id  ${state.deviceId}",
@@ -524,7 +599,9 @@ fun FieldSyncScreen(
         if (mode == FieldSyncMode.OFF) {
             Button(
                 onClick = {
-                    onSaveAndApply(mode, role, deviceName, startCode, "", transport, cloudPublisher)
+                    onSaveAndApply(
+                        mode, role, deviceName, startCode, "", transport, cloudPublisher, siteUplink,
+                    )
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Сохранить") }
@@ -564,7 +641,9 @@ fun FieldSyncScreen(
                     } else {
                         ""
                     }
-                    onSaveAndApply(mode, role, deviceName, startCode, endpoint, transport, cloudPublisher)
+                    onSaveAndApply(
+                        mode, role, deviceName, startCode, endpoint, transport, cloudPublisher, siteUplink,
+                    )
                 },
                 enabled = startEnabled,
                 modifier = Modifier.fillMaxWidth(),
@@ -580,6 +659,36 @@ fun FieldSyncScreen(
                 Text("Обновить статус / IP")
             }
         }
+    }
+    if (modeHintOpen) {
+        AlertDialog(
+            onDismissRequest = { modeHintOpen = false },
+            title = { Text("Режим") },
+            text = { Text(MODE_HINT) },
+            confirmButton = {
+                TextButton(onClick = { modeHintOpen = false }) { Text("Понятно") }
+            },
+        )
+    }
+    if (roleHintOpen) {
+        AlertDialog(
+            onDismissRequest = { roleHintOpen = false },
+            title = { Text("Роль") },
+            text = { Text(ROLE_HINT) },
+            confirmButton = {
+                TextButton(onClick = { roleHintOpen = false }) { Text("Понятно") }
+            },
+        )
+    }
+    if (siteUplinkHintOpen) {
+        AlertDialog(
+            onDismissRequest = { siteUplinkHintOpen = false },
+            title = { Text("Куда слать online") },
+            text = { Text(SITE_UPLINK_HINT) },
+            confirmButton = {
+                TextButton(onClick = { siteUplinkHintOpen = false }) { Text("Понятно") }
+            },
+        )
     }
     if (passwordHintOpen) {
         AlertDialog(

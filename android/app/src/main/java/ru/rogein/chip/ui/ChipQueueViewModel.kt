@@ -495,9 +495,10 @@ class ChipQueueViewModel(
         hostBaseUrl: String,
         transport: String = ru.rogein.chip.parse.field.FieldTransport.AUTO,
         cloudPublisher: Boolean = false,
+        siteUplink: String = ru.rogein.chip.parse.field.FieldSiteUplink.AUTO,
     ) {
         repository.fieldSync.updateSettings(
-            mode, role, deviceName, startCode, hostBaseUrl, transport, cloudPublisher,
+            mode, role, deviceName, startCode, hostBaseUrl, transport, cloudPublisher, siteUplink,
         )
         repository.fieldSync.start(viewModelScope)
         refreshFieldJournal()
@@ -513,6 +514,22 @@ class ChipQueueViewModel(
             hostBaseUrl = s.hostBaseUrl,
             transport = s.transport,
             cloudPublisher = cloudPublisher,
+            siteUplink = s.siteUplink,
+        )
+    }
+
+    /** Смена «Куда слать online» без Стоп/Запустить. */
+    fun setFieldSiteUplink(siteUplink: String) {
+        val s = repository.fieldSync.state.value
+        repository.fieldSync.updateSettings(
+            mode = s.mode,
+            role = s.role,
+            deviceName = s.deviceName,
+            startCode = s.startCode,
+            hostBaseUrl = s.hostBaseUrl,
+            transport = s.transport,
+            cloudPublisher = s.cloudPublisher,
+            siteUplink = siteUplink,
         )
     }
 
@@ -528,6 +545,7 @@ class ChipQueueViewModel(
                     hostBaseUrl = s.hostBaseUrl,
                     transport = s.transport,
                     cloudPublisher = true,
+                    siteUplink = s.siteUplink,
                 )
                 val conflict = repository.fieldSync.claimCloudPublisher(force)
                 if (conflict != null) {

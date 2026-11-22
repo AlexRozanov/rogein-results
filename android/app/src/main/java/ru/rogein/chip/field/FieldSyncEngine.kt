@@ -24,6 +24,7 @@ import ru.rogein.chip.parse.field.FIELD_DEFAULT_PORT
 import ru.rogein.chip.parse.field.FIELD_OP_SCHEMA
 import ru.rogein.chip.parse.field.FIELD_PROTOCOL_VERSION
 import ru.rogein.chip.parse.field.FieldOpEnvelope
+import ru.rogein.chip.parse.field.FieldSiteUplink
 import ru.rogein.chip.parse.field.FieldSyncMode
 import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.parse.field.FieldTransport
@@ -33,6 +34,8 @@ import ru.rogein.chip.parse.field.fieldOpEnvelopeToJson
 import ru.rogein.chip.parse.field.opsBundleJson
 import ru.rogein.chip.parse.field.parseOpsBundle
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.Socket
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -40,6 +43,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.SocketFactory
 import kotlin.coroutines.resume
 
 data class FieldSyncUiState(
@@ -70,6 +74,8 @@ data class FieldSyncUiState(
     val cloudPublisher: Boolean = false,
     /** Имя текущего cloud-издателя на сайте (если есть). */
     val cloudPublisherName: String = "",
+    /** Куда слать сайт/live: auto | cellular | wifi. */
+    val siteUplink: String = FieldSiteUplink.AUTO,
 )
 
 /**
@@ -97,11 +103,30 @@ class FieldSyncEngine(
     private var activeChannel: String = ""
     private var remotePublisherName: String = ""
     private val liveWs = AtomicReference<WebSocket?>(null)
+    private val netPaths = FieldNetworkPaths.get(appContext)
+    /** SocketFactory всегда берёт актуальный Wi‑Fi Network (не snapshot на старте). */
+    private val wifiSocketFactory = object : SocketFactory() {
+        private fun delegate(): SocketFactory = netPaths.socketFactory(FieldNetPrefer.WIFI)
+        override fun createSocket(): Socket = delegate().createSocket()
+        override fun createSocket(host: String, port: Int): Socket =
+            delegate().createSocket(host, port)
+        override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+            delegate().createSocket(host, port, localHost, localPort)
+        override fun createSocket(host: InetAddress, port: Int): Socket =
+            delegate().createSocket(host, port)
+        override fun createSocket(
+            address: InetAddress,
+            port: Int,
+            localAddress: InetAddress,
+            localPort: Int,
+        ): Socket = delegate().createSocket(address, port, localAddress, localPort)
+    }
     private val okHttp by lazy {
         OkHttpClient.Builder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(20, TimeUnit.SECONDS)
+            .socketFactory(wifiSocketFactory)
             .build()
     }
 
@@ -141,6 +166,7 @@ class FieldSyncEngine(
         hostBaseUrl: String,
         transport: String = device.transport,
         cloudPublisher: Boolean = device.cloudPublisher,
+        siteUplink: String = device.siteUplink,
     ) {
         device.syncMode = mode
         device.syncRole = role
@@ -149,6 +175,8 @@ class FieldSyncEngine(
         device.hostBaseUrl = hostBaseUrl
         device.transport = transport
         device.cloudPublisher = cloudPublisher
+        device.siteUplink = siteUplink
+        netPaths.siteUplink = device.siteUplink
         refreshUi()
     }
 
@@ -168,21 +196,27 @@ class FieldSyncEngine(
             return
         }
         if (device.cloudEnabled) {
+            netPaths.ensureCellular()
             loopJob = scope.launch(Dispatchers.IO) {
                 runCatching { prepareCloudPublisher() }
                     .onFailure { err ->
                         device.cloudPublisher = false
                         _state.value = readUiState(
                             running = true,
-                            status = "облако…",
+                            status = pathStatus("облако…", FieldNetPrefer.SITE),
                             lastError = err.message,
                         )
                     }
                 cloudPollLoop()
             }
-            _state.value = readUiState(running = true, status = "облако…")
+            _state.value = readUiState(
+                running = true,
+                status = pathStatus("облако…", FieldNetPrefer.SITE),
+            )
             return
         }
+        netPaths.ensureWifi()
+        netPaths.ensureCellular()
         if (device.isHost) {
             activeChannel = ""
             runCatching { FieldHostKeepAlive.start(appContext) }
@@ -199,7 +233,11 @@ class FieldSyncEngine(
                     cachedSlug = runCatching { eventSlug() }.getOrDefault("")
                     refreshUiRunning(
                         status = if (server.isRunning) {
-                            "хост · HTTP+WebSocket :$FIELD_DEFAULT_PORT"
+                            pathStatus(
+                                "хост · HTTP+WebSocket :$FIELD_DEFAULT_PORT",
+                                FieldNetPrefer.WIFI,
+                                FieldNetPrefer.SITE,
+                            )
                         } else {
                             "хост: ошибка порта"
                         },
@@ -209,13 +247,20 @@ class FieldSyncEngine(
             }
             _state.value = readUiState(
                 running = true,
-                status = "хост · HTTP+WebSocket :$FIELD_DEFAULT_PORT",
+                status = pathStatus(
+                    "хост · HTTP+WebSocket :$FIELD_DEFAULT_PORT",
+                    FieldNetPrefer.WIFI,
+                    FieldNetPrefer.SITE,
+                ),
             )
         } else if (device.isClient) {
             loopJob = scope.launch(Dispatchers.IO) {
                 clientMainLoop()
             }
-            _state.value = readUiState(running = true, status = "клиент…")
+            _state.value = readUiState(
+                running = true,
+                status = pathStatus("клиент…", FieldNetPrefer.WIFI),
+            )
         }
     }
 
@@ -413,12 +458,15 @@ class FieldSyncEngine(
         helloCloud()
         val posted = postOwnCloud()
         val pulled = pullRemoteCloud()
-        val note = buildString {
-            append("связано · облако")
-            if (device.cloudPublisher) append(" · издатель live")
-            if (posted > 0) append(", +$posted своих")
-            if (pulled > 0) append(", +$pulled чужих")
-        }
+        val note = pathStatus(
+            buildString {
+                append("связано · облако")
+                if (device.cloudPublisher) append(" · издатель live")
+                if (posted > 0) append(", +$posted своих")
+                if (pulled > 0) append(", +$pulled чужих")
+            },
+            FieldNetPrefer.SITE,
+        )
         activeChannel = "cloud"
         _state.value = readUiState(
             running = true,
@@ -463,8 +511,12 @@ class FieldSyncEngine(
             }
             val remoteSlug = obj.optString("event_slug").trim()
             cachedSlug = remoteSlug.ifBlank { cachedSlug }
-            remotePublisherName = obj.optString("publisher_name").trim()
-                .ifBlank { obj.optString("publisher_device_id").trim() }
+            val rawPublisher = obj.optString("publisher_name").trim()
+            remotePublisherName = if (rawPublisher.isNotBlank()) {
+                FieldHttpHeaders.decodeDeviceName(rawPublisher)
+            } else {
+                obj.optString("publisher_device_id").trim()
+            }
         } finally {
             conn.disconnect()
         }
@@ -607,7 +659,7 @@ class FieldSyncEngine(
                 .url(wsUrl)
                 .header("X-RogeIn-Field-Code", device.startCode.trim())
                 .header("X-RogeIn-Device-Id", device.deviceId)
-                .header("X-RogeIn-Device-Name", device.deviceName)
+                .header("X-RogeIn-Device-Name", FieldHttpHeaders.encodeDeviceName(device.deviceName))
                 .build()
             val listener = object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -634,7 +686,7 @@ class FieldSyncEngine(
                         }
                         _state.value = readUiState(
                             running = true,
-                            status = "связано · WebSocket",
+                            status = pathStatus("связано · WebSocket", FieldNetPrefer.WIFI),
                             lastError = null,
                             lastSyncAt = System.currentTimeMillis(),
                             linked = true,
@@ -717,7 +769,7 @@ class FieldSyncEngine(
                 if (n > 0) {
                     _state.value = readUiState(
                         running = true,
-                        status = "связано · WebSocket (+$n)",
+                        status = pathStatus("связано · WebSocket (+$n)", FieldNetPrefer.WIFI),
                         lastError = null,
                         lastSyncAt = System.currentTimeMillis(),
                         linked = true,
@@ -740,6 +792,10 @@ class FieldSyncEngine(
         hostServer = null
         activeChannel = ""
         runCatching { FieldHostKeepAlive.stop(appContext) }
+        // Wi‑Fi-путь только для LAN; cellular оставляем для live/site.
+        if (!device.cloudEnabled) {
+            netPaths.stopWifi()
+        }
     }
 
     private suspend fun clientHttpTick() {
@@ -767,11 +823,14 @@ class FieldSyncEngine(
         hello(base)
         val posted = postOwn(base)
         val pulled = pullRemote(base)
-        val note = buildString {
-            append("связано · HTTP")
-            if (posted > 0) append(", +$posted своих")
-            if (pulled > 0) append(", +$pulled чужих")
-        }
+        val note = pathStatus(
+            buildString {
+                append("связано · HTTP")
+                if (posted > 0) append(", +$posted своих")
+                if (pulled > 0) append(", +$pulled чужих")
+            },
+            FieldNetPrefer.WIFI,
+        )
         activeChannel = FieldTransport.HTTP
         _state.value = readUiState(
             running = true,
@@ -875,7 +934,8 @@ class FieldSyncEngine(
         bearer: Boolean = false,
     ): HttpURLConnection {
         val url = URL(base.trimEnd('/') + pathAndQuery)
-        return (url.openConnection() as HttpURLConnection).apply {
+        val prefer = if (bearer || device.cloudEnabled) FieldNetPrefer.SITE else FieldNetPrefer.WIFI
+        return netPaths.openConnection(url, prefer).apply {
             requestMethod = method
             connectTimeout = 8_000
             readTimeout = 30_000
@@ -885,11 +945,21 @@ class FieldSyncEngine(
                 (codeOverride ?: device.startCode).trim(),
             )
             setRequestProperty("X-RogeIn-Device-Id", device.deviceId)
-            setRequestProperty("X-RogeIn-Device-Name", device.deviceName)
+            setRequestProperty(
+                "X-RogeIn-Device-Name",
+                FieldHttpHeaders.encodeDeviceName(device.deviceName),
+            )
             if (bearer && lastPublishToken.isNotBlank()) {
                 setRequestProperty("Authorization", "Bearer $lastPublishToken")
             }
         }
+    }
+
+    private fun pathStatus(base: String, vararg prefers: FieldNetPrefer): String {
+        val tags = prefers.mapNotNull { p ->
+            netPaths.label(p).takeIf { it.isNotBlank() }
+        }.distinct()
+        return if (tags.isEmpty()) base else "$base · ${tags.joinToString("+")}"
     }
 
     private fun channelLabel(): String = when (activeChannel) {
@@ -944,6 +1014,7 @@ class FieldSyncEngine(
             activeChannel = activeChannel,
             cloudPublisher = device.cloudPublisher,
             cloudPublisherName = remotePublisherName,
+            siteUplink = device.siteUplink,
         )
     }
 }

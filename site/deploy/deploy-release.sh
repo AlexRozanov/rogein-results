@@ -46,7 +46,7 @@ echo "Релиз: ветка ${BRANCH}"
 echo "Исходники: ${SRC}"
 echo "Пользователь сборки: ${APP_USER}"
 
-stage "1/6 Git: fetch, checkout ${BRANCH}, pull"
+stage "1/7 Git: fetch, checkout ${BRANCH}, pull"
 if [[ ! -d "${SRC}/.git" ]]; then
   echo "Нет клона ${SRC}. Сначала: git clone … ${SRC}" >&2
   exit 1
@@ -59,7 +59,7 @@ as_malahit "
   git log -1 --oneline
 "
 
-stage "2/6 Frontend: npm ci && npm run build"
+stage "2/7 Frontend: npm ci && npm run build"
 as_malahit "
   export NVM_DIR=\"\$HOME/.nvm\"
   if [[ -s \"\$NVM_DIR/nvm.sh\" ]]; then
@@ -72,7 +72,7 @@ as_malahit "
   npm run build
 "
 
-stage "3/6 Копирование www/ (карты media/ не трогаем)"
+stage "3/7 Копирование www/ (карты media/ не трогаем)"
 mkdir -p "${WWW}" "${MEDIA}" "${RUN}"
 if [[ ! -d "${SRC}/site/web/dist" ]]; then
   echo "Нет ${SRC}/site/web/dist после сборки" >&2
@@ -85,7 +85,50 @@ if command -v restorecon >/dev/null 2>&1; then
   restorecon -Rv "${WWW}" "${MEDIA}" || true
 fi
 
-stage "4/6 Backend: cargo build --release"
+stage "4/7 Android APK → android-app/ (только API админки)"
+# Не публичный www: отдача через /api/admin/app/* после входа в кабинет.
+APP_PRIV="${ROOT}/android-app"
+mkdir -p "${APP_PRIV}"
+SRC_APP="${SRC}/site/android-app"
+if [[ -f "${SRC_APP}/version.json" ]]; then
+  install -o "${APP_USER}" -g "${APP_USER}" -m 0644 \
+    "${SRC_APP}/version.json" "${APP_PRIV}/version.json"
+fi
+if [[ -f "${SRC_APP}/rogein-chip.apk" ]]; then
+  install -o "${APP_USER}" -g "${APP_USER}" -m 0644 \
+    "${SRC_APP}/rogein-chip.apk" "${APP_PRIV}/rogein-chip.apk"
+  echo "APK из ${SRC_APP}/rogein-chip.apk"
+elif [[ -n "${ANDROID_APK_URL:-}" ]]; then
+  tmp="$(mktemp)"
+  if curl -fsSL -o "${tmp}" "${ANDROID_APK_URL}"; then
+    install -o "${APP_USER}" -g "${APP_USER}" -m 0644 "${tmp}" "${APP_PRIV}/rogein-chip.apk"
+    echo "APK скачан: ${ANDROID_APK_URL}"
+  else
+    echo "Не удалось скачать ANDROID_APK_URL=${ANDROID_APK_URL}" >&2
+    rm -f "${tmp}"
+    exit 1
+  fi
+  rm -f "${tmp}"
+elif [[ -f "${APP_PRIV}/rogein-chip.apk" ]]; then
+  echo "APK не в исходниках — оставляем ${APP_PRIV}/rogein-chip.apk"
+else
+  echo "Нет APK (site/android-app/rogein-chip.apk или ANDROID_APK_URL). /admin/app без файла."
+fi
+# Убрать старую публичную копию, если осталась с прошлых деплоев.
+rm -f "${WWW}/app/rogein-chip.apk" "${WWW}/app/version.json" 2>/dev/null || true
+chown -R "${APP_USER}:${APP_USER}" "${APP_PRIV}"
+chmod -R o-rwx "${APP_PRIV}"
+chmod u+rwX "${APP_PRIV}"
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -Rv "${APP_PRIV}" || true
+fi
+# API читает ANDROID_APP_DIR (в .env сервиса).
+if [[ -f "${RUN}/.env" ]] && ! grep -q '^ANDROID_APP_DIR=' "${RUN}/.env"; then
+  echo "ANDROID_APP_DIR=${APP_PRIV}" >> "${RUN}/.env"
+  echo "Добавлен ANDROID_APP_DIR в ${RUN}/.env"
+fi
+
+stage "5/7 Backend: cargo build --release"
 as_malahit "
   if [[ -f \"\$HOME/.cargo/env\" ]]; then
     . \"\$HOME/.cargo/env\"
@@ -95,7 +138,7 @@ as_malahit "
   cargo build --release
 "
 
-stage "5/6 Копирование бинарника API"
+stage "6/7 Копирование бинарника API"
 install -o "${APP_USER}" -g "${APP_USER}" -m 0755 \
   "${SRC}/site/api/target/release/rogein-site-api" \
   "${API_BIN}"
@@ -105,7 +148,7 @@ if [[ ! -f "${RUN}/.env" ]]; then
 fi
 # Людей: sudo -u malahit bash -lc "cd ${RUN} && ./rogein-site-api userctl create --email … --role owner"
 
-stage "6/6 Рестарт ${SERVICE} и проверка health"
+stage "7/7 Рестарт ${SERVICE} и проверка health"
 systemctl restart "${SERVICE}"
 sleep 1
 systemctl --no-pager --full status "${SERVICE}" | head -n 20

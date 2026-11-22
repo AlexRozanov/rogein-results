@@ -57,6 +57,8 @@ struct LiveTick {
 pub struct AppState {
     pool: PgPool,
     media_dir: PathBuf,
+    /// Каталог с version.json и rogein-chip.apk (только через /api/admin/app/*).
+    android_app_dir: PathBuf,
     publish_token: String,
     live_tx: broadcast::Sender<LiveTick>,
     cookie_secure: bool,
@@ -147,11 +149,15 @@ async fn serve() -> anyhow::Result<()> {
     let media_dir = PathBuf::from(
         std::env::var("MEDIA_DIR").unwrap_or_else(|_| "../media".into()),
     );
+    let android_app_dir = PathBuf::from(
+        std::env::var("ANDROID_APP_DIR").unwrap_or_else(|_| "../android-app".into()),
+    );
     let publish_token =
         std::env::var("PUBLISH_TOKEN").unwrap_or_else(|_| "dev-token".into());
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:18790".into());
 
     std::fs::create_dir_all(&media_dir).context("create media dir")?;
+    std::fs::create_dir_all(&android_app_dir).context("create android-app dir")?;
 
     let pool = connect_pool().await?;
 
@@ -160,6 +166,7 @@ async fn serve() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         pool,
         media_dir,
+        android_app_dir,
         publish_token,
         live_tx,
         cookie_secure: auth::cookie_secure_from_env(),
@@ -217,6 +224,8 @@ async fn serve() -> anyhow::Result<()> {
             "/api/admin/upcoming/{id}/bulletin-image",
             post(admin::upload_bulletin_image),
         )
+        .route("/api/admin/app/version", get(admin::android_app_version))
+        .route("/api/admin/app/download", get(admin::android_app_download))
         .route("/api/events", get(list_events))
         .route("/api/upcoming", get(list_upcoming))
         .route("/api/upcoming/{slug}", get(bulletin::get_public_upcoming))

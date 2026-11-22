@@ -31,6 +31,9 @@ async function onLogout() {
           >
             Сотрудники
           </router-link>
+          <router-link to="/admin/app" class="admin-nav-link">
+            Приложение
+          </router-link>
         </nav>
         <div class="admin-user">
           <span class="muted">{{ me?.email }}</span>

@@ -179,8 +179,9 @@ class FieldHostServer(
 
         val deviceId = request.headers["x-rogein-device-id"]?.trim().orEmpty()
             .ifBlank { "ws-${System.currentTimeMillis()}" }
-        val deviceName = request.headers["x-rogein-device-name"]?.trim().orEmpty()
-            .ifBlank { "Клиент" }
+        val deviceName = FieldHttpHeaders.decodeDeviceName(
+            request.headers["x-rogein-device-name"],
+        )
         val session = FieldWsSession(input, output, deviceId, deviceName)
         wsSessions[deviceId] = session
         try {
@@ -305,8 +306,9 @@ class FieldHostServer(
     private fun notePeer(request: HttpRequest) {
         val id = request.headers["x-rogein-device-id"]?.trim().orEmpty()
         if (id.isEmpty()) return
-        val name = request.headers["x-rogein-device-name"]?.trim().orEmpty()
-            .ifBlank { "Клиент" }
+        val name = FieldHttpHeaders.decodeDeviceName(
+            request.headers["x-rogein-device-name"],
+        )
         peers[id] = FieldPeerView(
             deviceId = id,
             name = name,

@@ -13,8 +13,11 @@ android {
         applicationId = "ru.rogein.chip"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Бамп при каждом релизе для команды: versionCode +1, versionName по semver.
+        // CI может переопределить: -PversionCode=3 -PversionName=0.2.1
+        // Синхронизируйте site/android-app/version.json (см. android/README.md).
+        versionCode = (findProperty("versionCode") as String?)?.toIntOrNull() ?: 2
+        versionName = (findProperty("versionName") as String?) ?: "0.2.0"
     }
 
     buildTypes {

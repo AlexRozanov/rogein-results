@@ -23,11 +23,15 @@ import { hasPerm, me } from "../../auth";
         <h2>Сотрудники</h2>
         <p class="muted">Приглашения в админку по email</p>
       </router-link>
+      <router-link class="card event-link" to="/admin/app">
+        <h2>Приложение</h2>
+        <p class="muted">Скачать Rogein Chip (Android) для команды</p>
+      </router-link>
       <p
         v-if="!hasPerm('events.announce') && !hasPerm('users.manage')"
         class="muted"
       >
-        Нет разделов, к которым есть доступ.
+        Календарь и сотрудники недоступны — можно скачать приложение.
       </p>
     </div>
   </div>

@@ -525,6 +525,7 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                             onProbeCloud = viewModel::probeFieldCloud,
                             onClaimPublisher = viewModel::claimFieldPublisher,
                             onDraftMode = viewModel::draftFieldMode,
+                            onSiteUplink = viewModel::setFieldSiteUplink,
                         )
                     }
                     MorePage.FieldJournal -> {

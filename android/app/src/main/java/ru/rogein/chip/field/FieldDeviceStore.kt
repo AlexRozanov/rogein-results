@@ -2,6 +2,7 @@ package ru.rogein.chip.field
 
 import android.content.Context
 import ru.rogein.chip.parse.field.FIELD_DEFAULT_PORT
+import ru.rogein.chip.parse.field.FieldSiteUplink
 import ru.rogein.chip.parse.field.FieldSyncMode
 import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.parse.field.FieldTransport
@@ -85,6 +86,22 @@ class FieldDeviceStore(context: Context) {
             prefs.edit().putString(KEY_TRANSPORT, next).apply()
         }
 
+    /**
+     * Куда слать сайт/live: auto | cellular | wifi.
+     * Имеет смысл на издателе (LAN-хост или cloud publisher).
+     */
+    var siteUplink: String
+        get() = prefs.getString(KEY_SITE_UPLINK, FieldSiteUplink.AUTO)?.trim().orEmpty()
+            .ifBlank { FieldSiteUplink.AUTO }
+        set(value) {
+            val next = when (value.trim()) {
+                FieldSiteUplink.CELLULAR -> FieldSiteUplink.CELLULAR
+                FieldSiteUplink.WIFI -> FieldSiteUplink.WIFI
+                else -> FieldSiteUplink.AUTO
+            }
+            prefs.edit().putString(KEY_SITE_UPLINK, next).apply()
+        }
+
     val lanEnabled: Boolean
         get() = syncMode == FieldSyncMode.LAN
 
@@ -113,6 +130,7 @@ class FieldDeviceStore(context: Context) {
         private const val KEY_HOST_URL = "host_url"
         private const val KEY_TRANSPORT = "transport"
         private const val KEY_CLOUD_PUBLISHER = "cloud_publisher"
+        private const val KEY_SITE_UPLINK = "site_uplink"
         const val DEFAULT_NAME = "Телефон"
         const val DEFAULT_PORT = FIELD_DEFAULT_PORT
 

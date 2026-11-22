@@ -15,6 +15,7 @@ import ResetPasswordPage from "./pages/admin/ResetPasswordPage.vue";
 import UsersPage from "./pages/admin/UsersPage.vue";
 import BulletinPage from "./pages/BulletinPage.vue";
 import CalendarPage from "./pages/CalendarPage.vue";
+import AppDownloadPage from "./pages/admin/AppDownloadPage.vue";
 import ComingSoonPage from "./pages/ComingSoonPage.vue";
 import EventListPage from "./pages/EventListPage.vue";
 import EventPage from "./pages/EventPage.vue";
@@ -49,6 +50,7 @@ const router = createRouter({
         { path: "live/:slug/p/:sourceId", component: ParticipantPage },
         { path: "privacy", component: LegalPage, props: { doc: "privacy" } },
         { path: "terms", component: LegalPage, props: { doc: "terms" } },
+        { path: "app", redirect: "/admin/app" },
       ],
     },
     { path: "/admin/login", component: LoginPage },
@@ -82,6 +84,7 @@ const router = createRouter({
           component: UsersPage,
           meta: { perm: "users.manage" },
         },
+        { path: "app", component: AppDownloadPage },
         { path: "password", component: ChangePasswordPage },
       ],
     },

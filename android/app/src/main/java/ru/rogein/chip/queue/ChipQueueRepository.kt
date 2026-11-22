@@ -613,6 +613,10 @@ class ChipQueueRepository(
                 )
                 .build()
             val fieldJournal = FieldJournal.create(appContext, db.fieldJournalDao())
+            // Dual-path: LAN-обмен по Wi‑Fi; сайт — по siteUplink (auto/LTE/Wi‑Fi).
+            val paths = ru.rogein.chip.field.FieldNetworkPaths.get(appContext)
+            paths.siteUplink = fieldJournal.device.siteUplink
+            paths.ensureCellular()
             val event = EventStore(appContext.filesDir, db.eventDao(), fieldJournal)
             val startList = StartListStore(
                 appContext,

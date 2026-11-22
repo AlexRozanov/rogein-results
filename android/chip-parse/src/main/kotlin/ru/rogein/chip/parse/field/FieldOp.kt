@@ -56,6 +56,16 @@ object FieldTransport {
     const val HTTP = "http"
 }
 
+/**
+ * Куда слать live / API сайта при LAN (роутер с интернетом или без).
+ * `auto` — Wi‑Fi, если у сети есть интернет; иначе LTE.
+ */
+object FieldSiteUplink {
+    const val AUTO = "auto"
+    const val CELLULAR = "cellular"
+    const val WIFI = "wifi"
+}
+
 data class FieldOpPunch(
     val cp: Int,
     val seconds: Int,
