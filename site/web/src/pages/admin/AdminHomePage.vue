@@ -25,7 +25,7 @@ import { hasPerm, me } from "../../auth";
       </router-link>
       <router-link class="card event-link" to="/admin/app">
         <h2>Приложение</h2>
-        <p class="muted">Скачать Rogein Chip (Android) для команды</p>
+        <p class="muted">Скачать SFR Reader (Android)</p>
       </router-link>
       <p
         v-if="!hasPerm('events.announce') && !hasPerm('users.manage')"

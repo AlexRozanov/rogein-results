@@ -1002,6 +1002,31 @@ class ChipQueueViewModel(
         }
     }
 
+    /** Toggle без лимита минут — для экрана дистанций. */
+    fun toggleExclusion(courseName: String, fromCp: Int, toCp: Int) {
+        if (courseName.isBlank() || fromCp <= 0 || toCp <= 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val existing = repository.event.exclusionsNow().find { row ->
+                    row.courseName.equals(courseName, ignoreCase = true) &&
+                        row.fromCp == fromCp &&
+                        row.toCp == toCp
+                }
+                if (existing != null) {
+                    repository.event.deleteExclusion(existing.id)
+                    repository.requestLiveSend()
+                    _status.value = "Исключение $fromCp → $toCp снято, результат пересчитан"
+                } else {
+                    repository.event.addExclusion(courseName, fromCp, toCp, maxLegSeconds = null)
+                    repository.requestLiveSend()
+                    _status.value = "Перегон $fromCp → $toCp исключён, результат пересчитан"
+                }
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось изменить исключение"
+            }
+        }
+    }
+
     fun saveSettings(next: EventSettings) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.event.saveSettings(next)

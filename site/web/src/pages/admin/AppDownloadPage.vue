@@ -45,11 +45,7 @@ onMounted(async () => {
 
 <template>
   <div class="admin-page app-download">
-    <h1>Rogein Chip</h1>
-    <p class="lead muted">
-      Android для судейской команды: чипы, обмен на старте, online.
-      Страница только для вошедших в личный кабинет; файл тоже отдаётся после входа.
-    </p>
+    <h1>SFR Reader</h1>
 
     <div class="app-panel">
       <div class="app-meta">
@@ -95,11 +91,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.lead {
-  line-height: 1.45;
-  max-width: 40rem;
-}
-
 .app-panel {
   display: flex;
   flex-wrap: wrap;

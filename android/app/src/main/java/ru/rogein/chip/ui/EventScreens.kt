@@ -814,6 +814,9 @@ fun ProtocolScreen(
     onCourseCheckCourse: (String) -> Unit,
     onClearChip: () -> Unit,
     corrections: List<CorrectionEntity> = emptyList(),
+    exclusions: List<ExclusionEntity> = emptyList(),
+    eventSettings: EventSettings = EventSettings(),
+    onToggleExclusion: (courseName: String, fromCp: Int, toCp: Int) -> Unit = { _, _, _ -> },
     onMarkDidNotFinish: (Int) -> Unit = {},
     onEditorOpen: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -1239,6 +1242,10 @@ fun ProtocolScreen(
                     onCopy = onCopyCourse,
                     onDelete = onDeleteCourse,
                     onEditingChange = { courseEditing = it },
+                    settings = eventSettings,
+                    exclusions = exclusions,
+                    corrections = corrections,
+                    onToggleExclusion = onToggleExclusion,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -1719,6 +1726,10 @@ private fun CoursesPanel(
     onCopy: (String, String) -> Unit = { _, _ -> },
     onDelete: (String) -> Unit,
     onEditingChange: (Boolean) -> Unit = {},
+    settings: EventSettings = EventSettings(),
+    exclusions: List<ExclusionEntity> = emptyList(),
+    corrections: List<CorrectionEntity> = emptyList(),
+    onToggleExclusion: (courseName: String, fromCp: Int, toCp: Int) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf<String?>(null) }
@@ -1828,6 +1839,10 @@ private fun CoursesPanel(
                 },
                 onDelete = { confirmDelete = openCourse.name },
                 focusName = focusCopiedName,
+                settings = settings,
+                exclusions = exclusions,
+                corrections = corrections,
+                onToggleExclusion = onToggleExclusion,
             )
         } else {
         LazyColumn(
@@ -1857,6 +1872,10 @@ private fun CoursesPanel(
                     onToggle = { expanded = if (course.name.equals(expanded, true)) null else course.name },
                     onSave = onSave,
                     onDelete = { confirmDelete = course.name },
+                    settings = settings,
+                    exclusions = exclusions,
+                    corrections = corrections,
+                    onToggleExclusion = onToggleExclusion,
                 )
             }
         }
@@ -2177,7 +2196,23 @@ private fun CourseEditorCard(
     onCopy: (() -> Unit)? = null,
     onDelete: () -> Unit,
     focusName: Boolean = false,
+    settings: EventSettings = EventSettings(),
+    exclusions: List<ExclusionEntity> = emptyList(),
+    corrections: List<CorrectionEntity> = emptyList(),
+    onToggleExclusion: (courseName: String, fromCp: Int, toCp: Int) -> Unit = { _, _, _ -> },
 ) {
+    val removed = remember(corrections) { EventStore.removedCps(corrections) }
+    val courseExclusions = remember(exclusions, course.name) {
+        exclusions.filter { it.courseName.equals(course.name, ignoreCase = true) }
+    }
+    val excludedLegs = remember(courseExclusions) {
+        courseExclusions.map { it.fromCp to it.toCp }.toSet()
+    }
+    val legs = remember(course, settings.startCp, settings.finishCp, removed) {
+        EventStore.legsFor(course, settings, removed)
+    }
+    val exclusionCount = courseExclusions.size
+
     var name by remember(course.name) { mutableStateOf(course.name) }
     var addCp by remember(course.name) { mutableStateOf("") }
     val addBottomFocus = remember { FocusRequester() }
@@ -2273,10 +2308,31 @@ private fun CourseEditorCard(
                 },
             ) { Text("Добавить") }
         }
+        if (legs.isNotEmpty()) {
+            HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
+            Text(
+                "Перегоны — нажмите, чтобы исключить время из результата",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            legs.forEach { (fromCp, toCp) ->
+                val excluded = (fromCp to toCp) in excludedLegs
+                CourseLegExclusionRow(
+                    fromLabel = formatCp(fromCp, settings),
+                    toLabel = formatCp(toCp, settings),
+                    excluded = excluded,
+                    onClick = { onToggleExclusion(course.name, fromCp, toCp) },
+                )
+            }
+        }
+    }
+    val titleSuffix = buildString {
+        append("${course.controls.size} КП")
+        if (exclusionCount > 0) append(" · $exclusionCount искл.")
     }
     if (fillScreen) {
         FullscreenEditor(
-            title = "${course.name}  ${course.controls.size} КП",
+            title = "${course.name}  $titleSuffix",
             onClose = onToggle,
             footer = {
                 EditorActionsRow(
@@ -2302,7 +2358,7 @@ private fun CourseEditorCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "${course.name}  ${course.controls.size} КП",
+                "${course.name}  $titleSuffix",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
@@ -2311,6 +2367,35 @@ private fun CourseEditorCard(
             Text(if (expanded) "▾" else "▸", color = Muted)
         }
         HorizontalDivider()
+    }
+}
+
+@Composable
+private fun CourseLegExclusionRow(
+    fromLabel: String,
+    toLabel: String,
+    excluded: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            "$fromLabel → $toLabel",
+            color = if (excluded) Danger else OkGreen,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            if (excluded) "искл." else "в результате",
+            color = if (excluded) Danger else Muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
