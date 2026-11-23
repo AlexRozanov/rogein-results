@@ -20,12 +20,24 @@ android {
         versionName = (findProperty("versionName") as String?) ?: "0.2.0"
     }
 
+    signingConfigs {
+        // Общий ключ команды (CI + локально). Не путать с личным ~/.android/debug.keystore —
+        // иначе APK с GitLab не встанет поверх сборки из Studio.
+        create("team") {
+            storeFile = rootProject.file("keystore/rogein-team.jks")
+            storePassword = "rogein-team"
+            keyAlias = "rogein"
+            keyPassword = "rogein-team"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("team")
+        }
         release {
             isMinifyEnabled = false
-            // Тот же ключ, что у Run/debug в Android Studio — иначе обновление
-            // потребует удалить приложение и сотрёт старты в базе.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("team")
         }
     }
 
