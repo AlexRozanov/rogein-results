@@ -69,6 +69,9 @@ struct PhonePollResult {
     protocol_updated: i64,
     snapshot_deleted: bool,
     snapshot_note: String,
+    /// Почему автообмен не принял данные (разный slug и т.п.).
+    #[serde(default)]
+    blocked_reason: String,
 }
 
 #[derive(Serialize)]
@@ -371,6 +374,14 @@ fn finish_current_start(
 
     let overwrite = overwrite.unwrap_or(false);
     let map_path = course_map_path(&state);
+    if mode == "discard" {
+        archive::wipe_working_start(&state.app_data_dir, &state.db_path, &map_path)?;
+        return Ok(ArchiveActionResult {
+            archive_path: String::new(),
+            title: String::new(),
+            cleared: true,
+        });
+    }
     let (archive_path, title) = match mode.as_str() {
         "overwrite_active" => {
             let active = archive::get_active_archive(&state.app_data_dir).ok_or_else(|| {
@@ -402,7 +413,7 @@ fn finish_current_start(
         }
         other => {
             return Err(format!(
-                "Неизвестный режим завершения старта: {other}. Ожидается overwrite_active или save_as."
+                "Неизвестный режим завершения старта: {other}. Ожидается overwrite_active, save_as или discard."
             ));
         }
     };
@@ -560,6 +571,7 @@ fn empty_phone_poll() -> PhonePollResult {
         protocol_updated: 0,
         snapshot_deleted: false,
         snapshot_note: String::new(),
+        blocked_reason: String::new(),
     }
 }
 
@@ -661,11 +673,48 @@ fn import_phone_snapshot(state: State<'_, AppState>) -> Result<PhoneReadSummary,
         );
     }
     let mut conn = domain::open_and_init_db(&state.db_path)?;
-    let summary = import_phone_payloads(
-        &mut conn,
-        protocol.as_ref().map(|read| read.body.as_str()),
-        queue.as_ref().map(|read| read.body.as_str()),
-    )?;
+    let protocol_body = protocol.as_ref().map(|read| read.body.as_str());
+    let queue_body = queue.as_ref().map(|read| read.body.as_str());
+    match domain::gate_phone_usb_import(
+        &conn,
+        protocol_body,
+        queue_body,
+        domain::PhoneImportMode::Manual,
+    )? {
+        domain::PhoneImportGate::Allow | domain::PhoneImportGate::SkipSilent => {}
+        domain::PhoneImportGate::Block(reason) => return Err(reason),
+    }
+    let summary = import_phone_payloads(&mut conn, protocol_body, queue_body)?;
+    // Если на ПК не было slug, а на телефоне есть — запомним, чтобы дальше не смешивать старты.
+    if domain::desktop_publish_slug(&conn)?.is_empty() {
+        let phone_slug = protocol_body
+            .map(|b| {
+                serde_json::from_str::<serde_json::Value>(b)
+                    .ok()
+                    .and_then(|v| v.get("slug")?.as_str().map(|s| s.trim().to_string()))
+                    .unwrap_or_default()
+            })
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                queue_body.and_then(|b| {
+                    serde_json::from_str::<serde_json::Value>(b)
+                        .ok()
+                        .and_then(|v| v.get("slug")?.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                })
+            });
+        if let Some(slug) = phone_slug {
+            let title = site_publish::load_event_meta(&conn)
+                .map(|(_, t)| t)
+                .unwrap_or_default();
+            let title = if title.trim().is_empty() {
+                slug.clone()
+            } else {
+                title
+            };
+            let _ = site_publish::save_event_meta(&conn, &slug, &title);
+        }
+    }
     let deleted = if let Some(read) = queue.as_ref() {
         phone_sync::delete_snapshot_if_unchanged(read)?
     } else {
@@ -686,31 +735,73 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
+    // Битый start-protocol.json не должен ронять весь опрос — иначе пакет на телефон
+    // не уходит (дистанции / протокол).
     let protocol = phone_sync::try_read_phone_protocol()?;
     let queue = phone_sync::try_read_phone_snapshot()?;
     let mut conn = domain::open_and_init_db(&state.db_path)?;
-    let summary = import_phone_payloads(
-        &mut conn,
-        protocol.as_ref().map(|read| read.body.as_str()),
-        queue.as_ref().map(|read| read.body.as_str()),
-    )?;
-    let pack_pushed = match push_start_pack_if_needed(&state, false) {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(_) => false,
-    };
-    let deleted = if let Some(read) = queue.as_ref() {
-        phone_sync::delete_snapshot_if_unchanged(read)?
-    } else {
+    let protocol_body = protocol.as_ref().map(|read| read.body.as_str());
+    let queue_body = queue.as_ref().map(|read| read.body.as_str());
+
+    let mut blocked_reason = String::new();
+    let mut read_summary = phone_read_from_import(
+        domain::phone_import_summary(&conn, 0, 0, 0, 0, 0)?,
         phone_sync::SnapshotDelete {
             deleted: false,
             note: String::new(),
+        },
+    );
+
+    match domain::gate_phone_usb_import(
+        &conn,
+        protocol_body,
+        queue_body,
+        domain::PhoneImportMode::Auto,
+    )? {
+        domain::PhoneImportGate::SkipSilent => {}
+        domain::PhoneImportGate::Block(reason) => {
+            blocked_reason = reason;
         }
+        domain::PhoneImportGate::Allow => {
+            match import_phone_payloads(&mut conn, protocol_body, queue_body) {
+                Ok(summary) => {
+                    let deleted = if let Some(read) = queue.as_ref() {
+                        phone_sync::delete_snapshot_if_unchanged(read)?
+                    } else {
+                        phone_sync::SnapshotDelete {
+                            deleted: false,
+                            note: String::new(),
+                        }
+                    };
+                    read_summary = phone_read_from_import(summary, deleted);
+                }
+                Err(err) => {
+                    // Импорт сломан — всё равно пушим пакет ПК → телефон.
+                    blocked_reason = format!("Снимок с телефона пропущен: {err}");
+                }
+            }
+        }
+    }
+
+    let (pack_pushed, pack_error) = match push_start_pack_if_needed(&state, false) {
+        Ok(Some(_)) => (true, String::new()),
+        Ok(None) => (false, String::new()),
+        Err(err) => (false, err),
     };
+    if blocked_reason.is_empty() && !pack_error.is_empty() {
+        blocked_reason = pack_error;
+    } else if !pack_error.is_empty() {
+        blocked_reason = format!("{blocked_reason} · Отправка на телефон: {pack_error}");
+    }
+
     let pulled = protocol.is_some() || queue.is_some();
-    let read_summary = phone_read_from_import(summary, deleted);
     Ok(PhonePollResult {
-        pulled,
+        pulled: pulled
+            && (read_summary.imported > 0
+                || read_summary.updated > 0
+                || read_summary.protocol_added > 0
+                || read_summary.protocol_updated > 0
+                || read_summary.already_imported > 0),
         pack_pushed,
         imported: read_summary.imported,
         updated: read_summary.updated,
@@ -723,6 +814,7 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         protocol_updated: read_summary.protocol_updated,
         snapshot_deleted: read_summary.snapshot_deleted,
         snapshot_note: read_summary.snapshot_note,
+        blocked_reason,
     })
 }
 

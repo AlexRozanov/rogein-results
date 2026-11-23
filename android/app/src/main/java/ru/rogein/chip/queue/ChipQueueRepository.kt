@@ -504,7 +504,7 @@ class ChipQueueRepository(
 
     private suspend fun publishSnapshot(): String? {
         return try {
-            snapshot.write(dao.listAll())
+            snapshot.write(dao.listAll(), slug = event.settingsNow().slug)
             null
         } catch (e: Exception) {
             e.message ?: "не удалось записать снимок"

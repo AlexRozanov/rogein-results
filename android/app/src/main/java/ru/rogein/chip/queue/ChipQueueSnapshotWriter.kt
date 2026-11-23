@@ -10,10 +10,10 @@ import ru.rogein.chip.parse.isDnfUid
  * Очередь в Room не очищается.
  */
 class ChipQueueSnapshotWriter(private val context: Context) {
-    fun write(items: List<QueuedChipEntity>): List<String> =
-        RogeinDownloadJson.write(context, FILE_NAME, toJson(items))
+    fun write(items: List<QueuedChipEntity>, slug: String = ""): List<String> =
+        RogeinDownloadJson.write(context, FILE_NAME, toJson(items, slug))
 
-    private fun toJson(items: List<QueuedChipEntity>): String {
+    private fun toJson(items: List<QueuedChipEntity>, slug: String): String {
         val array = JSONArray()
         for (item in items) {
             val punches = try {
@@ -35,7 +35,12 @@ class ChipQueueSnapshotWriter(private val context: Context) {
                     .put("dnf", dnf),
             )
         }
-        return JSONObject().put("items", array).toString()
+        val root = JSONObject().put("items", array)
+        val trimmed = slug.trim()
+        if (trimmed.isNotEmpty()) {
+            root.put("slug", trimmed)
+        }
+        return root.toString()
     }
 
     companion object {

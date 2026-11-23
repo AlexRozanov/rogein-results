@@ -35,5 +35,15 @@ class StartProtocolSnapshotTest {
         assertEquals("4ч", people.getJSONObject(0).getString("format"))
         assertEquals(1, people.getJSONObject(0).getInt("teamId"))
         assertTrue(people.getJSONObject(1).getString("name").isEmpty())
+        assertTrue(!JSONObject(json).has("slug"))
+    }
+
+    @Test
+    fun snapshotIncludesSlugWhenProvided() {
+        val json = buildStartProtocolSnapshotJson(
+            listOf(StartProtocolSnapshotPerson(id = 1, name = "A", format = "М21")),
+            slug = " start-2026-04-12 ",
+        )
+        assertEquals("start-2026-04-12", JSONObject(json).getString("slug"))
     }
 }

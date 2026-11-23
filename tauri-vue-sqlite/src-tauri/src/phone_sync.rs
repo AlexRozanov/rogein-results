@@ -101,11 +101,13 @@ fn read_json_body(
     for rel in run_as {
         match cat_run_as(adb, serial, rel) {
             Ok(Some(body)) => {
-                return Ok(Some(PhoneSnapshotRead {
-                    serial: serial.to_string(),
-                    path: format!("run-as {APP_ID} {rel}"),
-                    body,
-                }));
+                if let Some(body) = normalize_phone_json_body(&body) {
+                    return Ok(Some(PhoneSnapshotRead {
+                        serial: serial.to_string(),
+                        path: format!("run-as {APP_ID} {rel}"),
+                        body,
+                    }));
+                }
             }
             Ok(None) | Err(_) => {}
         }
@@ -113,16 +115,34 @@ fn read_json_body(
     for path in paths {
         match cat_file(adb, serial, path) {
             Ok(Some(body)) => {
-                return Ok(Some(PhoneSnapshotRead {
-                    serial: serial.to_string(),
-                    path: (*path).to_string(),
-                    body,
-                }));
+                if let Some(body) = normalize_phone_json_body(&body) {
+                    return Ok(Some(PhoneSnapshotRead {
+                        serial: serial.to_string(),
+                        path: (*path).to_string(),
+                        body,
+                    }));
+                }
             }
             Ok(None) | Err(_) => {}
         }
     }
     Ok(None)
+}
+
+/// Пустой, обрезанный или не-JSON файл (BOM, мусор adb) не считаем снимком.
+pub fn normalize_phone_json_body(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first = trimmed.as_bytes().first().copied()?;
+    if first != b'{' && first != b'[' {
+        return None;
+    }
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn cat_run_as(adb: &Path, serial: &str, rel: &str) -> Result<Option<String>, String> {
@@ -135,7 +155,7 @@ fn cat_run_as(adb: &Path, serial: &str, rel: &str) -> Result<Option<String>, Str
     }
     let body = String::from_utf8(output.stdout)
         .map_err(|_| "снимок очереди не в UTF-8".to_string())?;
-    if body.trim().is_empty() {
+    if body.trim_start_matches('\u{feff}').trim().is_empty() {
         return Ok(None);
     }
     Ok(Some(body))
@@ -206,7 +226,7 @@ fn cat_file(adb: &Path, serial: &str, path: &str) -> Result<Option<String>, Stri
     if output.status.success() {
         let body = String::from_utf8(output.stdout)
             .map_err(|_| "снимок очереди не в UTF-8".to_string())?;
-        if body.trim().is_empty() {
+        if body.trim_start_matches('\u{feff}').trim().is_empty() {
             return Ok(None);
         }
         return Ok(Some(body));

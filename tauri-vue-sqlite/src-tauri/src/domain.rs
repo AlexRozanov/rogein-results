@@ -1450,6 +1450,10 @@ const PHONE_CLEAR_CP: i64 = 243;
 
 #[derive(Debug, Deserialize)]
 struct PhoneSnapshotFile {
+    /// Идентификатор старта с телефона; проверка — в `gate_phone_usb_import`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    slug: String,
     items: Vec<PhoneSnapshotItem>,
 }
 
@@ -2209,8 +2213,85 @@ pub fn phone_import_summary(
 
 #[derive(Debug, Deserialize)]
 struct PhoneProtocolFile {
+    /// Идентификатор старта с телефона; проверка — в `gate_phone_usb_import`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    slug: String,
     #[serde(default)]
     people: Vec<PhoneProtocolPerson>,
+}
+
+/// Режим импорта USB-снимков с телефона.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhoneImportMode {
+    /// Тихий опрос: не заполняет пустой старт и не смешивает разные slug.
+    Auto,
+    /// Явная кнопка «с телефона»: пустой ПК можно заполнить, разные slug — отказ.
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhoneImportGate {
+    Allow,
+    /// Не импортировать и не показывать ошибку каждые N секунд.
+    SkipSilent,
+    /// Показать причину пользователю (ручной импорт или однократное предупреждение).
+    Block(String),
+}
+
+fn json_top_level_slug(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("slug")
+                .and_then(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+pub fn desktop_publish_slug(conn: &Connection) -> Result<String, String> {
+    Ok(get_setting_value(conn, "publish_slug")?
+        .unwrap_or_default()
+        .trim()
+        .to_string())
+}
+
+/// Решает, можно ли принять USB JSON с телефона в текущую рабочую базу.
+pub fn gate_phone_usb_import(
+    conn: &Connection,
+    protocol_body: Option<&str>,
+    queue_body: Option<&str>,
+    mode: PhoneImportMode,
+) -> Result<PhoneImportGate, String> {
+    if protocol_body.is_none() && queue_body.is_none() {
+        return Ok(PhoneImportGate::SkipSilent);
+    }
+    let has_data = working_start_has_data(conn)?;
+    let desktop_slug = desktop_publish_slug(conn)?;
+    let phone_slug = protocol_body
+        .map(json_top_level_slug)
+        .filter(|s| !s.is_empty())
+        .or_else(|| queue_body.map(json_top_level_slug).filter(|s| !s.is_empty()))
+        .unwrap_or_default();
+
+    if !desktop_slug.is_empty() && !phone_slug.is_empty() && desktop_slug != phone_slug {
+        let msg = format!(
+            "Slug не совпадает: на ПК «{desktop_slug}», на телефоне «{phone_slug}». Данные с телефона не приняты."
+        );
+        return Ok(match mode {
+            PhoneImportMode::Auto => PhoneImportGate::Block(msg),
+            PhoneImportMode::Manual => PhoneImportGate::Block(msg),
+        });
+    }
+
+    if mode == PhoneImportMode::Auto && !has_data {
+        // Пустой десктоп не должен молча наполняться чужим стартом с USB.
+        return Ok(PhoneImportGate::SkipSilent);
+    }
+
+    Ok(PhoneImportGate::Allow)
 }
 
 #[derive(Debug, Deserialize)]

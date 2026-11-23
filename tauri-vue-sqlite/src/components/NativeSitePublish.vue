@@ -169,16 +169,23 @@ function closeUpcomingPicker() {
 
 async function applyUpcoming(item: UpcomingSiteStart) {
   localBusy.value = true;
+  pickerError.value = "";
   try {
+    const dateRaw =
+      typeof item.competition_date === "string"
+        ? item.competition_date
+        : item.competition_date != null
+          ? String(item.competition_date)
+          : "";
     const settings = await invoke<SitePublishSettings>("apply_upcoming_site_start", {
       slug: item.slug,
       title: item.title,
-      competitionDate: item.competition_date || null,
+      competitionDate: dateRaw.trim() || null,
     });
     applySettings(settings);
     pickerOpen.value = false;
     const label = item.title.trim() || item.slug;
-    const date = item.competition_date?.trim();
+    const date = dateRaw.trim();
     emit(
       "status",
       date
@@ -187,7 +194,9 @@ async function applyUpcoming(item: UpcomingSiteStart) {
     );
     emit("settingsChanged");
   } catch (error) {
-    emit("status", `Не удалось взять старт с сайта: ${String(error)}`);
+    const msg = `Не удалось взять старт с сайта: ${String(error)}`;
+    pickerError.value = msg;
+    emit("status", msg);
   } finally {
     localBusy.value = false;
   }
@@ -423,7 +432,9 @@ defineExpose({ refresh });
       </div>
 
       <p v-if="pickerLoading" class="subtitle">Загрузка календаря…</p>
-      <p v-else-if="pickerError" class="upcoming-picker-error">{{ pickerError }}</p>
+      <p v-else-if="pickerError && pickerItems.length === 0" class="upcoming-picker-error">
+        {{ pickerError }}
+      </p>
       <p v-else-if="pickerItems.length === 0" class="subtitle">
         В календаре нет анонсированных стартов для этого вида.
       </p>
@@ -431,6 +442,7 @@ defineExpose({ refresh });
         <p class="subtitle">
           Подставит название, дату и slug. Можно пропустить и заполнить вручную.
         </p>
+        <p v-if="pickerError" class="upcoming-picker-error">{{ pickerError }}</p>
         <ul class="upcoming-picker-list">
           <li v-for="item in pickerItems" :key="item.slug">
             <button
@@ -443,7 +455,12 @@ defineExpose({ refresh });
                 item.title.trim() || item.slug
               }}</span>
               <span class="upcoming-picker-meta">
-                {{ item.competition_date?.trim() || "без даты" }} · {{ item.slug }}
+                {{
+                  (typeof item.competition_date === "string"
+                    ? item.competition_date.trim()
+                    : "") || "без даты"
+                }}
+                · {{ item.slug }}
               </span>
             </button>
           </li>

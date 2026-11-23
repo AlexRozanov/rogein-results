@@ -44,6 +44,7 @@ type PhoneReadSummary = {
 type PhonePollResult = PhoneReadSummary & {
   pulled: boolean;
   pack_pushed: boolean;
+  blocked_reason?: string;
 };
 
 type NativeSettings = {
@@ -500,6 +501,10 @@ async function pollPhoneUsb() {
       nativeStatus.value = formatPhoneSummary(result);
       pageOffset.value = 0;
       await refreshNativeData();
+    } else if (result.blocked_reason?.trim()) {
+      if (nativeStatus.value !== result.blocked_reason) {
+        nativeStatus.value = result.blocked_reason;
+      }
     } else if (result.pack_pushed) {
       nativeStatus.value = isOrient.value
         ? "Стартовый протокол отправлен на телефон."

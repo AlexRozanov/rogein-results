@@ -378,7 +378,6 @@ pub fn apply_upcoming(
     title: &str,
     competition_date: Option<&str>,
 ) -> Result<SitePublishSettings, String> {
-    let current = domain::get_settings(conn)?;
     let (cur_slug, cur_title) = load_event_meta(conn)?;
     let next_title = {
         let t = title.trim();
@@ -406,21 +405,12 @@ pub fn apply_upcoming(
     if next_title.is_empty() {
         return Err("Укажите название старта.".into());
     }
+    // Только дату — через set_setting_value: set_settings гоняет validate_settings
+    // (для orient нужен start_cp) и на пустом старте падает.
     if let Some(date) = competition_date.map(str::trim).filter(|v| !v.is_empty()) {
-        domain::set_settings(
-            conn,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(date.to_string()),
-            None,
-            None,
-        )?;
-    } else if current.competition_date.trim().is_empty() {
-        // без даты slug из названия всё равно сохраняем
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| "Дата с сайта должна быть в формате ГГГГ-ММ-ДД.".to_string())?;
+        domain::set_setting_value(conn, "competition_date", date)?;
     }
     save_event_meta(conn, &next_slug, &next_title)?;
     get_settings(app_data_dir, conn, active_title)

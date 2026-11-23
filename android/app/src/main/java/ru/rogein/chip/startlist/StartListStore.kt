@@ -810,7 +810,7 @@ class StartListStore(
                 origin = person.origin,
             )
         }
-        return buildStartProtocolSnapshotJson(people)
+        return buildStartProtocolSnapshotJson(people, slug = eventSlug())
     }
 
     suspend fun markIssued(id: Int, course: String = "", uid: String = "") {

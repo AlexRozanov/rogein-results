@@ -47,6 +47,8 @@ const localBusy = ref(false);
 const finishOpen = ref(false);
 const finishName = ref("");
 const finishOverwrite = ref(false);
+/** Второе подтверждение для завершения без архива. */
+const discardConfirm = ref(false);
 const openConfirmOpen = ref(false);
 const pendingOpenPath = ref<string | null>(null);
 
@@ -90,6 +92,7 @@ async function openFinishDialog() {
     activeArchive.value = await invoke<ActiveArchiveInfo | null>("get_active_start_archive");
     finishName.value = await invoke<string>("suggest_finish_start_name");
     finishOverwrite.value = false;
+    discardConfirm.value = false;
     finishOpen.value = true;
   } catch (error) {
     emit("status", `Ошибка подготовки завершения старта: ${String(error)}`);
@@ -98,7 +101,21 @@ async function openFinishDialog() {
   }
 }
 
-async function confirmFinish(mode: "overwrite_active" | "save_as") {
+function closeFinishDialog() {
+  finishOpen.value = false;
+  discardConfirm.value = false;
+  finishOverwrite.value = false;
+}
+
+function requestDiscard() {
+  if (!discardConfirm.value) {
+    discardConfirm.value = true;
+    return;
+  }
+  void confirmFinish("discard");
+}
+
+async function confirmFinish(mode: "overwrite_active" | "save_as" | "discard") {
   localBusy.value = true;
   try {
     const result = await invoke<ArchiveActionResult>("finish_current_start", {
@@ -108,10 +125,15 @@ async function confirmFinish(mode: "overwrite_active" | "save_as") {
     });
     finishOpen.value = false;
     finishOverwrite.value = false;
-    emit(
-      "status",
-      `Старт «${result.title}» сохранён в архив и рабочая база очищена.`,
-    );
+    discardConfirm.value = false;
+    if (mode === "discard") {
+      emit("status", "Старт завершён без записи в архив. Рабочая база очищена.");
+    } else {
+      emit(
+        "status",
+        `Старт «${result.title}» сохранён в архив и рабочая база очищена.`,
+      );
+    }
     emit("workspaceReset");
     await refresh();
   } catch (error) {
@@ -214,8 +236,9 @@ defineExpose({ refresh });
       «Сохранить копию» записывает файл
       <code>.rogein</code>
       (на флешку или диск) и оставляет текущую работу как есть — так можно перенести старт
-      на ноутбук. «Завершить старт» тоже пишет
-      <code>.rogein</code>, но очищает рабочую базу. Архивы из папки программы открываются
+      на ноутбук. «Завершить старт» может сохранить в
+      <code>.rogein</code>
+      и очистить базу либо завершить без записи. Архивы из папки программы открываются
       из списка; файл с другого диска — через «Выбрать файл…».
     </p>
     <p v-if="archivesDir" class="subtitle">Папка архивов: {{ archivesDir }}</p>
@@ -264,7 +287,7 @@ defineExpose({ refresh });
   <div
     v-if="finishOpen"
     class="modal-backdrop"
-    @click.self="!isBusy && (finishOpen = false)"
+    @click.self="!isBusy && closeFinishDialog()"
   >
     <div class="modal-card" role="dialog" aria-modal="true" aria-label="Завершить старт">
       <div class="modal-header">
@@ -275,7 +298,7 @@ defineExpose({ refresh });
           title="Закрыть"
           aria-label="Закрыть"
           :disabled="isBusy"
-          @click="finishOpen = false"
+          @click="closeFinishDialog"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path
@@ -287,8 +310,10 @@ defineExpose({ refresh });
       </div>
 
       <p>
-        Все текущие данные будут записаны в архив, после чего рабочая база и карта
-        будут очищены для нового старта.
+        Можно сохранить текущие данные в архив и очистить рабочую базу, либо завершить
+        старт без записи — база и карта будут очищены, файл
+        <code>.rogein</code>
+        не создаётся.
       </p>
 
       <template v-if="hasActiveArchive && activeArchive">
@@ -298,7 +323,7 @@ defineExpose({ refresh });
           ({{ activeArchive.file_name }}). Выберите действие:
         </p>
         <div class="native-row" style="margin-top: 12px; flex-wrap: wrap">
-          <button type="button" :disabled="isBusy" @click="finishOpen = false">Отменить</button>
+          <button type="button" :disabled="isBusy" @click="closeFinishDialog">Отменить</button>
           <button type="button" :disabled="isBusy" @click="confirmFinish('overwrite_active')">
             Перезаписать этот архив
           </button>
@@ -331,7 +356,7 @@ defineExpose({ refresh });
           Файл с таким именем уже есть — следующее подтверждение перезапишет его.
         </p>
         <div class="native-row" style="margin-top: 12px; flex-wrap: wrap">
-          <button type="button" :disabled="isBusy" @click="finishOpen = false">Отменить</button>
+          <button type="button" :disabled="isBusy" @click="closeFinishDialog">Отменить</button>
           <button
             type="button"
             :disabled="isBusy || !finishName.trim()"
@@ -341,6 +366,19 @@ defineExpose({ refresh });
           </button>
         </div>
       </template>
+
+      <hr class="archive-finish-sep" />
+      <p class="subtitle">
+        Без архива данные текущего старта будут безвозвратно удалены с этого компьютера.
+      </p>
+      <p v-if="discardConfirm" class="subtitle" style="color: #b45309">
+        Нажмите ещё раз, чтобы подтвердить очистку без записи.
+      </p>
+      <div class="native-row" style="margin-top: 8px; flex-wrap: wrap">
+        <button type="button" :disabled="isBusy" @click="requestDiscard">
+          {{ discardConfirm ? "Да, завершить без записи" : "Завершить без записи" }}
+        </button>
+      </div>
     </div>
   </div>
 

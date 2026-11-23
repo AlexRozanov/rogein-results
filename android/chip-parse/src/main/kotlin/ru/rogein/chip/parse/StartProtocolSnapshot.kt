@@ -13,7 +13,10 @@ data class StartProtocolSnapshotPerson(
     val origin: String = "",
 )
 
-fun buildStartProtocolSnapshotJson(people: List<StartProtocolSnapshotPerson>): String {
+fun buildStartProtocolSnapshotJson(
+    people: List<StartProtocolSnapshotPerson>,
+    slug: String = "",
+): String {
     val array = JSONArray()
     for (person in people.sortedBy { it.id }) {
         if (person.id <= 0) continue
@@ -28,5 +31,10 @@ fun buildStartProtocolSnapshotJson(people: List<StartProtocolSnapshotPerson>): S
                 .put("origin", person.origin),
         )
     }
-    return JSONObject().put("people", array).toString()
+    val root = JSONObject().put("people", array)
+    val trimmed = slug.trim()
+    if (trimmed.isNotEmpty()) {
+        root.put("slug", trimmed)
+    }
+    return root.toString()
 }
