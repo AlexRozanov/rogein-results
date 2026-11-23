@@ -2,7 +2,10 @@
 import { computed } from "vue";
 import { hasPerm, me } from "../../auth";
 
-const isOwner = computed(() => me.value?.roles.includes("owner") ?? false);
+const isOwner = computed(
+  () =>
+    (me.value?.roles.includes("owner") ?? false) || hasPerm("roles.manage"),
+);
 </script>
 
 <template>

@@ -226,6 +226,7 @@ async fn serve() -> anyhow::Result<()> {
         )
         .route("/api/admin/app/version", get(admin::android_app_version))
         .route("/api/admin/app/download", get(admin::android_app_download))
+        .route("/api/admin/publish-setup", get(admin::publish_setup))
         .route("/api/events", get(list_events))
         .route("/api/upcoming", get(list_upcoming))
         .route("/api/upcoming/{slug}", get(bulletin::get_public_upcoming))

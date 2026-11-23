@@ -5,7 +5,10 @@ import { useRouter } from "vue-router";
 import AdminIcon from "../components/AdminIcon.vue";
 
 const router = useRouter();
-const isOwner = computed(() => me.value?.roles.includes("owner") ?? false);
+const isOwner = computed(
+  () =>
+    (me.value?.roles.includes("owner") ?? false) || hasPerm("roles.manage"),
+);
 
 async function onLogout() {
   await logout();

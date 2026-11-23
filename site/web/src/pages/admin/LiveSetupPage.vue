@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { api, loadMe, me, meLoaded } from "../../auth";
+import { api, hasPerm, loadMe, me, meLoaded } from "../../auth";
 import AdminIcon from "../../components/AdminIcon.vue";
 
 type PublishSetup = {
@@ -15,7 +15,11 @@ const showToken = ref(false);
 const showApi = ref(true);
 const copied = ref("");
 
-const isOwner = computed(() => me.value?.roles.includes("owner") ?? false);
+/** Владелец: роль owner или право roles.manage (только у owner). */
+const canSeeSecrets = computed(
+  () =>
+    (me.value?.roles.includes("owner") ?? false) || hasPerm("roles.manage"),
+);
 
 const apiBase = computed(() => {
   const fromApi = setup.value?.api_base_url?.trim() ?? "";
@@ -29,15 +33,14 @@ const token = computed(() => setup.value?.publish_token ?? "");
 async function load() {
   loading.value = true;
   error.value = "";
+  setup.value = null;
   try {
-    if (!isOwner.value) {
-      error.value = "Раздел только для владельца.";
-      setup.value = null;
-      return;
-    }
+    if (!meLoaded.value) await loadMe();
+    // Не блокируем по клиентской роли — решение за API; иначе бывает «пустая» страница.
     setup.value = await api<PublishSetup>("/api/admin/publish-setup");
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Не удалось загрузить";
+    const msg = e instanceof Error ? e.message : "Не удалось загрузить";
+    error.value = msg.trim() || "Не удалось загрузить параметры online";
     setup.value = null;
   } finally {
     loading.value = false;
@@ -53,14 +56,11 @@ async function copyText(label: string, value: string) {
       if (copied.value === label) copied.value = "";
     }, 1600);
   } catch {
-    error.value = "Не удалось скопировать";
+    error.value = "Не удалось скопировать в буфер обмена";
   }
 }
 
-onMounted(async () => {
-  if (!meLoaded.value) await loadMe();
-  await load();
-});
+onMounted(load);
 </script>
 
 <template>
@@ -73,9 +73,15 @@ onMounted(async () => {
     </div>
 
     <p v-if="loading" class="muted">Загрузка…</p>
-    <p v-else-if="error && !setup" class="warn">{{ error }}</p>
 
-    <template v-else-if="setup">
+    <p v-if="!loading && error" class="live-error">{{ error }}</p>
+
+    <p v-if="!loading && !error && !setup" class="live-error">
+      Нет данных. Обновите страницу или зайдите снова.
+      <button type="button" class="linkish" @click="load">Повторить</button>
+    </p>
+
+    <template v-if="!loading && setup">
       <section class="live-card">
         <h2>Параметры для телефона и десктопа</h2>
         <p class="muted">
@@ -188,12 +194,36 @@ onMounted(async () => {
         </p>
       </section>
     </template>
+
+    <p v-if="!loading && !canSeeSecrets && error" class="muted tip">
+      Нужна роль <code>owner</code> в учёте. Сейчас:
+      {{ me?.roles?.join(", ") || "ролей нет" }}.
+    </p>
   </div>
 </template>
 
 <style scoped>
 .live-setup {
   max-width: 40rem;
+}
+
+.live-error {
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+  background: #f8e8e0;
+  color: #8a3b12;
+  border-radius: 8px;
+  border: 1px solid #e0c4b4;
+}
+
+.linkish {
+  margin-left: 0.5rem;
+  background: none;
+  border: none;
+  color: var(--green-dark, #178a2d);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
 }
 
 .live-card {
@@ -254,8 +284,9 @@ onMounted(async () => {
   margin: 0.45rem 0;
 }
 
-.warn {
-  color: #8a3b12;
+.tip {
+  margin-top: 1rem;
+  font-size: 0.9em;
 }
 
 code {

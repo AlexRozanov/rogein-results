@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::auth::{check_origin, AuthUser};
 use crate::bulletin::{sanitize, Bulletin};
-use crate::rbac::require_organizer_perm;
+use crate::rbac::{require_organizer_perm, role_codes};
 use crate::{internal, normalize_slug, sport_kind_filter, AppState};
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -676,6 +676,68 @@ fn conflict_or_internal(err: sqlx::Error, conflict: &str) -> (StatusCode, String
         }
     }
     internal(err)
+}
+
+/// Адрес API и PUBLISH_TOKEN — только роль owner (или право roles.manage).
+pub async fn publish_setup(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let roles = role_codes(&state.pool, user.id).await.map_err(internal)?;
+    let is_owner = roles.iter().any(|r| r == "owner");
+    if !is_owner {
+        // Запасной путь: право roles.manage есть только у owner в миграции ролей.
+        if require_organizer_perm(&state.pool, user.id, "roles.manage")
+            .await
+            .is_err()
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Только владелец (роль owner) может смотреть токен. Ваши роли: {}",
+                    if roles.is_empty() {
+                        "нет".into()
+                    } else {
+                        roles.join(", ")
+                    }
+                ),
+            ));
+        }
+    }
+    let mut api_base = std::env::var("PUBLIC_BASE_URL")
+        .or_else(|_| std::env::var("SITE_ORIGIN"))
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if api_base.is_empty() {
+        // Прокси: X-Forwarded-Host / X-Forwarded-Proto, иначе Host.
+        let host = headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()))
+            .unwrap_or("")
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !host.is_empty() {
+            let proto = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("https")
+                .split(',')
+                .next()
+                .unwrap_or("https")
+                .trim();
+            api_base = format!("{proto}://{host}");
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "api_base_url": api_base,
+        "publish_token": state.publish_token,
+    })))
 }
 
 /// Метаданные APK для личного кабинета (любой вошедший пользователь).
