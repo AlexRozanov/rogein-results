@@ -63,7 +63,7 @@ build:android:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: manual
   before_script:
-    - apt-get update -qq && apt-get install -y -qq wget unzip > /dev/null
+    - apt-get update -qq && apt-get install -y -qq curl wget unzip > /dev/null
     - mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
     - |
       set -euo pipefail
@@ -93,9 +93,18 @@ build:android:
       VCODE="$(sed -n 's/.*versionCode = .*?: \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -1)"
       printf '%s\n' "{\"versionName\":\"${VNAME}\",\"versionCode\":${VCODE},\"url\":\"/api/admin/app/download\",\"updatedAt\":\"$(date -u +%Y-%m-%d)\"}" \
         > ../dist-android/version.json
+      # Generic Package Registry — публичный URL при «Allow anyone to pull from Package Registry»
+      PKG_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/rogein-chip/${VNAME}/rogein-chip.apk"
+      curl --fail --silent --show-error \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --upload-file ../dist-android/rogein-chip.apk \
+        "${PKG_URL}"
+      echo "ANDROID_APK_URL=${PKG_URL}"
+      echo "${PKG_URL}" > ../dist-android/apk-url.txt
   artifacts:
     when: on_success
     expire_in: 30 days
     paths:
       - dist-android/rogein-chip.apk
       - dist-android/version.json
+      - dist-android/apk-url.txt
