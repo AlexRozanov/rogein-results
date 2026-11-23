@@ -10188,12 +10188,7 @@ pub struct EventPackMapPoint {
 
 pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, String> {
     let settings = get_settings(conn)?;
-    if settings.sport_kind != "rogaine" {
-        return Err(
-            "Пакет старта собирается только для рогейна. Для ориентирования отправьте стартовый протокол."
-                .into(),
-        );
-    }
+    let orient = settings.sport_kind == "orient";
     let legends = query_cp_legends(conn)?
         .into_iter()
         .map(|row| EventPackLegend {
@@ -10204,42 +10199,63 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             map_y: row.map_y,
         })
         .collect::<Vec<_>>();
-    let type_rules_by_format = event_pack_type_rules_by_format(conn)?;
-    let formats = query_format_settings(conn)?
-        .into_iter()
-        .map(|row| {
-            let cp_type_rules = type_rules_by_format
-                .get(&row.format_name.trim().to_lowercase())
-                .cloned()
-                .unwrap_or_default();
-            EventPackFormat {
-                name: row.format_name,
-                control_minutes: row.control_minutes,
-                penalty_per_minute: row.penalty_per_minute,
-                dq_minutes: row.dq_minutes,
-                finish_cp: row.finish_cp,
-                competition_start_time: row.competition_start_time.unwrap_or_default(),
-                controls: event_pack_format_cps(
-                    &legends,
-                    settings.start_cp,
-                    settings.finish_cp,
-                    &cp_type_rules,
-                ),
-                cp_type_rules,
-            }
-        })
-        .collect::<Vec<_>>();
-    let award_groups = query_award_groups(conn)?
-        .into_iter()
-        .map(|row| EventPackAwardGroup {
-            name: row.name,
-            gender_mode: row.gender_mode,
-            min_age: row.min_age,
-            max_age: row.max_age,
-            sort_order: row.sort_order,
-            format_names: row.format_names,
-        })
-        .collect::<Vec<_>>();
+    let formats = if orient {
+        // Для ориентирования дистанции = courses; в event-pack они идут как formats.controls.
+        list_courses(conn)?
+            .into_iter()
+            .map(|row| EventPackFormat {
+                name: row.name,
+                control_minutes: None,
+                penalty_per_minute: None,
+                dq_minutes: None,
+                finish_cp: None,
+                competition_start_time: String::new(),
+                controls: row.controls,
+                cp_type_rules: Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let type_rules_by_format = event_pack_type_rules_by_format(conn)?;
+        query_format_settings(conn)?
+            .into_iter()
+            .map(|row| {
+                let cp_type_rules = type_rules_by_format
+                    .get(&row.format_name.trim().to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
+                EventPackFormat {
+                    name: row.format_name,
+                    control_minutes: row.control_minutes,
+                    penalty_per_minute: row.penalty_per_minute,
+                    dq_minutes: row.dq_minutes,
+                    finish_cp: row.finish_cp,
+                    competition_start_time: row.competition_start_time.unwrap_or_default(),
+                    controls: event_pack_format_cps(
+                        &legends,
+                        settings.start_cp,
+                        settings.finish_cp,
+                        &cp_type_rules,
+                    ),
+                    cp_type_rules,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let award_groups = if orient {
+        Vec::new()
+    } else {
+        query_award_groups(conn)?
+            .into_iter()
+            .map(|row| EventPackAwardGroup {
+                name: row.name,
+                gender_mode: row.gender_mode,
+                min_age: row.min_age,
+                max_age: row.max_age,
+                sort_order: row.sort_order,
+                format_names: row.format_names,
+            })
+            .collect::<Vec<_>>()
+    };
     let (rows, _) = query_start_protocol(conn, 2000, 0, None, None, false, false, None, None)?;
     let mut people = Vec::new();
     for row in rows {
@@ -10262,7 +10278,11 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             team: row.teammates,
         });
     }
-    let exclusions = query_event_pack_exclusions(conn)?;
+    let exclusions = if orient {
+        Vec::new()
+    } else {
+        query_event_pack_exclusions(conn)?
+    };
     let map_points = collect_event_pack_map_points(conn)?;
     let meters_per_pixel = get_map_georef_info(conn)
         .ok()
@@ -14205,8 +14225,8 @@ mod tests {
                 .any(|person| person.id == 8 && person.format == "4ч")
         );
         assert!(pack.formats.iter().any(|format| format.name == "4ч"));
-        let orient = build_event_pack_after_switch_orient(&conn);
-        assert!(orient.is_err());
+        let orient = build_event_pack_after_switch_orient(&conn).expect("orient pack");
+        assert_eq!(orient.sport, "orient");
     }
 
     #[test]

@@ -307,6 +307,39 @@ fn push_json_file(
         let _ = run_adb(&adb, &["-s", &serial, "shell", "mkdir", "-p", parent]);
         match run_adb(&adb, &["-s", &serial, "push", &local_str, remote]) {
             Ok(output) if output.status.success() => {
+                // Чтобы телефон мог читать Downloads через MediaStore (иначе EACCES).
+                let _ = run_adb(
+                    &adb,
+                    &["-s", &serial, "shell", "chmod", "a+r", remote],
+                );
+                if remote.contains("/Download/") {
+                    let _ = run_adb(
+                        &adb,
+                        &[
+                            "-s",
+                            &serial,
+                            "shell",
+                            "cmd",
+                            "media",
+                            "scan-file",
+                            remote,
+                        ],
+                    );
+                    let _ = run_adb(
+                        &adb,
+                        &[
+                            "-s",
+                            &serial,
+                            "shell",
+                            "am",
+                            "broadcast",
+                            "-a",
+                            "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                            "-d",
+                            &format!("file://{remote}"),
+                        ],
+                    );
+                }
                 pushed.push((*remote).to_string());
             }
             Ok(output) => {

@@ -1036,14 +1036,14 @@ fun ProtocolScreen(
                     containerColor = CardWhite,
                     tonalElevation = 0.dp,
                 ) {
+                    DropdownMenuItem(
+                        text = { Text("Пакет с сайта") },
+                        onClick = {
+                            loadMenu = false
+                            onLoadSitePack()
+                        },
+                    )
                     if (rogaine) {
-                        DropdownMenuItem(
-                            text = { Text("Пакет с сайта") },
-                            onClick = {
-                                loadMenu = false
-                                onLoadSitePack()
-                            },
-                        )
                         DropdownMenuItem(
                             text = { Text("Пакет с компьютера") },
                             onClick = {

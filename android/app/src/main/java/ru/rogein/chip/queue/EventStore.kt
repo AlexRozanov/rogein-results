@@ -651,8 +651,16 @@ class EventStore(
             else -> if (code !in 200..299) error("Сайт ответил $code: ${body.take(180)}")
         }
         val pack = parseEventPackJson(body)
-        if (!isRogaine(pack.sport)) {
-            error("Это пакет ориентирования. Начните старт «Ориентирование».")
+        val want = normalizeSportKind(settings.sportKind)
+        val got = normalizeSportKind(pack.sport)
+        if (got != want) {
+            error(
+                if (isRogaine(got)) {
+                    "На сайте пакет рогейна. Начните старт «Рогейн» или смените slug."
+                } else {
+                    "На сайте пакет ориентирования. Начните старт «Ориентирование» или смените slug."
+                },
+            )
         }
         val map = requestBytes("GET", "$base/api/packs/$slug/map", token)
         return EventPackDownload(

@@ -369,27 +369,23 @@ defineExpose({ refresh });
       </div>
       <div class="native-row">
         <button type="button" :disabled="isBusy" @click="publish">Опубликовать</button>
-        <button
-          v-if="!props.isOrient"
-          type="button"
-          :disabled="isBusy"
-          @click="uploadEventPack"
-        >
+        <button type="button" :disabled="isBusy" @click="uploadEventPack">
           Отправить пакет на телефон (сайт)
         </button>
-        <button
-          v-if="!props.isOrient"
-          type="button"
-          :disabled="isBusy"
-          @click="verifyEventPack"
-        >
+        <button type="button" :disabled="isBusy" @click="verifyEventPack">
           Проверить пакет на сайте
         </button>
       </div>
-      <p v-if="!props.isOrient" class="subtitle">
-        Пакет — протокол, форматы, группы, легенды и карта для телефона.
-        На сайте он не публикуется в календарь. Телефон скачивает его по slug и токену.
-        «Проверить пакет на сайте» читает уже загруженный пакет: участники, форматы, группы, КП и карта.
+      <p class="subtitle">
+        <template v-if="props.isOrient">
+          Пакет ориентирования — протокол, дистанции и карта для телефона.
+        </template>
+        <template v-else>
+          Пакет рогейна — протокол, форматы, группы, легенды и карта для телефона.
+        </template>
+        На сайте он не публикуется в календарь. Телефон скачивает его по slug и токену
+        (Ещё → Публикация: адрес, токен; затем Протокол → Загрузить → Пакет с сайта).
+        «Проверить пакет на сайте» читает уже загруженный пакет.
       </p>
     </template>
   </CollapsiblePanel>

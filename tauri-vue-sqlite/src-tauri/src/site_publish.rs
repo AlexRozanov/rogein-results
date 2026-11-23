@@ -501,8 +501,10 @@ pub fn upload_event_pack_to_site(
     let slug = normalize_slug(slug)?;
     let title = title.trim().to_string();
     let pack = domain::build_event_pack(&conn, &title)?;
-    if pack.people.is_empty() {
-        return Err("Стартовый протокол пуст — нечего отправлять.".into());
+    if pack.people.is_empty() && pack.formats.is_empty() {
+        return Err(
+            "Нет протокола и дистанций/форматов — нечего отправлять на сайт.".into(),
+        );
     }
     let token = connection.publish_token.trim();
     if token.is_empty() {

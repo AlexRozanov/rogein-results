@@ -684,10 +684,6 @@ class ChipQueueViewModel(
             _busy.value = true
             try {
                 val sport = settings.value.sportKind
-                if (!isRogaine(sport)) {
-                    _status.value = "Пакет с сайта — для старта «Рогейн»."
-                    return@launch
-                }
                 val downloaded = repository.event.fetchEventPack(settings.value)
                 repository.startList.sportMismatch(downloaded.pack.sport, sport)?.let {
                     _status.value = it

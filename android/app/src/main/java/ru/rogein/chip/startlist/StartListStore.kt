@@ -1,6 +1,9 @@
 package ru.rogein.chip.startlist
 
+import android.content.ContentUris
 import android.content.Context
+import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -8,6 +11,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import ru.rogein.chip.parse.AwardGroupCsvRow
 import ru.rogein.chip.parse.CourseCsvRow
 import ru.rogein.chip.parse.CourseOrderMismatchException
@@ -184,10 +189,15 @@ class StartListStore(
     }
 
     private fun openUsbPack(): UsbPackLoad {
-        val file = findPackFile()
-            ?: return UsbPackLoad(error = "Файл протокола не найден. Отправьте его с компьютера по USB.")
+        val text = try {
+            readPackText(FILE_NAME)
+        } catch (e: Exception) {
+            return UsbPackLoad(error = shortPackReadError(e))
+        } ?: return UsbPackLoad(
+            error = "Файл протокола не найден. Отправьте его с компьютера по USB.",
+        )
         return try {
-            UsbPackLoad(pack = parseStartPack(file.readText(Charsets.UTF_8)))
+            UsbPackLoad(pack = parseStartPack(text))
         } catch (e: Exception) {
             UsbPackLoad(error = shortPackReadError(e))
         }
@@ -973,24 +983,121 @@ class StartListStore(
         deletePackFiles()
     }
 
-    private fun findPackFile(name: String = FILE_NAME): File? {
-        val candidates = listOf(
-            File(context.getExternalFilesDir(null), name),
-            File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "rogein/$name",
-            ),
+    private fun packFileCandidates(name: String): List<File> {
+        val files = linkedSetOf<File>()
+        // Каталог приложения — всегда доступен самому приложению.
+        files += File(context.filesDir, name)
+        context.getExternalFilesDir(null)?.let { files += File(it, name) }
+        files += File(
+            Environment.getExternalStorageDirectory(),
+            "Android/data/${context.packageName}/files/$name",
         )
-        return candidates.firstOrNull { it.isFile && it.length() > 0L }
+        // Сюда чаще всего кладёт adb push с компьютера (Android 11+ режет Android/data).
+        files += File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "rogein/$name",
+        )
+        return files.toList()
+    }
+
+    /**
+     * Читает start-pack / event-pack: сначала File API, при EACCES в Downloads —
+     * через MediaStore (после media scan), иначе на Android 10+ «Нет доступа…».
+     */
+    private fun readPackText(name: String): String? {
+        var lastAccessError: Exception? = null
+        for (file in packFileCandidates(name)) {
+            if (!file.isFile || file.length() <= 0L) continue
+            try {
+                return file.readText(Charsets.UTF_8)
+            } catch (e: Exception) {
+                lastAccessError = e
+            }
+        }
+        readPackViaMediaStore(name)?.let { return it }
+        if (lastAccessError != null) {
+            throw lastAccessError
+        }
+        return null
+    }
+
+    private fun readPackViaMediaStore(name: String): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val downloadFile = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "rogein/$name",
+        )
+        if (downloadFile.isFile && downloadFile.length() > 0L) {
+            scanMediaFileBlocking(downloadFile.absolutePath)
+        }
+        val resolver = context.contentResolver
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val relativePaths = listOf(
+            "${Environment.DIRECTORY_DOWNLOADS}/rogein/",
+            "${Environment.DIRECTORY_DOWNLOADS}/rogein",
+        )
+        for (relative in relativePaths) {
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf(name, relative),
+                "${MediaStore.Downloads._ID} DESC",
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(0)
+                    val uri = ContentUris.withAppendedId(collection, id)
+                    readUriText(uri)?.let { return it }
+                }
+            }
+        }
+        // adb push иногда индексируется без RELATIVE_PATH — ищем по имени.
+        resolver.query(
+            collection,
+            arrayOf(MediaStore.Downloads._ID, MediaStore.MediaColumns.RELATIVE_PATH),
+            "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+            arrayOf(name),
+            "${MediaStore.Downloads._ID} DESC",
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val relative = cursor.getString(1).orEmpty()
+                if (relative.contains("rogein", ignoreCase = true) || relative.isEmpty()) {
+                    val uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
+                    readUriText(uri)?.let { return it }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun readUriText(uri: Uri): String? {
+        return try {
+            context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { reader ->
+                val text = reader.readText()
+                text.takeIf { it.isNotBlank() }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun scanMediaFileBlocking(path: String) {
+        val latch = CountDownLatch(1)
+        try {
+            MediaScannerConnection.scanFile(context, arrayOf(path), arrayOf("application/json")) { _, _ ->
+                latch.countDown()
+            }
+            latch.await(3, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+            // сканер недоступен — всё равно пробуем MediaStore
+        }
     }
 
     private fun deletePackFiles() {
         for (name in listOf(FILE_NAME, EVENT_FILE_NAME)) {
-            File(context.getExternalFilesDir(null), name).delete()
-            File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "rogein/$name",
-            ).delete()
+            for (file in packFileCandidates(name)) {
+                runCatching { file.delete() }
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
                 val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -1010,10 +1117,15 @@ class StartListStore(
     }
 
     private fun openUsbEventPack(): UsbEventPackLoad {
-        val file = findPackFile(EVENT_FILE_NAME)
-            ?: return UsbEventPackLoad(error = "Файл пакета не найден. Отправьте его с компьютера по USB или с сайта.")
+        val text = try {
+            readPackText(EVENT_FILE_NAME)
+        } catch (e: Exception) {
+            return UsbEventPackLoad(error = shortPackReadError(e))
+        } ?: return UsbEventPackLoad(
+            error = "Файл пакета не найден. Отправьте его с компьютера по USB или с сайта.",
+        )
         return try {
-            UsbEventPackLoad(pack = parseEventPackJson(file.readText(Charsets.UTF_8)))
+            UsbEventPackLoad(pack = parseEventPackJson(text))
         } catch (e: Exception) {
             UsbEventPackLoad(error = shortPackReadError(e))
         }
