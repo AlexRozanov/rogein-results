@@ -1225,12 +1225,16 @@ async fn put_event_pack(
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if sport == "orient" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Пакет старта только для рогейна".into(),
-        ));
-    }
+    let sport_kind = match sport.as_str() {
+        "" | "rogaine" => "rogaine",
+        "orient" | "orienteering" => "orient",
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Неизвестный sport пакета: {other}. Ожидается rogaine или orient."),
+            ));
+        }
+    };
     if !payload.is_object() {
         return Err((StatusCode::BAD_REQUEST, "Ожидается JSON-объект пакета".into()));
     }
@@ -1256,7 +1260,7 @@ async fn put_event_pack(
     sqlx::query(
         r#"
         INSERT INTO event_packs (slug, sport_kind, title, pack_json, updated_at)
-        VALUES ($1, 'rogaine', $2, $3, now())
+        VALUES ($1, $2, $3, $4, now())
         ON CONFLICT (slug) DO UPDATE
         SET sport_kind = EXCLUDED.sport_kind,
             title = EXCLUDED.title,
@@ -1265,12 +1269,13 @@ async fn put_event_pack(
         "#,
     )
     .bind(&slug)
+    .bind(sport_kind)
     .bind(title)
     .bind(&pack)
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    Ok(Json(serde_json::json!({ "ok": true, "slug": slug })))
+    Ok(Json(serde_json::json!({ "ok": true, "slug": slug, "sport_kind": sport_kind })))
 }
 
 async fn get_event_pack(
