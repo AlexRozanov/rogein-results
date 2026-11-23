@@ -13,6 +13,7 @@ type SitePublishSettings = {
   title: string;
   suggested_slug: string;
   suggested_title: string;
+  competition_date?: string;
 };
 
 type SitePublishResult = {
@@ -24,6 +25,14 @@ type SitePublishResult = {
   legend_count?: number;
 };
 
+type UpcomingSiteStart = {
+  slug: string;
+  title: string;
+  competition_date: string | null;
+  sport_kind: string;
+  summary: string;
+};
+
 const props = defineProps<{
   busy: boolean;
   accessOnly?: boolean;
@@ -32,6 +41,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   status: [message: string];
+  settingsChanged: [];
 }>();
 
 const localBusy = ref(false);
@@ -42,6 +52,11 @@ const title = ref("");
 const suggestedSlug = ref("");
 const suggestedTitle = ref("");
 const overwriteOpen = ref(false);
+
+const pickerOpen = ref(false);
+const pickerLoading = ref(false);
+const pickerError = ref("");
+const pickerItems = ref<UpcomingSiteStart[]>([]);
 
 const isBusy = computed(() => props.busy || localBusy.value);
 
@@ -112,6 +127,67 @@ async function testConnection() {
     emit("status", `Сайт отвечает: ${base}`);
   } catch (error) {
     emit("status", `Нет связи с сайтом: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
+async function openUpcomingPicker() {
+  const base = apiBaseUrl.value.trim();
+  if (!base) {
+    emit("status", "Сначала укажите адрес сайта.");
+    return;
+  }
+  pickerOpen.value = true;
+  pickerLoading.value = true;
+  pickerError.value = "";
+  pickerItems.value = [];
+  localBusy.value = true;
+  try {
+    // Сохраняем адрес/токен, как на телефоне перед «Взять с сайта».
+    await invoke<SitePublishSettings>("save_site_publish_settings", payload());
+    const settings = await invoke<{ sport_kind: string }>("get_settings");
+    const items = await invoke<UpcomingSiteStart[]>("fetch_upcoming_site_starts", {
+      apiBaseUrl: base,
+      sportKind: settings.sport_kind || null,
+    });
+    pickerItems.value = items;
+  } catch (error) {
+    pickerError.value = String(error);
+  } finally {
+    pickerLoading.value = false;
+    localBusy.value = false;
+  }
+}
+
+function closeUpcomingPicker() {
+  if (localBusy.value && pickerLoading.value) return;
+  pickerOpen.value = false;
+  pickerError.value = "";
+  pickerItems.value = [];
+}
+
+async function applyUpcoming(item: UpcomingSiteStart) {
+  localBusy.value = true;
+  try {
+    const settings = await invoke<SitePublishSettings>("apply_upcoming_site_start", {
+      slug: item.slug,
+      title: item.title,
+      competitionDate: item.competition_date || null,
+    });
+    applySettings(settings);
+    pickerOpen.value = false;
+    const label = item.title.trim() || item.slug;
+    const date = item.competition_date?.trim();
+    emit(
+      "status",
+      date
+        ? `С сайта: «${label}», дата ${date}, slug ${item.slug}.`
+        : `С сайта: «${label}», slug ${item.slug}.`,
+    );
+    emit("settingsChanged");
+  } catch (error) {
+    emit("status", `Не удалось взять старт с сайта: ${String(error)}`);
   } finally {
     localBusy.value = false;
   }
@@ -245,6 +321,15 @@ defineExpose({ refresh });
 
     <template v-if="!props.accessOnly">
       <h3>Этот старт</h3>
+      <div class="native-row" style="margin-bottom: 8px">
+        <button type="button" :disabled="isBusy" @click="openUpcomingPicker">
+          Взять с сайта
+        </button>
+      </div>
+      <p class="subtitle" style="margin-top: 0">
+        Подставит название, дату соревнования и slug из анонса календаря
+        (как «Взять с сайта» на телефоне).
+      </p>
       <div class="native-settings site-publish-settings">
         <label>
           Slug
@@ -306,4 +391,122 @@ defineExpose({ refresh });
     @yes="onOverwriteYes"
     @no="onOverwriteNo"
   />
+
+  <div
+    v-if="pickerOpen"
+    class="modal-backdrop"
+    @click.self="!pickerLoading && closeUpcomingPicker()"
+  >
+    <div
+      class="modal-card upcoming-picker-card"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Старт с сайта"
+    >
+      <div class="modal-header">
+        <h3>Старт с сайта</h3>
+        <button
+          class="modal-close-btn"
+          type="button"
+          title="Закрыть"
+          aria-label="Закрыть"
+          :disabled="pickerLoading"
+          @click="closeUpcomingPicker"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M18.3 5.7a1 1 0 0 0-1.4-1.4L12 9.17 7.1 4.3A1 1 0 0 0 5.7 5.7L10.59 10.6 5.7 15.5a1 1 0 1 0 1.4 1.4L12 12l4.9 4.9a1 1 0 0 0 1.4-1.4L13.41 10.6l4.89-4.9z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <p v-if="pickerLoading" class="subtitle">Загрузка календаря…</p>
+      <p v-else-if="pickerError" class="upcoming-picker-error">{{ pickerError }}</p>
+      <p v-else-if="pickerItems.length === 0" class="subtitle">
+        В календаре нет анонсированных стартов для этого вида.
+      </p>
+      <template v-else>
+        <p class="subtitle">
+          Подставит название, дату и slug. Можно пропустить и заполнить вручную.
+        </p>
+        <ul class="upcoming-picker-list">
+          <li v-for="item in pickerItems" :key="item.slug">
+            <button
+              type="button"
+              class="upcoming-picker-item"
+              :disabled="isBusy"
+              @click="applyUpcoming(item)"
+            >
+              <span class="upcoming-picker-title">{{
+                item.title.trim() || item.slug
+              }}</span>
+              <span class="upcoming-picker-meta">
+                {{ item.competition_date?.trim() || "без даты" }} · {{ item.slug }}
+              </span>
+            </button>
+          </li>
+        </ul>
+      </template>
+
+      <div class="native-row" style="margin-top: 12px">
+        <button type="button" :disabled="pickerLoading" @click="closeUpcomingPicker">
+          {{ pickerLoading ? "Отмена" : "Пропустить" }}
+        </button>
+      </div>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.upcoming-picker-card {
+  max-width: 28rem;
+  width: min(28rem, 100%);
+}
+
+.upcoming-picker-error {
+  color: #b91c1c;
+  margin: 0.5rem 0;
+}
+
+.upcoming-picker-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.upcoming-picker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  margin: 0.15rem 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.upcoming-picker-item:hover:not(:disabled),
+.upcoming-picker-item:focus-visible {
+  border-color: #475569;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.upcoming-picker-title {
+  font-weight: 600;
+}
+
+.upcoming-picker-meta {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+</style>

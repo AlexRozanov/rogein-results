@@ -45,6 +45,34 @@ pub struct SitePublishSettings {
     pub title: String,
     pub suggested_slug: String,
     pub suggested_title: String,
+    /// Дата соревнования после применения старта с сайта (для обновления формы).
+    #[serde(default)]
+    pub competition_date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpcomingSiteStart {
+    pub slug: String,
+    pub title: String,
+    #[serde(default)]
+    pub competition_date: Option<String>,
+    #[serde(default)]
+    pub sport_kind: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpcomingApiItem {
+    slug: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    competition_date: Option<String>,
+    #[serde(default)]
+    sport_kind: String,
+    #[serde(default)]
+    summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,6 +266,7 @@ pub fn get_settings(
         title,
         suggested_slug: suggested_slug(&settings.competition_date),
         suggested_title: suggested_title(&settings.competition_date, active_title),
+        competition_date: settings.competition_date,
     })
 }
 
@@ -275,6 +304,126 @@ pub fn event_exists(api_base_url: &str, slug: &str) -> Result<bool, String> {
         Err(ureq::Error::Status(404, _)) => Ok(false),
         Err(e) => Err(map_http_error("проверки старта на сайте", e, 0)),
     }
+}
+
+/// Анонсы из публичного календаря сайта (`GET /api/upcoming`), с фильтром по виду.
+pub fn fetch_upcoming(
+    api_base_url: &str,
+    sport_kind: Option<&str>,
+) -> Result<Vec<UpcomingSiteStart>, String> {
+    let base = normalize_base_url(api_base_url)?;
+    let want = match sport_kind.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => Some(domain::normalize_sport_kind(raw)?),
+        None => None,
+    };
+    let url = format!("{base}/api/upcoming");
+    let response = agent()
+        .get(&url)
+        .call()
+        .map_err(|e| map_http_error("загрузки календаря сайта", e, 0))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.into_string().unwrap_or_default();
+        let body = body.trim();
+        return Err(if body.is_empty() {
+            format!("Календарь сайта ответил {status}")
+        } else {
+            format!("Календарь сайта ответил {status}: {body}")
+        });
+    }
+    let body = response
+        .into_string()
+        .map_err(|e| format!("Не удалось прочитать календарь сайта: {e}"))?;
+    let rows: Vec<UpcomingApiItem> = serde_json::from_str(&body)
+        .map_err(|e| format!("Календарь сайта: неверный JSON ({e})"))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let slug = row.slug.trim().to_string();
+        if slug.is_empty() {
+            continue;
+        }
+        // Как на телефоне: пустое / неизвестное → orient, явно rogaine → rogaine.
+        let kind = match row.sport_kind.trim().to_ascii_lowercase().as_str() {
+            "rogaine" => "rogaine".to_string(),
+            _ => "orient".to_string(),
+        };
+        if let Some(want) = want.as_ref() {
+            if &kind != want {
+                continue;
+            }
+        }
+        let date = row
+            .competition_date
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        out.push(UpcomingSiteStart {
+            slug,
+            title: row.title.trim().to_string(),
+            competition_date: date,
+            sport_kind: kind,
+            summary: row.summary.trim().to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Подставляет slug, название и дату соревнования из анонса календаря.
+pub fn apply_upcoming(
+    app_data_dir: &Path,
+    conn: &Connection,
+    active_title: Option<&str>,
+    slug: &str,
+    title: &str,
+    competition_date: Option<&str>,
+) -> Result<SitePublishSettings, String> {
+    let current = domain::get_settings(conn)?;
+    let (cur_slug, cur_title) = load_event_meta(conn)?;
+    let next_title = {
+        let t = title.trim();
+        if t.is_empty() {
+            if !cur_title.is_empty() {
+                cur_title
+            } else {
+                slug.trim().to_string()
+            }
+        } else {
+            t.to_string()
+        }
+    };
+    let next_slug = {
+        let s = slug.trim();
+        if s.is_empty() {
+            cur_slug
+        } else {
+            s.to_string()
+        }
+    };
+    if next_slug.is_empty() {
+        return Err("У анонса нет slug.".into());
+    }
+    if next_title.is_empty() {
+        return Err("Укажите название старта.".into());
+    }
+    if let Some(date) = competition_date.map(str::trim).filter(|v| !v.is_empty()) {
+        domain::set_settings(
+            conn,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(date.to_string()),
+            None,
+            None,
+        )?;
+    } else if current.competition_date.trim().is_empty() {
+        // без даты slug из названия всё равно сохраняем
+    }
+    save_event_meta(conn, &next_slug, &next_title)?;
+    get_settings(app_data_dir, conn, active_title)
 }
 
 pub fn publish_current_start(

@@ -244,6 +244,7 @@ async function onWorkspaceReset() {
       :busy="props.busy || localBusy"
       :is-orient="isOrient"
       @status="emit('status', $event)"
+      @settings-changed="refresh"
     />
 
     <CollapsiblePanel panel-id="general" title="Общие настройки">

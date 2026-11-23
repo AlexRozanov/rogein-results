@@ -25,7 +25,7 @@ use domain::{
 };
 use serde::Serialize;
 use archive_orient::ArchiveOrientPreview;
-use site_publish::{SitePublishResult, SitePublishSettings};
+use site_publish::{SitePublishResult, SitePublishSettings, UpcomingSiteStart};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct AppState {
@@ -238,6 +238,37 @@ fn test_site_publish_connection(api_base_url: String) -> Result<String, String> 
 #[tauri::command]
 fn site_event_exists(api_base_url: String, slug: String) -> Result<bool, String> {
     site_publish::event_exists(&api_base_url, &slug)
+}
+
+#[tauri::command]
+fn fetch_upcoming_site_starts(
+    api_base_url: String,
+    sport_kind: Option<String>,
+) -> Result<Vec<UpcomingSiteStart>, String> {
+    site_publish::fetch_upcoming(&api_base_url, sport_kind.as_deref())
+}
+
+#[tauri::command]
+fn apply_upcoming_site_start(
+    state: State<'_, AppState>,
+    slug: String,
+    title: String,
+    competition_date: Option<String>,
+) -> Result<SitePublishSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    let active_title = archive::get_active_archive(&state.app_data_dir).map(|a| a.title);
+    site_publish::apply_upcoming(
+        &state.app_data_dir,
+        &conn,
+        active_title.as_deref(),
+        &slug,
+        &title,
+        competition_date.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -2203,6 +2234,8 @@ pub fn run() {
             save_site_publish_settings,
             test_site_publish_connection,
             site_event_exists,
+            fetch_upcoming_site_starts,
+            apply_upcoming_site_start,
             preview_archive_orient_csv,
             publish_archive_orient_csv,
             publish_current_start,
