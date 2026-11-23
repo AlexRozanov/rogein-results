@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { hasPerm, me } from "../../auth";
+
+const isOwner = computed(() => me.value?.roles.includes("owner") ?? false);
 </script>
 
 <template>
@@ -22,6 +25,14 @@ import { hasPerm, me } from "../../auth";
       >
         <h2>Сотрудники</h2>
         <p class="muted">Приглашения в админку по email</p>
+      </router-link>
+      <router-link
+        v-if="isOwner"
+        class="card event-link"
+        to="/admin/live"
+      >
+        <h2>Online / live</h2>
+        <p class="muted">Адрес API, токен и настройка публикации</p>
       </router-link>
       <router-link class="card event-link" to="/admin/app">
         <h2>Приложение</h2>

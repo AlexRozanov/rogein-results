@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { hasPerm, logout, me } from "../auth";
 import { useRouter } from "vue-router";
 import AdminIcon from "../components/AdminIcon.vue";
 
 const router = useRouter();
+const isOwner = computed(() => me.value?.roles.includes("owner") ?? false);
 
 async function onLogout() {
   await logout();
@@ -30,6 +32,13 @@ async function onLogout() {
             class="admin-nav-link"
           >
             Сотрудники
+          </router-link>
+          <router-link
+            v-if="isOwner"
+            to="/admin/live"
+            class="admin-nav-link"
+          >
+            Online
           </router-link>
           <router-link to="/admin/app" class="admin-nav-link">
             Приложение
