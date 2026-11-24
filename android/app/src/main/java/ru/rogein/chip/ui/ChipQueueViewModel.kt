@@ -1568,6 +1568,7 @@ class ChipQueueViewModel(
     private suspend fun handleIssueRead(logicalId: Int?) {
         val draft = issueTarget(logicalId)
         if (draft != null) {
+            _status.value = "Выдача № ${draft.first}: проверка…"
             issueToChip(draft.first, draft.second, draft.third)
             return
         }
@@ -1945,7 +1946,9 @@ class ChipQueueViewModel(
             }
         }
         try {
+            _status.value = "Выдача № $id: подготовка…"
             io.issue(order, id, pointerEnd, chipBlockCount)
+            _status.value = "Выдача № $id: сохранение в протокол…"
             repository.startList.upsertLocal(id, name, course)
             val teamNote = assignSavedPersonTeam(id)
             repository.startList.markIssued(id, course, uid)
@@ -2123,6 +2126,7 @@ class ChipQueueViewModel(
         if (!_chipReady.value || order == null || io == null) return
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
+            _status.value = "Очистка отметок…"
             try {
                 io.clearMarks(order, end, count)
                 pointerEnd = 5

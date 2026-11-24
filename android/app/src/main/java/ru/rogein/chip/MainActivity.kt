@@ -172,6 +172,7 @@ class MainActivity : ComponentActivity() {
                 val tag = sessionTag ?: error("Чип убран")
                 val now = LocalTime.now()
                 val plan = SfrChipMemory.clearPlan(pointerEnd, now.hour, now.minute, now.second, blockCount)
+                runOnUiThread { viewModel.reportProgress("Очистка отметок 0/${plan.size}") }
                 write(tag, order, plan) { done, total ->
                     runOnUiThread { viewModel.reportProgress("Очистка отметок $done/$total") }
                 }
@@ -179,18 +180,28 @@ class MainActivity : ComponentActivity() {
 
             override fun writeLogicalId(order: BlockOrder, id: Int) {
                 val tag = sessionTag ?: error("Чип убран")
+                runOnUiThread { viewModel.reportProgress("Запись номера $id…") }
                 write(tag, order, listOf(3 to SfrChipMemory.logicalIdBlock(id))) { _, _ ->
-                    runOnUiThread { viewModel.reportProgress("Запись номера…") }
+                    runOnUiThread { viewModel.reportProgress("Запись номера $id…") }
                 }
             }
 
             override fun issue(order: BlockOrder, id: Int, pointerEnd: Int?, blockCount: Int) {
                 val tag = sessionTag ?: error("Чип убран")
                 val now = LocalTime.now()
-                val plan = SfrChipMemory.clearPlan(pointerEnd, now.hour, now.minute, now.second, blockCount) +
-                    (3 to SfrChipMemory.logicalIdBlock(id))
-                write(tag, order, plan) { done, total ->
-                    runOnUiThread { viewModel.reportProgress("Выдача чипа $done/$total") }
+                val clear = SfrChipMemory.clearPlan(pointerEnd, now.hour, now.minute, now.second, blockCount)
+                val plan = clear + (3 to SfrChipMemory.logicalIdBlock(id))
+                val clearTotal = clear.size
+                runOnUiThread {
+                    viewModel.reportProgress("Выдача № $id: очистка отметок 0/$clearTotal")
+                }
+                write(tag, order, plan) { done, _ ->
+                    val text = if (done <= clearTotal) {
+                        "Выдача № $id: очистка отметок $done/$clearTotal"
+                    } else {
+                        "Выдача № $id: запись номера"
+                    }
+                    runOnUiThread { viewModel.reportProgress(text) }
                 }
             }
 

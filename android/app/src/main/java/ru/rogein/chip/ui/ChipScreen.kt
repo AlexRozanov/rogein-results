@@ -201,10 +201,12 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
     var resultsPersonEditor by remember { mutableStateOf(false) }
     val fullscreenEditor = protocolPersonEditor || issuePersonEditor || resultsPersonEditor
     val hideKeyboardOnSelect = rememberHideKeyboardOnSelect(viewModel::selectPerson)
-    val showStatus = !imeVisible &&
-        !fullscreenEditor &&
+    // Во время NFC-записи статус нужен даже при открытой клавиатуре / редакторе участника,
+    // иначе прогресс очистки («3/128») скрыт и непонятно, что происходит.
+    val forceStatus = busy || isChipWriteProgress(status)
+    val showStatus = (forceStatus || (!imeVisible && !fullscreenEditor)) &&
         shouldShowStatus(status, section) &&
-        !(section == AppSection.Chip && mode == ChipMode.Issue && isChipOperationPrompt(status))
+        !(section == AppSection.Chip && mode == ChipMode.Issue && isChipOperationPrompt(status) && !forceStatus)
 
     Box {
     Scaffold(
@@ -224,11 +226,6 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                         IconButton(onClick = { viewModel.setMorePage(MorePage.Menu) }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад", tint = Color.White)
                         }
-                    }
-                },
-                actions = {
-                    if (section == AppSection.Chip) {
-                        CompactBarAction("Новый старт", onClick = { confirmNewStart = true })
                     }
                 },
                 expandedHeight = 48.dp,
@@ -1782,16 +1779,6 @@ private fun CourseChips(
 }
 
 @Composable
-private fun CompactBarAction(label: String, onClick: () -> Unit) {
-    TextButton(
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-    ) {
-        Text(label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-    }
-}
-
-@Composable
 private fun StatusStrip(text: String, onDismiss: () -> Unit) {
     Row(
         modifier = Modifier
@@ -1880,6 +1867,19 @@ private fun isChipOperationPrompt(text: String): Boolean {
         lower.startsWith("чип на месте") ||
         lower.contains("приложите чип") ||
         lower.contains("отметьтесь")
+}
+
+/** Прогресс записи/чтения чипа — всегда показываем в статус-полоске. */
+private fun isChipWriteProgress(text: String): Boolean {
+    val lower = text.trim().lowercase()
+    if (lower.isEmpty()) return false
+    return lower.startsWith("читаю чип") ||
+        lower.startsWith("выдача") ||
+        lower.startsWith("очистка") ||
+        lower.startsWith("запись номера") ||
+        lower.startsWith("запись прохождения") ||
+        lower.startsWith("запись станции") ||
+        Regex("""\d+\s*/\s*\d+""").containsMatchIn(lower)
 }
 
 private fun compactStatus(text: String): String {
