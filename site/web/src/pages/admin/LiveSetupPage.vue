@@ -154,7 +154,8 @@ onMounted(load);
           <li>
             Установите приложение из раздела
             <router-link to="/admin/app">Приложение</router-link>
-            (SFR Reader).
+            (SFR Reader). Подробнее —
+            <router-link to="/admin/help">справка</router-link>.
           </li>
           <li>
             Откройте <strong>Ещё → Публикация</strong>.

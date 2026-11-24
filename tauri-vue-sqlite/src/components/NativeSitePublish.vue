@@ -248,9 +248,17 @@ async function uploadToSite() {
 }
 
 function packOnSiteStatus(result: SitePublishResult, verb: string) {
+  const map = result.has_map ? "карта есть" : "карты нет";
+  if (props.isOrient) {
+    const parts = [
+      `участников ${result.participant_count}`,
+      `дистанций ${result.result_count}`,
+      map,
+    ];
+    return `${verb} «${result.slug}»: ${parts.join(", ")}.`;
+  }
   const groups = result.award_group_count ?? 0;
   const legends = result.legend_count ?? 0;
-  const map = result.has_map ? "карта есть" : "карты нет";
   return `${verb} «${result.slug}»: участников ${result.participant_count}, форматов ${result.result_count}, групп ${groups}, КП ${legends}, ${map}.`;
 }
 
@@ -260,7 +268,7 @@ async function uploadEventPack() {
     const result = await invoke<SitePublishResult>("upload_event_pack_to_site", payload());
     emit(
       "status",
-      `${packOnSiteStatus(result, "Пакет старта на сайте")} Телефон: Протокол → Загрузить → Пакет с сайта.`,
+      `${packOnSiteStatus(result, "Пакет на сайте")} Телефон: Протокол → Загрузить → Пакет с сайта.`,
     );
   } catch (error) {
     emit("status", `Ошибка отправки пакета: ${String(error)}`);

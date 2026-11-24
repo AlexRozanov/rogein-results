@@ -1150,6 +1150,10 @@ private data class UsbEventPackLoad(
 )
 
 internal fun eventPackLoadedMessage(pack: EventPackFile, prefix: String = "Пакет старта"): String {
+    val orient = !isRogaine(pack.sport)
+    if (orient) {
+        return "$prefix: ${pack.people.size} участников, ${pack.formats.size} дистанций."
+    }
     val cps = pack.legends.size.takeIf { it > 0 } ?: pack.innerLegendCps().size
     val groups = pack.awardGroups.size
     val cpNote = if (cps > 0) "$cps КП" else "без списка КП"

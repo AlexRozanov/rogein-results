@@ -16,6 +16,8 @@ import UsersPage from "./pages/admin/UsersPage.vue";
 import BulletinPage from "./pages/BulletinPage.vue";
 import CalendarPage from "./pages/CalendarPage.vue";
 import AppDownloadPage from "./pages/admin/AppDownloadPage.vue";
+import HelpArticlePage from "./pages/admin/HelpArticlePage.vue";
+import HelpIndexPage from "./pages/admin/HelpIndexPage.vue";
 import LiveSetupPage from "./pages/admin/LiveSetupPage.vue";
 import ComingSoonPage from "./pages/ComingSoonPage.vue";
 import EventListPage from "./pages/EventListPage.vue";
@@ -86,6 +88,8 @@ const router = createRouter({
           meta: { perm: "users.manage" },
         },
         { path: "app", component: AppDownloadPage },
+        { path: "help", component: HelpIndexPage },
+        { path: "help/:slug", component: HelpArticlePage },
         { path: "live", component: LiveSetupPage },
         { path: "password", component: ChangePasswordPage },
       ],

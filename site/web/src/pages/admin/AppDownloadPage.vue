@@ -87,10 +87,25 @@ onMounted(async () => {
       <li>Разрешите установку из этого источника, если Android спросит.</li>
       <li>Обновления ставятся <strong>поверх</strong> — данные на телефоне сохраняются.</li>
     </ol>
+
+    <p class="muted help-link">
+      Дальше —
+      <router-link to="/admin/help">справка по работе с телефоном</router-link>
+      (обмен, online, FAQ).
+    </p>
   </div>
 </template>
 
 <style scoped>
+.help-link {
+  margin-top: 1.25rem;
+  max-width: 40rem;
+}
+
+.help-link a {
+  color: var(--green-dark, #178a2d);
+}
+
 .app-panel {
   display: flex;
   flex-wrap: wrap;

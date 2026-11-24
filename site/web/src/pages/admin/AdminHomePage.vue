@@ -41,11 +41,15 @@ const isOwner = computed(
         <h2>Приложение</h2>
         <p class="muted">Скачать SFR Reader (Android)</p>
       </router-link>
+      <router-link class="card event-link" to="/admin/help">
+        <h2>Справка</h2>
+        <p class="muted">Howto, обмен, online и частые вопросы</p>
+      </router-link>
       <p
         v-if="!hasPerm('events.announce') && !hasPerm('users.manage')"
         class="muted"
       >
-        Календарь и сотрудники недоступны — можно скачать приложение.
+        Календарь и сотрудники недоступны — можно скачать приложение и открыть справку.
       </p>
     </div>
   </div>

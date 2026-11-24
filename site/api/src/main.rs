@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod bulletin;
 mod field;
+mod help;
 mod mail;
 mod map_image;
 mod models;
@@ -160,6 +161,9 @@ async fn serve() -> anyhow::Result<()> {
     std::fs::create_dir_all(&android_app_dir).context("create android-app dir")?;
 
     let pool = connect_pool().await?;
+    help::ensure_seed(&pool)
+        .await
+        .context("seed help articles")?;
 
     let media_service = ServeDir::new(&media_dir);
     let (live_tx, _) = broadcast::channel(64);
@@ -227,6 +231,8 @@ async fn serve() -> anyhow::Result<()> {
         .route("/api/admin/app/version", get(admin::android_app_version))
         .route("/api/admin/app/download", get(admin::android_app_download))
         .route("/api/admin/publish-setup", get(admin::publish_setup))
+        .route("/api/admin/help", get(help::list_articles))
+        .route("/api/admin/help/{slug}", get(help::get_article))
         .route("/api/events", get(list_events))
         .route("/api/upcoming", get(list_upcoming))
         .route("/api/upcoming/{slug}", get(bulletin::get_public_upcoming))
