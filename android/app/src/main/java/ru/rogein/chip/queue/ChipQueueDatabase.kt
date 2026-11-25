@@ -56,6 +56,7 @@ data class StartCourseEntity(
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legsJson: String = "[]",
+    val randomOrderJson: String = "[]",
 )
 
 @Entity(tableName = "start_meta")
@@ -229,7 +230,7 @@ interface StartArchiveDao {
         FieldOpEntity::class,
         FieldMetaEntity::class,
     ],
-    version = 12,
+    version = 13,
 )
 abstract class ChipQueueDatabase : RoomDatabase() {
     abstract fun dao(): ChipQueueDao
@@ -381,6 +382,14 @@ abstract class ChipQueueDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "ALTER TABLE event_exclusions ADD COLUMN syncId TEXT NOT NULL DEFAULT ''",
+                )
+            }
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE start_courses ADD COLUMN randomOrderJson TEXT NOT NULL DEFAULT '[]'",
                 )
             }
         }

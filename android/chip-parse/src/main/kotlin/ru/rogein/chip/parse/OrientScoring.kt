@@ -166,31 +166,98 @@ fun courseProgress(
     punches: List<Int>,
     required: List<Int>,
     addCounts: Map<Int, Int> = emptyMap(),
+    randomOrder: List<Boolean> = emptyList(),
 ): List<CourseCpProgress> {
     if (required.isEmpty()) return emptyList()
     val punched = punches.toSet()
-    val remaining = addCounts.toMutableMap()
-    var i = 0
-    var firstMiss = true
-    return required.map { cp ->
-        var q = i
-        while (q < punches.size && punches[q] != cp) q += 1
-        var taken = false
-        var added = false
-        if (q < punches.size && punches[q] == cp) {
-            taken = true
-            i = q + 1
-        } else {
-            val left = remaining[cp] ?: 0
-            if (left > 0) {
-                remaining[cp] = left - 1
-                taken = true
-                added = true
+    val remainingAdds = addCounts.toMutableMap()
+    val segments = courseSegments(required, randomOrder)
+    val takenFlags = BooleanArray(required.size)
+    val addedFlags = BooleanArray(required.size)
+    var punchAt = 0
+    var controlAt = 0
+    for ((segIdx, seg) in segments.withIndex()) {
+        val future = HashSet<Int>()
+        for (j in (segIdx + 1) until segments.size) {
+            when (val next = segments[j]) {
+                is CourseSegment.Fixed -> future += next.cp
+                is CourseSegment.Cluster -> future += next.cps
             }
         }
+        when (seg) {
+            is CourseSegment.Fixed -> {
+                var q = punchAt
+                while (q < punches.size && punches[q] != seg.cp) q += 1
+                if (q < punches.size && punches[q] == seg.cp) {
+                    takenFlags[controlAt] = true
+                    punchAt = q + 1
+                } else {
+                    val left = remainingAdds[seg.cp] ?: 0
+                    if (left > 0) {
+                        remainingAdds[seg.cp] = left - 1
+                        takenFlags[controlAt] = true
+                        addedFlags[controlAt] = true
+                    }
+                }
+                controlAt += 1
+            }
+            is CourseSegment.Cluster -> {
+                val need = LinkedHashMap<Int, Int>()
+                for (cp in seg.cps) need[cp] = (need[cp] ?: 0) + 1
+                val slotByCp = HashMap<Int, ArrayDeque<Int>>()
+                for (offset in seg.cps.indices) {
+                    val cp = seg.cps[offset]
+                    slotByCp.getOrPut(cp) { ArrayDeque() }.addLast(controlAt + offset)
+                }
+                while (need.values.any { it > 0 }) {
+                    var foundIdx = -1
+                    var foundCp = 0
+                    var q = punchAt
+                    while (q < punches.size) {
+                        val cp = punches[q]
+                        if ((need[cp] ?: 0) > 0) {
+                            foundIdx = q
+                            foundCp = cp
+                            break
+                        }
+                        if (cp in future) break
+                        q += 1
+                    }
+                    if (foundIdx >= 0) {
+                        need[foundCp] = (need[foundCp] ?: 1) - 1
+                        val slot = slotByCp[foundCp]?.removeFirstOrNull()
+                        if (slot != null) takenFlags[slot] = true
+                        punchAt = foundIdx + 1
+                        continue
+                    }
+                    var usedAdd = false
+                    for ((cp, count) in need) {
+                        if (count <= 0) continue
+                        val left = remainingAdds[cp] ?: 0
+                        if (left > 0) {
+                            remainingAdds[cp] = left - 1
+                            need[cp] = count - 1
+                            val slot = slotByCp[cp]?.removeFirstOrNull()
+                            if (slot != null) {
+                                takenFlags[slot] = true
+                                addedFlags[slot] = true
+                            }
+                            usedAdd = true
+                            break
+                        }
+                    }
+                    if (!usedAdd) break
+                }
+                controlAt += seg.cps.size
+            }
+        }
+    }
+    var firstMiss = true
+    return required.mapIndexed { index, cp ->
+        val taken = takenFlags.getOrElse(index) { false }
         val blocker = !taken && firstMiss
         if (!taken) firstMiss = false
-        CourseCpProgress(cp, taken, added, punched.contains(cp), blocker)
+        CourseCpProgress(cp, taken, addedFlags.getOrElse(index) { false }, punched.contains(cp), blocker)
     }
 }
 
@@ -296,6 +363,7 @@ fun classifyActualPunches(
     courseCps: List<Int>,
     startCp: Int,
     finishCp: Int,
+    randomOrder: List<Boolean> = emptyList(),
 ): List<ClassifiedPunch> {
     val sorted = orientMarkOrder(marks)
     if (sorted.isEmpty()) return emptyList()
@@ -304,7 +372,16 @@ fun classifyActualPunches(
     val finishIdx = sorted.indices.reversed().firstOrNull { i ->
         i > startIdx && sorted[i].cp == finishCp
     } ?: sorted.lastIndex
-    var next = 0
+    val segments = courseSegments(courseCps, randomOrder)
+    var segIdx = 0
+    var clusterNeed = LinkedHashMap<Int, Int>()
+    fun loadCluster(seg: CourseSegment.Cluster) {
+        clusterNeed.clear()
+        for (cp in seg.cps) clusterNeed[cp] = (clusterNeed[cp] ?: 0) + 1
+    }
+    if (segments.firstOrNull() is CourseSegment.Cluster) {
+        loadCluster(segments.first() as CourseSegment.Cluster)
+    }
     var broken = false
     fun afterError(mark: OrientMark): ClassifiedPunch {
         broken = true
@@ -314,37 +391,76 @@ fun classifyActualPunches(
         if (broken) return afterError(mark)
         return ClassifiedPunch(mark, kind)
     }
+    fun futureCps(): Set<Int> {
+        val out = HashSet<Int>()
+        for (i in (segIdx + 1) until segments.size) {
+            when (val seg = segments[i]) {
+                is CourseSegment.Fixed -> out += seg.cp
+                is CourseSegment.Cluster -> out += seg.cps
+            }
+        }
+        return out
+    }
+    fun advanceSegment() {
+        segIdx += 1
+        clusterNeed.clear()
+        val next = segments.getOrNull(segIdx)
+        if (next is CourseSegment.Cluster) loadCluster(next)
+    }
     return sorted.mapIndexed { i, mark ->
         if (i < startIdx || i > finishIdx) {
             return@mapIndexed keep(mark, PunchKind.Extra)
         }
         if (i == finishIdx && mark.cp == finishCp) {
-            if (next < courseCps.size && courseCps[next] == finishCp) next += 1
             return@mapIndexed keep(mark, PunchKind.Finish)
         }
-        if (mark.cp == startCp && (next >= courseCps.size || courseCps[next] != startCp)) {
+        if (mark.cp == startCp && (segIdx >= segments.size ||
+                (segments.getOrNull(segIdx) as? CourseSegment.Fixed)?.cp != startCp)
+        ) {
             return@mapIndexed keep(mark, PunchKind.Start)
         }
         if (courseCps.isEmpty()) {
             return@mapIndexed keep(mark, PunchKind.Ok)
         }
-        if (next < courseCps.size && mark.cp == courseCps[next]) {
-            next += 1
-            val kind = when (mark.cp) {
-                startCp -> PunchKind.Start
-                finishCp -> PunchKind.Finish
-                else -> PunchKind.Ok
-            }
-            return@mapIndexed keep(mark, kind)
+        if (segIdx >= segments.size) {
+            return@mapIndexed keep(mark, if (mark.cp in courseCps) PunchKind.Ok else PunchKind.Extra)
         }
-        if (next < courseCps.size && courseCps.subList(next, courseCps.size).contains(mark.cp)) {
-            val laterSame = sorted.subList(i + 1, finishIdx + 1).any { it.cp == mark.cp }
-            if (laterSame) {
-                return@mapIndexed keep(mark, PunchKind.Extra)
+        when (val seg = segments[segIdx]) {
+            is CourseSegment.Fixed -> {
+                if (mark.cp == seg.cp) {
+                    advanceSegment()
+                    val kind = when (mark.cp) {
+                        startCp -> PunchKind.Start
+                        finishCp -> PunchKind.Finish
+                        else -> PunchKind.Ok
+                    }
+                    return@mapIndexed keep(mark, kind)
+                }
+                if (mark.cp in futureCps()) {
+                    val laterSame = sorted.subList(i + 1, finishIdx + 1).any { it.cp == mark.cp }
+                    if (laterSame) {
+                        return@mapIndexed keep(mark, PunchKind.Extra)
+                    }
+                    return@mapIndexed afterError(mark)
+                }
+                keep(mark, if (mark.cp in courseCps) PunchKind.Ok else PunchKind.Extra)
             }
-            return@mapIndexed afterError(mark)
+            is CourseSegment.Cluster -> {
+                if ((clusterNeed[mark.cp] ?: 0) > 0) {
+                    clusterNeed[mark.cp] = (clusterNeed[mark.cp] ?: 1) - 1
+                    if (clusterNeed.values.all { it <= 0 }) advanceSegment()
+                    return@mapIndexed keep(mark, PunchKind.Ok)
+                }
+                if (mark.cp in futureCps()) {
+                    val laterSame = sorted.subList(i + 1, finishIdx + 1).any { it.cp == mark.cp }
+                    if (laterSame) {
+                        return@mapIndexed keep(mark, PunchKind.Extra)
+                    }
+                    return@mapIndexed afterError(mark)
+                }
+                keep(mark, if (mark.cp in courseCps) PunchKind.Ok else PunchKind.Extra)
+            }
         }
-        keep(mark, if (mark.cp in courseCps) PunchKind.Ok else PunchKind.Extra)
     }
 }
 
@@ -360,29 +476,12 @@ fun addableCourseCps(progress: List<CourseCpProgress>): List<Pair<Int, Int>> {
 fun filterCourseCps(controls: List<Int>, removed: Set<Int>): List<Int> =
     controls.filter { it !in removed }
 
-fun courseSubsequenceTaken(punches: List<Int>, required: List<Int>, addCounts: Map<Int, Int> = emptyMap()): Int {
-    if (required.isEmpty()) return 0
-    val remaining = addCounts.toMutableMap()
-    var p = 0
-    var taken = 0
-    for (cp in required) {
-        var q = p
-        while (q < punches.size && punches[q] != cp) q += 1
-        if (q < punches.size) {
-            p = q + 1
-            taken += 1
-            continue
-        }
-        val left = remaining[cp] ?: 0
-        if (left > 0) {
-            remaining[cp] = left - 1
-            taken += 1
-            continue
-        }
-        break
-    }
-    return taken
-}
+fun courseSubsequenceTaken(
+    punches: List<Int>,
+    required: List<Int>,
+    addCounts: Map<Int, Int> = emptyMap(),
+    randomOrder: List<Boolean> = emptyList(),
+): Int = courseTakenWithOrder(punches, required, randomOrder, addCounts)
 
 fun orientCourseLegs(
     controls: List<Int>,
@@ -457,11 +556,12 @@ fun calculateOrientResult(
     exclusions: List<OrientExclusion>,
     addCpCounts: Map<Int, Int>,
     addCpTimes: Map<Int, Int> = emptyMap(),
+    courseRandomOrder: Map<String, List<Boolean>> = emptyMap(),
 ): OrientCalc {
     val diagnostics = mutableListOf<String>()
     val name = courseName.trim()
     val key = courseKey(name)
-    val required: List<Int>? = when {
+    val requiredPair: Pair<List<Int>, List<Boolean>>? = when {
         name.isEmpty() -> {
             diagnostics += "missing_course"
             null
@@ -474,12 +574,17 @@ fun calculateOrientResult(
             diagnostics += "course_empty"
             null
         }
-        else -> filterCourseCps(courses.getValue(key), removedCps)
+        else -> filterCourseWithOrder(
+            courses.getValue(key),
+            courseRandomOrder[key].orEmpty(),
+            removedCps,
+        )
     }
     return calculateOrientResultInner(
         marks = marks,
         settings = settings,
-        required = required,
+        required = requiredPair?.first,
+        requiredRandomOrder = requiredPair?.second.orEmpty(),
         key = key,
         diagnostics = diagnostics,
         exclusions = exclusions,
@@ -492,6 +597,7 @@ private fun calculateOrientResultInner(
     marks: List<OrientMark>,
     settings: OrientSettings,
     required: List<Int>?,
+    requiredRandomOrder: List<Boolean>,
     key: String,
     diagnostics: MutableList<String>,
     exclusions: List<OrientExclusion>,
@@ -524,9 +630,10 @@ private fun calculateOrientResultInner(
         applyAddedCps(window, it, addCpCounts, startCp, settings.finishCp, addCpTimes)
     } ?: window
     val punches = expanded.map { it.cp }
-    val taken = required?.let { courseSubsequenceTaken(punches, it) } ?: 0
+    val taken = required?.let { courseSubsequenceTaken(punches, it, randomOrder = requiredRandomOrder) } ?: 0
     val orderBroken = required != null &&
-        classifyActualPunches(expanded, required, startCp, settings.finishCp).any { it.wrong }
+        classifyActualPunches(expanded, required, startCp, settings.finishCp, requiredRandomOrder)
+            .any { it.wrong }
     val complete = required != null && taken == required.size && !orderBroken
     if (required != null && !complete) diagnostics += "course_incomplete"
     var elapsed = window.last().seconds - window.first().seconds

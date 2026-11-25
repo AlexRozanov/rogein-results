@@ -57,6 +57,7 @@ type AwardGroup = {
   id: number;
   name: string;
   course_cps?: number[] | null;
+  course_random_order?: boolean[] | null;
   length_meters?: number | null;
   lengthMeters?: number | null;
   climb_meters?: number | null;
@@ -233,6 +234,7 @@ const classifiedPunches = computed(() => {
     courseControls.value,
     startCp.value,
     finishCp.value,
+    selectedGroup.value?.course_random_order ?? [],
   );
 });
 

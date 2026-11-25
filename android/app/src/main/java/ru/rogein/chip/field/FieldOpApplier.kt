@@ -117,6 +117,7 @@ class FieldOpApplier(
                     lengthMeters = p.lengthMeters,
                     climbMeters = p.climbMeters,
                     legsJson = p.legsJson,
+                    randomOrder = p.randomOrder,
                 )
             }
             FieldOpType.COURSE_DELETE -> {

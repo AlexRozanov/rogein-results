@@ -150,18 +150,74 @@ function emitMissed(cp: number): ClassifiedPunch {
   return { kind: "missed", cp, seq: null, mark_time: "" };
 }
 
+function asBoolList(raw: unknown, len: number): boolean[] {
+  if (!Array.isArray(raw) || len <= 0) return Array.from({ length: len }, () => false);
+  return Array.from({ length: len }, (_, i) => Boolean(raw[i]));
+}
+
+type CourseSeg =
+  | { kind: "fixed"; cp: number; index: number }
+  | { kind: "cluster"; cps: number[]; indices: number[] };
+
+function courseSegments(courseCps: number[], randomOrder: unknown): CourseSeg[] {
+  const flags = asBoolList(randomOrder, courseCps.length);
+  const out: CourseSeg[] = [];
+  let i = 0;
+  while (i < courseCps.length) {
+    if (flags[i]) {
+      const cps: number[] = [];
+      const indices: number[] = [];
+      while (i < courseCps.length && flags[i]) {
+        cps.push(courseCps[i]);
+        indices.push(i);
+        i += 1;
+      }
+      out.push({ kind: "cluster", cps, indices });
+    } else {
+      out.push({ kind: "fixed", cp: courseCps[i], index: i });
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function futureSegCps(segments: CourseSeg[], from: number): Set<number> {
+  const out = new Set<number>();
+  for (let i = from; i < segments.length; i += 1) {
+    const seg = segments[i];
+    if (seg.kind === "fixed") out.add(seg.cp);
+    else seg.cps.forEach((cp) => out.add(cp));
+  }
+  return out;
+}
+
 export function classifyCoursePunches(
   marks: PunchInput[],
   courseCps: number[],
   startCp: number | null,
   finishCp: number | null,
+  randomOrder: unknown = [],
 ): ClassifiedPunch[] {
   if (!marks.length) {
     return courseCps.map(emitMissed);
   }
   const { startIdx, endIdx } = markWindowIdx(marks, startCp, finishCp);
-  const remaining = courseCps.slice();
+  const segments = courseSegments(courseCps, randomOrder);
+  let segIdx = 0;
+  let clusterNeed = new Map<number, number>();
+  const loadCluster = (seg: Extract<CourseSeg, { kind: "cluster" }>) => {
+    clusterNeed = new Map();
+    for (const cp of seg.cps) clusterNeed.set(cp, (clusterNeed.get(cp) ?? 0) + 1);
+  };
+  if (segments[0]?.kind === "cluster") loadCluster(segments[0]);
+  const taken = new Set<number>();
   const out: ClassifiedPunch[] = [];
+  const advance = () => {
+    segIdx += 1;
+    clusterNeed = new Map();
+    const next = segments[segIdx];
+    if (next?.kind === "cluster") loadCluster(next);
+  };
   for (let i = 0; i < marks.length; i += 1) {
     const mark = marks[i];
     if (i < startIdx || i > endIdx) {
@@ -174,8 +230,19 @@ export function classifyCoursePunches(
       continue;
     }
     if (finishCp != null && cp === finishCp) {
-      remaining.forEach((miss) => out.push(emitMissed(miss)));
-      remaining.length = 0;
+      for (let s = segIdx; s < segments.length; s += 1) {
+        const seg = segments[s];
+        if (seg.kind === "fixed") {
+          if (!taken.has(seg.index)) out.push(emitMissed(seg.cp));
+        } else {
+          const need = new Map<number, number>();
+          for (const c of seg.cps) need.set(c, (need.get(c) ?? 0) + 1);
+          for (const [c, n] of need) {
+            for (let k = 0; k < n; k += 1) out.push(emitMissed(c));
+          }
+        }
+      }
+      segIdx = segments.length;
       out.push(emitPunch(mark, "finish"));
       continue;
     }
@@ -183,31 +250,67 @@ export function classifyCoursePunches(
       out.push(emitPunch(mark, "ok"));
       continue;
     }
-    const idx = remaining.indexOf(cp);
-    if (idx === 0) {
-      remaining.shift();
-      out.push(emitPunch(mark, "ok"));
+    if (segIdx >= segments.length) {
+      out.push(emitPunch(mark, courseCps.includes(cp) ? "ok" : "extra"));
       continue;
     }
-    if (idx > 0) {
-      remaining.splice(0, idx).forEach((miss) => out.push(emitMissed(miss)));
-      remaining.shift();
-      out.push(emitPunch(mark, "ok"));
+    const seg = segments[segIdx];
+    const future = futureSegCps(segments, segIdx + 1);
+    if (seg.kind === "fixed") {
+      if (cp === seg.cp) {
+        taken.add(seg.index);
+        advance();
+        out.push(emitPunch(mark, "ok"));
+        continue;
+      }
+      if (future.has(cp) || courseCps.includes(cp)) {
+        out.push(emitPunch(mark, "out_of_order"));
+        continue;
+      }
+      out.push(emitPunch(mark, "extra"));
       continue;
     }
-    out.push(emitPunch(mark, courseCps.includes(cp) ? "out_of_order" : "extra"));
+    const left = clusterNeed.get(cp) ?? 0;
+    if (left > 0) {
+      clusterNeed.set(cp, left - 1);
+      out.push(emitPunch(mark, "ok"));
+      if ([...clusterNeed.values()].every((n) => n <= 0)) advance();
+      continue;
+    }
+    if (future.has(cp)) {
+      out.push(emitPunch(mark, "out_of_order"));
+      continue;
+    }
+    out.push(emitPunch(mark, courseCps.includes(cp) ? "ok" : "extra"));
   }
-  remaining.forEach((miss) => out.push(emitMissed(miss)));
+  for (let s = segIdx; s < segments.length; s += 1) {
+    const seg = segments[s];
+    if (seg.kind === "fixed") {
+      if (!taken.has(seg.index)) out.push(emitMissed(seg.cp));
+    } else {
+      for (const [c, n] of clusterNeed.size && s === segIdx
+        ? clusterNeed
+        : (() => {
+            const m = new Map<number, number>();
+            for (const cp of seg.cps) m.set(cp, (m.get(cp) ?? 0) + 1);
+            return m;
+          })()) {
+        for (let k = 0; k < n; k += 1) out.push(emitMissed(c));
+      }
+    }
+  }
   return out;
 }
 
 export function splitColumns(
   courseCps: number[],
   finishCp: number | null,
+  randomOrder: unknown = [],
 ): SplitCol[] {
+  const flags = asBoolList(randomOrder, courseCps.length);
   const cols: SplitCol[] = courseCps.map((cp, index) => ({
     cp,
-    label: `${index + 1} (${cp})`,
+    label: flags[index] ? `${index + 1} [${cp}]` : `${index + 1} (${cp})`,
     finish: false,
   }));
   if (finishCp != null) {

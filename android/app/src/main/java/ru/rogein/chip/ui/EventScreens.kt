@@ -143,6 +143,7 @@ import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.addableCourseCps
 import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.buildOrientSplitPrint
+import ru.rogein.chip.parse.normalizeRandomOrder
 import ru.rogein.chip.parse.resultStatusLine
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
@@ -797,7 +798,7 @@ fun ProtocolScreen(
     onPickFormats: (Boolean) -> Unit = {},
     onPickGroups: (Boolean) -> Unit = {},
     onPickLegends: (Boolean) -> Unit = {},
-    onSaveCourse: (String, List<Int>, String?) -> Unit,
+    onSaveCourse: (String, List<Int>, String?, List<Boolean>) -> Unit,
     onCopyCourse: (String, String) -> Unit = { _, _ -> },
     onDeleteCourse: (String) -> Unit,
     legendCps: List<Int> = emptyList(),
@@ -1722,7 +1723,7 @@ private fun CoursesPanel(
     query: String,
     requestAdd: Boolean,
     onRequestAddConsumed: () -> Unit,
-    onSave: (String, List<Int>, String?) -> Unit,
+    onSave: (String, List<Int>, String?, List<Boolean>) -> Unit,
     onCopy: (String, String) -> Unit = { _, _ -> },
     onDelete: (String) -> Unit,
     onEditingChange: (Boolean) -> Unit = {},
@@ -1786,7 +1787,7 @@ private fun CoursesPanel(
                         onPrimary = {
                             val name = newName.trim()
                             if (name.isNotEmpty()) {
-                                onSave(name, emptyList(), null)
+                                onSave(name, emptyList(), null, emptyList())
                                 expanded = name
                                 adding = false
                                 newName = ""
@@ -1806,7 +1807,7 @@ private fun CoursesPanel(
                         onDone = {
                             val name = newName.trim()
                             if (name.isEmpty()) return@KeyboardActions
-                            onSave(name, emptyList(), null)
+                            onSave(name, emptyList(), null, emptyList())
                             expanded = name
                             adding = false
                             newName = ""
@@ -2192,7 +2193,7 @@ private fun CourseEditorCard(
     listState: LazyListState,
     listCoordinates: () -> LayoutCoordinates?,
     onToggle: () -> Unit,
-    onSave: (String, List<Int>, String?) -> Unit,
+    onSave: (String, List<Int>, String?, List<Boolean>) -> Unit,
     onCopy: (() -> Unit)? = null,
     onDelete: () -> Unit,
     focusName: Boolean = false,
@@ -2212,6 +2213,9 @@ private fun CourseEditorCard(
         EventStore.legsFor(course, settings, removed)
     }
     val exclusionCount = courseExclusions.size
+    val flags = remember(course.controls, course.randomOrder) {
+        normalizeRandomOrder(course.controls.size, course.randomOrder)
+    }
 
     var name by remember(course.name) { mutableStateOf(course.name) }
     var addCp by remember(course.name) { mutableStateOf("") }
@@ -2236,41 +2240,65 @@ private fun CourseEditorCard(
                 .focusRequester(nameFocus),
         )
         if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
-            TextButton(onClick = { onSave(name.trim(), course.controls, course.name) }) {
+            TextButton(onClick = { onSave(name.trim(), course.controls, course.name, flags) }) {
                 Text("Переименовать")
             }
         }
         if (course.controls.isEmpty()) {
             Text(
-                "КП нет. Добавьте номера в порядке дистанции.",
+                "КП нет. Добавьте номера в порядке дистанции. Долгий тап по КП — гроздь (свободный порядок).",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            Text(
+                "Долгий тап по КП — включить/выключить гроздь (свободный порядок внутри группы).",
                 color = Muted,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
         ReorderableCpList(
             cps = course.controls,
+            randomOrder = flags,
             listState = listState,
             listCoordinates = listCoordinates,
             onMove = { from, to ->
                 if (from == to) return@ReorderableCpList
                 val next = course.controls.toMutableList()
+                val nextFlags = flags.toMutableList()
                 val item = next.removeAt(from)
+                val flag = nextFlags.removeAt(from)
                 next.add(to, item)
-                onSave(course.name, next, course.name)
+                nextFlags.add(to, flag)
+                onSave(course.name, next, course.name, nextFlags)
             },
             onChange = { index, cp ->
                 if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
                 val next = course.controls.toMutableList()
                 next[index] = cp
-                onSave(course.name, next, course.name)
+                onSave(course.name, next, course.name, flags)
             },
             onInsertAfter = { index, cp ->
                 val next = course.controls.toMutableList()
-                next.add((index + 1).coerceIn(0, next.size), cp)
-                onSave(course.name, next, course.name)
+                val nextFlags = flags.toMutableList()
+                val at = (index + 1).coerceIn(0, next.size)
+                next.add(at, cp)
+                nextFlags.add(at, false)
+                onSave(course.name, next, course.name, nextFlags)
             },
             onDelete = { index ->
-                onSave(course.name, course.controls.filterIndexed { i, _ -> i != index }, course.name)
+                onSave(
+                    course.name,
+                    course.controls.filterIndexed { i, _ -> i != index },
+                    course.name,
+                    flags.filterIndexed { i, _ -> i != index },
+                )
+            },
+            onToggleRandom = { index ->
+                if (index !in flags.indices) return@ReorderableCpList
+                val nextFlags = flags.toMutableList()
+                nextFlags[index] = !nextFlags[index]
+                onSave(course.name, course.controls, course.name, nextFlags)
             },
         )
         Row(
@@ -2290,7 +2318,7 @@ private fun CourseEditorCard(
                 keyboardActions = KeyboardActions(
                     onDone = {
                         val cp = addCp.toIntOrNull() ?: return@KeyboardActions
-                        onSave(course.name, course.controls + cp, course.name)
+                        onSave(course.name, course.controls + cp, course.name, flags + false)
                         addCp = ""
                     },
                 ),
@@ -2302,7 +2330,7 @@ private fun CourseEditorCard(
                 enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
                 onClick = {
                     val cp = addCp.toIntOrNull() ?: return@TextButton
-                    onSave(course.name, course.controls + cp, course.name)
+                    onSave(course.name, course.controls + cp, course.name, flags + false)
                     addCp = ""
                     runCatching { addBottomFocus.requestFocus() }
                 },
@@ -2402,13 +2430,16 @@ private fun CourseLegExclusionRow(
 @Composable
 private fun ReorderableCpList(
     cps: List<Int>,
+    randomOrder: List<Boolean> = emptyList(),
     listState: LazyListState,
     listCoordinates: () -> LayoutCoordinates?,
     onMove: (Int, Int) -> Unit,
     onChange: (Int, Int) -> Unit,
     onInsertAfter: (Int, Int) -> Unit,
     onDelete: (Int) -> Unit,
+    onToggleRandom: (Int) -> Unit = {},
 ) {
+    val flags = normalizeRandomOrder(cps.size, randomOrder)
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val rowPx = with(density) { 56.dp.toPx() }
@@ -2573,10 +2604,12 @@ private fun ReorderableCpList(
                             },
                     )
                 } else {
+                    val inCluster = flags.getOrElse(index) { false }
                     Text(
-                        cp.toString(),
+                        if (inCluster) "[$cp]" else cp.toString(),
                         style = MaterialTheme.typography.titleMedium,
                         fontFamily = FontFamily.Monospace,
+                        color = if (inCluster) OkGreen else Color.Unspecified,
                         modifier = Modifier
                             .clickable {
                                 menuFor = null
@@ -2586,6 +2619,14 @@ private fun ReorderableCpList(
                                 editValue = TextFieldValue(text, TextRange(0, text.length))
                             }
                             .padding(10.dp),
+                    )
+                }
+                if (index < cps.lastIndex) {
+                    val freeLeg = flags.getOrElse(index) { false } && flags.getOrElse(index + 1) { false }
+                    Text(
+                        if (freeLeg) " · " else " → ",
+                        color = Muted,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
                 Spacer(
@@ -2616,6 +2657,21 @@ private fun ReorderableCpList(
                         expanded = menuFor == index,
                         onDismissRequest = { menuFor = null },
                     ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (flags.getOrElse(index) { false }) {
+                                        "Убрать из грозди"
+                                    } else {
+                                        "В гроздь (свободный порядок)"
+                                    },
+                                )
+                            },
+                            onClick = {
+                                menuFor = null
+                                onToggleRandom(index)
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("Добавить КП") },
                             onClick = {

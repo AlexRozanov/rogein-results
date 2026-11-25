@@ -343,6 +343,7 @@ fn build_payload(title: &str, date: NaiveDate, rows: &[ArchiveRow]) -> PublishPa
             max_age: None,
             sort_order: (*source_id as i32) - 1,
             course_cps: Vec::new(),
+            course_random_order: Vec::new(),
             length_meters: None,
             climb_meters: None,
             leg_meters: Vec::new(),

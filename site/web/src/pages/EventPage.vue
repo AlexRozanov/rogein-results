@@ -19,6 +19,7 @@ type AwardGroup = {
   source_id: number;
   name: string;
   course_cps?: number[] | null;
+  course_random_order?: boolean[] | null;
 };
 
 type ResultRow = {
@@ -118,7 +119,7 @@ const groupedResults = computed((): ResultBlock[] => {
       .map((row) => row.elapsed_seconds);
     const leaderElapsed = okTimes.length ? Math.min(...okTimes) : null;
     const course = inferCourseCps(group.course_cps, rows, startCp, finishCp);
-    const cols: SplitCol[] = splitColumns(course, finishCp);
+    const cols: SplitCol[] = splitColumns(course, finishCp, group.course_random_order ?? []);
     const splitCells: Array<Array<SplitCell | null>> = cols.length
       ? buildSplitCells(rows, cols, startCp)
       : rows.map(() => []);

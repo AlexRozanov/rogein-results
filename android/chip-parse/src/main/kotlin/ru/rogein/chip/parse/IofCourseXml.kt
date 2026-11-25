@@ -47,20 +47,31 @@ fun parseIofCourseXml(text: String): List<CourseCsvRow> {
     return rows
 }
 
+data class CourseOrderSnapshot(
+    val name: String,
+    val controls: List<Int>,
+    val randomOrder: List<Boolean> = emptyList(),
+)
+
 fun coursesNeedReplace(
-    existing: List<Pair<String, List<Int>>>,
+    existing: List<CourseOrderSnapshot>,
     incoming: List<CourseCsvRow>,
 ): Boolean {
     if (existing.isEmpty()) return false
     for (row in incoming) {
-        val old = existing.find { courseKey(it.first) == courseKey(row.name) } ?: continue
-        if (old.second != row.controls) return true
+        val old = existing.find { courseKey(it.name) == courseKey(row.name) } ?: continue
+        val oldFlags = normalizeRandomOrder(old.controls.size, old.randomOrder)
+        val newFlags = normalizeRandomOrder(row.controls.size, row.randomOrder)
+        if (old.controls != row.controls || oldFlags != newFlags) return true
     }
     return false
 }
 
 fun mergeCourseGeometry(existing: CourseCsvRow, incoming: CourseCsvRow): CourseCsvRow {
-    if (existing.controls != incoming.controls) return existing
+    val sameOrder = existing.controls == incoming.controls &&
+        normalizeRandomOrder(existing.controls.size, existing.randomOrder) ==
+        normalizeRandomOrder(incoming.controls.size, incoming.randomOrder)
+    if (!sameOrder) return existing
     return existing.copy(
         lengthMeters = incoming.lengthMeters ?: existing.lengthMeters,
         climbMeters = incoming.climbMeters ?: existing.climbMeters,
@@ -276,6 +287,7 @@ private fun parseIofCourse(course: Element, name: String): CourseCsvRow {
     val length = childText(course, "Length").toDoubleOrNull()?.toInt()
     val climb = childText(course, "Climb").toDoubleOrNull()?.toInt()
     val controls = ArrayList<Int>()
+    val randomOrder = ArrayList<Boolean>()
     val legs = ArrayList<Int?>()
     var pendingMeters = 0
     var pendingHas = false
@@ -300,17 +312,25 @@ private fun parseIofCourse(course: Element, name: String): CourseCsvRow {
                 ?: error("У дистанции «$name» некорректный номер КП «$code»")
             if (cp <= 0) error("У дистанции «$name» номер КП должен быть > 0")
             controls += cp
+            randomOrder += parseRandomOrderAttr(node.getAttribute("randomOrder"))
         }
         emitted += 1
     }
     return CourseCsvRow(
         name = name,
         controls = controls,
+        randomOrder = randomOrder,
         lengthMeters = length?.takeIf { it >= 0 },
         climbMeters = climb?.takeIf { it >= 0 },
         legMeters = legs,
     )
 }
+
+private fun parseRandomOrderAttr(raw: String?): Boolean =
+    when (raw?.trim()?.lowercase()) {
+        "true", "1", "yes" -> true
+        else -> false
+    }
 
 private enum class IofControlKind { Start, Control, Finish, Skip }
 

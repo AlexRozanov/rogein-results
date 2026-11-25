@@ -246,6 +246,9 @@ pub struct CourseRow {
     pub id: i64,
     pub name: String,
     pub controls: Vec<i64>,
+    /// Parallel to `controls`; true = free order («гроздь»).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "randomOrder")]
+    pub random_order: Vec<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
     pub length_meters: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
@@ -761,6 +764,13 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
         [],
     )
         .map_err(|e| format!("create idx_leg_exclusion_rules_course: {e}"))?;
+    if !table_has_column(conn, "course_controls", "random_order")? {
+        conn.execute(
+            "ALTER TABLE course_controls ADD COLUMN random_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("add course_controls.random_order: {e}"))?;
+    }
     if !table_has_column(conn, "courses", "length_meters")? {
         conn.execute(
             "ALTER TABLE courses ADD COLUMN length_meters INTEGER NULL",
@@ -3143,42 +3153,17 @@ fn course_key(name: &str) -> String {
 /// Greedy subsequence: how many required CPs appear in order in `punches`.
 #[cfg(test)]
 fn course_subsequence_taken(punches: &[i64], required: &[i64]) -> usize {
-    course_subsequence_taken_with_adds(punches, required, &HashMap::new())
+    course_subsequence_taken_with_adds(punches, required, &[], &HashMap::new())
 }
 
-/// Same as `course_subsequence_taken`, but a missing required CP can be filled
-/// from `add_cp` counts instead of inventing a punch time.
+/// Fixed / cluster matcher. Empty `random_order` = classic заданное направление.
 fn course_subsequence_taken_with_adds(
     punches: &[i64],
     required: &[i64],
+    random_order: &[bool],
     add_counts: &HashMap<i64, usize>,
 ) -> usize {
-    if required.is_empty() {
-        return 0;
-    }
-    let mut remaining = add_counts.clone();
-    let mut p = 0usize;
-    let mut taken = 0usize;
-    for &cp in required {
-        let mut q = p;
-        while q < punches.len() && punches[q] != cp {
-            q += 1;
-        }
-        if q < punches.len() {
-            p = q + 1;
-            taken += 1;
-            continue;
-        }
-        if let Some(left) = remaining.get_mut(&cp) {
-            if *left > 0 {
-                *left -= 1;
-                taken += 1;
-                continue;
-            }
-        }
-        break;
-    }
-    taken
+    crate::course_order::course_taken_with_order(punches, required, random_order, add_counts)
 }
 
 fn orient_add_cp_counts(
@@ -3206,6 +3191,21 @@ fn filter_course_cps(cps: &[i64], removed: &HashSet<i64>) -> Vec<i64> {
         .copied()
         .filter(|cp| !removed.contains(cp))
         .collect()
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CourseDef {
+    controls: Vec<i64>,
+    random_order: Vec<bool>,
+}
+
+fn filter_course_def(course: &CourseDef, removed: &HashSet<i64>) -> CourseDef {
+    let (controls, random_order) =
+        crate::course_order::filter_course_with_order(&course.controls, &course.random_order, removed);
+    CourseDef {
+        controls,
+        random_order,
+    }
 }
 
 fn load_global_removed_course_cps(conn: &Connection) -> Result<HashSet<i64>, String> {
@@ -3242,11 +3242,11 @@ fn cp_exists_on_any_course(conn: &Connection, cp_number: i64) -> Result<bool, St
     Ok(n > 0)
 }
 
-fn load_courses_map_tx(tx: &Transaction<'_>) -> Result<HashMap<String, Vec<i64>>, String> {
+fn load_courses_map_tx(tx: &Transaction<'_>) -> Result<HashMap<String, CourseDef>, String> {
     let mut stmt = tx
         .prepare(
             r#"
-            SELECT c.name, cc.cp_number
+            SELECT c.name, cc.cp_number, COALESCE(cc.random_order, 0)
             FROM courses c
             JOIN course_controls cc ON cc.course_id = c.id
             ORDER BY c.id ASC, cc.seq ASC
@@ -3254,12 +3254,20 @@ fn load_courses_map_tx(tx: &Transaction<'_>) -> Result<HashMap<String, Vec<i64>>
         )
         .map_err(|e| format!("prepare courses map: {e}"))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
         .map_err(|e| format!("query courses map: {e}"))?;
-    let mut out: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut out: HashMap<String, CourseDef> = HashMap::new();
     for row in rows {
-        let (name, cp) = row.map_err(|e| format!("read course map row: {e}"))?;
-        out.entry(course_key(&name)).or_default().push(cp);
+        let (name, cp, random_order) = row.map_err(|e| format!("read course map row: {e}"))?;
+        let entry = out.entry(course_key(&name)).or_default();
+        entry.controls.push(cp);
+        entry.random_order.push(random_order != 0);
     }
     Ok(out)
 }
@@ -3319,10 +3327,11 @@ fn recalculate_orient_tx(
             participant.id,
             &manual_corrections,
         );
-        let required = courses
+        let required_def = courses
             .get(&course_key(&course_name))
-            .map(|cps| filter_course_cps(cps, &removed_cps))
+            .map(|course| filter_course_def(course, &removed_cps))
             .unwrap_or_default();
+        let required = required_def.controls.clone();
         let add_cp_counts = orient_add_cp_counts(&manual_corrections, &required);
         marks.sort_by_key(|m| (m.mark_time, m.seq));
         let exclusion_rules =
@@ -3355,19 +3364,21 @@ fn calculate_orient_result(
     settings: &Settings,
     course_name: &str,
     course_id: Option<i64>,
-    courses: &HashMap<String, Vec<i64>>,
+    courses: &HashMap<String, CourseDef>,
     removed_cps: &HashSet<i64>,
     exclusion_rules: &[ExclusionRule],
     add_cp_counts: &HashMap<i64, usize>,
 ) -> ResultCalc {
     let mut diagnostics: Vec<String> = Vec::new();
     let course_name = course_name.trim();
-    let required: Option<Vec<i64>> = if course_name.is_empty() {
+    let required_def: Option<CourseDef> = if course_name.is_empty() {
         diagnostics.push("missing_course".to_string());
         None
     } else {
         match courses.get(&course_key(course_name)) {
-            Some(cps) if !cps.is_empty() => Some(filter_course_cps(cps, removed_cps)),
+            Some(course) if !course.controls.is_empty() => {
+                Some(filter_course_def(course, removed_cps))
+            }
             Some(_) => {
                 diagnostics.push("course_empty".to_string());
                 None
@@ -3378,7 +3389,11 @@ fn calculate_orient_result(
             }
         }
     };
-    let required = required.as_deref();
+    let required = required_def.as_ref().map(|c| c.controls.as_slice());
+    let required_random = required_def
+        .as_ref()
+        .map(|c| c.random_order.as_slice())
+        .unwrap_or(&[]);
 
     let Some(start_cp) = settings.start_cp else {
         diagnostics.push("start_cp_not_configured".to_string());
@@ -3438,7 +3453,9 @@ fn calculate_orient_result(
     let window = &marks[start_idx..=window_end];
     let punches: Vec<i64> = window.iter().map(|m| m.cp_number).collect();
     let taken = required
-        .map(|cps| course_subsequence_taken_with_adds(&punches, cps, add_cp_counts))
+        .map(|cps| {
+            course_subsequence_taken_with_adds(&punches, cps, required_random, add_cp_counts)
+        })
         .unwrap_or(0);
     let complete = required
         .map(|cps| taken == cps.len())
@@ -8237,7 +8254,8 @@ pub fn list_courses(conn: &Connection) -> Result<Vec<CourseRow>, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT c.id, c.name, c.length_meters, c.climb_meters, c.legs_json, cc.seq, cc.cp_number
+            SELECT c.id, c.name, c.length_meters, c.climb_meters, c.legs_json,
+                   cc.seq, cc.cp_number, COALESCE(cc.random_order, 0)
             FROM courses c
             LEFT JOIN course_controls cc ON cc.course_id = c.id
             ORDER BY c.name COLLATE NOCASE ASC, cc.seq ASC
@@ -8254,23 +8272,26 @@ pub fn list_courses(conn: &Connection) -> Result<Vec<CourseRow>, String> {
                 r.get::<_, String>(4).unwrap_or_else(|_| "[]".to_string()),
                 r.get::<_, Option<i64>>(5)?,
                 r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
             ))
         })
         .map_err(|e| format!("query list courses: {e}"))?;
     let mut by_id: BTreeMap<i64, CourseRow> = BTreeMap::new();
     for row in rows {
-        let (id, name, length_meters, climb_meters, legs_json, _seq, cp) =
+        let (id, name, length_meters, climb_meters, legs_json, _seq, cp, random_flag) =
             row.map_err(|e| format!("read course row: {e}"))?;
         let entry = by_id.entry(id).or_insert(CourseRow {
             id,
             name,
             controls: Vec::new(),
+            random_order: Vec::new(),
             length_meters,
             climb_meters,
             leg_meters: decode_leg_meters(&legs_json),
         });
         if let Some(cp_number) = cp {
             entry.controls.push(cp_number);
+            entry.random_order.push(random_flag.unwrap_or(0) != 0);
         }
     }
     let mut out: Vec<CourseRow> = by_id.into_values().collect();
@@ -8283,16 +8304,19 @@ fn replace_course_controls_tx(
     course_id: i64,
     name: &str,
     controls: &[i64],
+    random_order: &[bool],
 ) -> Result<(), String> {
+    let flags = crate::course_order::normalize_random_order(controls.len(), random_order);
     tx.execute(
         "DELETE FROM course_controls WHERE course_id = ?",
         params![course_id],
     )
     .map_err(|e| format!("replace course controls «{name}»: {e}"))?;
     for (idx, cp) in controls.iter().enumerate() {
+        let flag = if flags[idx] { 1_i64 } else { 0_i64 };
         tx.execute(
-            "INSERT INTO course_controls(course_id, seq, cp_number) VALUES(?, ?, ?)",
-            params![course_id, (idx as i64) + 1, cp],
+            "INSERT INTO course_controls(course_id, seq, cp_number, random_order) VALUES(?, ?, ?, ?)",
+            params![course_id, (idx as i64) + 1, cp, flag],
         )
         .map_err(|e| format!("insert CP {cp} for «{name}»: {e}"))?;
     }
@@ -8318,12 +8342,14 @@ pub fn save_course(
     course_id: Option<i64>,
     name: String,
     controls: Vec<i64>,
+    random_order: Vec<bool>,
 ) -> Result<CourseRow, String> {
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() {
         return Err("Укажите название дистанции.".to_string());
     }
     let controls = normalize_course_controls(&controls)?;
+    let random_order = crate::course_order::normalize_random_order(controls.len(), &random_order);
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("save course transaction: {e}"))?;
@@ -8340,20 +8366,10 @@ pub fn save_course(
             return Err(format!("Дистанция «{name}» уже есть."));
         }
     }
-    let old_controls: Vec<i64> = if let Some(id) = course_id {
-        let mut stmt = tx
-            .prepare("SELECT cp_number FROM course_controls WHERE course_id = ? ORDER BY seq ASC")
-            .map_err(|e| format!("prepare old course controls: {e}"))?;
-        let rows = stmt
-            .query_map(params![id], |r| r.get::<_, i64>(0))
-            .map_err(|e| format!("query old course controls: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| format!("read old course control: {e}"))?);
-        }
-        out
+    let (old_controls, old_random): (Vec<i64>, Vec<bool>) = if let Some(id) = course_id {
+        course_controls_with_order_tx(&tx, id)?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let id = if let Some(id) = course_id {
         let changed = tx
@@ -8371,8 +8387,8 @@ pub fn save_course(
             .map_err(|e| format!("insert course: {e}"))?;
         tx.last_insert_rowid()
     };
-    replace_course_controls_tx(&tx, id, &name, &controls)?;
-    let keep_geometry = old_controls == controls;
+    replace_course_controls_tx(&tx, id, &name, &controls, &random_order)?;
+    let keep_geometry = old_controls == controls && old_random == random_order;
     if !keep_geometry {
         tx.execute(
             "UPDATE courses SET length_meters = NULL, climb_meters = NULL, legs_json = '[]' WHERE id = ?",
@@ -8399,6 +8415,7 @@ pub fn save_course(
         id,
         name,
         controls,
+        random_order,
         length_meters,
         climb_meters,
         leg_meters: decode_leg_meters(&legs_json),
@@ -8428,6 +8445,7 @@ pub fn delete_course(conn: &Connection, course_id: i64) -> Result<(), String> {
 struct ParsedCourse {
     name: String,
     controls: Vec<i64>,
+    random_order: Vec<bool>,
     length_meters: Option<i64>,
     climb_meters: Option<i64>,
     leg_meters: Vec<Option<i64>>,
@@ -8438,6 +8456,7 @@ impl ParsedCourse {
         Self {
             name,
             controls,
+            random_order: Vec::new(),
             length_meters: None,
             climb_meters: None,
             leg_meters: Vec::new(),
@@ -8448,6 +8467,7 @@ impl ParsedCourse {
         Self {
             name: course.name,
             controls: course.controls,
+            random_order: course.random_order,
             length_meters: course.length_meters,
             climb_meters: course.climb_meters,
             leg_meters: course.leg_meters,
@@ -8602,15 +8622,22 @@ pub fn import_courses_content(
 
     let existing = list_courses(conn)?;
     if xml && !reset && !existing.is_empty() {
-        let pairs: Vec<(String, Vec<i64>)> = existing
+        let pairs: Vec<(String, Vec<i64>, Vec<bool>)> = existing
             .iter()
-            .map(|row| (row.name.clone(), row.controls.clone()))
+            .map(|row| {
+                (
+                    row.name.clone(),
+                    row.controls.clone(),
+                    row.random_order.clone(),
+                )
+            })
             .collect();
         let incoming: Vec<crate::iof_course::IofCourse> = parsed
             .iter()
             .map(|row| crate::iof_course::IofCourse {
                 name: row.name.clone(),
                 controls: row.controls.clone(),
+                random_order: row.random_order.clone(),
                 length_meters: row.length_meters,
                 climb_meters: row.climb_meters,
                 leg_meters: row.leg_meters.clone(),
@@ -8692,7 +8719,8 @@ fn upsert_imported_course_tx(
         .map_err(|e| format!("load course «{}»: {e}", course.name))?;
     let existing = match existing_meta {
         Some((id, length, climb, legs)) => {
-            Some((id, course_controls_tx(tx, id)?, length, climb, legs))
+            let (controls, random_order) = course_controls_with_order_tx(tx, id)?;
+            Some((id, controls, random_order, length, climb, legs))
         }
         None => None,
     };
@@ -8714,22 +8742,36 @@ fn upsert_imported_course_tx(
         )
         .map_err(|e| format!("load course id «{}»: {e}", course.name))?;
     if replace_controls || existing.is_none() {
-        replace_course_controls_tx(tx, course_id, &course.name, &course.controls)?;
+        replace_course_controls_tx(
+            tx,
+            course_id,
+            &course.name,
+            &course.controls,
+            &course.random_order,
+        )?;
     }
     let same = existing
         .as_ref()
-        .map(|row| row.1 == course.controls)
+        .map(|row| row.1 == course.controls && row.2 == course.random_order)
         .unwrap_or(false);
     let length = course
         .length_meters
-        .or(if same { existing.as_ref().and_then(|row| row.2) } else { None });
+        .or(if same {
+            existing.as_ref().and_then(|row| row.3)
+        } else {
+            None
+        });
     let climb = course
         .climb_meters
-        .or(if same { existing.as_ref().and_then(|row| row.3) } else { None });
+        .or(if same {
+            existing.as_ref().and_then(|row| row.4)
+        } else {
+            None
+        });
     let legs = if course.leg_meters.iter().any(Option::is_some) {
         course.leg_meters.clone()
     } else if same {
-        decode_leg_meters(&existing.as_ref().map(|row| row.4.clone()).unwrap_or_default())
+        decode_leg_meters(&existing.as_ref().map(|row| row.5.clone()).unwrap_or_default())
     } else {
         Vec::new()
     };
@@ -8741,18 +8783,28 @@ fn upsert_imported_course_tx(
     Ok(())
 }
 
-fn course_controls_tx(tx: &rusqlite::Transaction<'_>, course_id: i64) -> Result<Vec<i64>, String> {
+fn course_controls_with_order_tx(
+    tx: &rusqlite::Transaction<'_>,
+    course_id: i64,
+) -> Result<(Vec<i64>, Vec<bool>), String> {
     let mut stmt = tx
-        .prepare("SELECT cp_number FROM course_controls WHERE course_id = ? ORDER BY seq ASC")
+        .prepare(
+            "SELECT cp_number, COALESCE(random_order, 0) FROM course_controls WHERE course_id = ? ORDER BY seq ASC",
+        )
         .map_err(|e| format!("prepare course controls: {e}"))?;
     let rows = stmt
-        .query_map(params![course_id], |r| r.get::<_, i64>(0))
+        .query_map(params![course_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("query course controls: {e}"))?;
-    let mut out = Vec::new();
+    let mut controls = Vec::new();
+    let mut random_order = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| format!("read course control: {e}"))?);
+        let (cp, flag) = row.map_err(|e| format!("read course control: {e}"))?;
+        controls.push(cp);
+        random_order.push(flag != 0);
     }
-    Ok(out)
+    Ok((controls, random_order))
 }
 
 pub fn query_format_cp_type_rules(
@@ -9982,6 +10034,8 @@ pub struct StartPack {
 pub struct StartPackCourse {
     pub name: String,
     pub controls: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "randomOrder")]
+    pub random_order: Vec<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
     pub length_meters: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
@@ -10006,6 +10060,7 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
         .map(|row| StartPackCourse {
             name: row.name,
             controls: row.controls,
+            random_order: row.random_order,
             length_meters: row.length_meters,
             climb_meters: row.climb_meters,
             leg_meters: row.leg_meters,
@@ -10111,6 +10166,8 @@ pub struct EventPackFormat {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub random_order: Vec<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cp_type_rules: Vec<EventPackCpTypeRule>,
 }
 
@@ -10211,6 +10268,7 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
                 finish_cp: None,
                 competition_start_time: String::new(),
                 controls: row.controls,
+                random_order: row.random_order,
                 cp_type_rules: Vec::new(),
             })
             .collect::<Vec<_>>()
@@ -10236,6 +10294,7 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
                         settings.finish_cp,
                         &cp_type_rules,
                     ),
+                    random_order: Vec::new(),
                     cp_type_rules,
                 }
             })
@@ -12674,7 +12733,7 @@ fn payload_str(payload: &Value, key: &str) -> Result<String, String> {
 mod tests {
     use super::{
         apply_orient_exclusion_rules, assign_course_correction,
-        add_cp_correction, calculate_orient_result, ManualCorrection,
+        add_cp_correction, calculate_orient_result, CourseDef, ManualCorrection,
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot, import_phone_protocol,
@@ -13301,7 +13360,13 @@ mod tests {
             mark(240, "2026-07-25 11:10:00"),
         ];
         let mut courses = HashMap::new();
-        courses.insert("d1".to_string(), vec![32, 45]);
+        courses.insert(
+            "d1".to_string(),
+            CourseDef {
+                controls: vec![32, 45],
+                random_order: Vec::new(),
+            },
+        );
         let settings = orient_settings(60);
         let without = calculate_orient_result(
             &marks,
@@ -14036,11 +14101,17 @@ mod tests {
         let add_counts = orient_add_cp_counts(&corrections, &required);
         let punches: Vec<i64> = marks.iter().map(|m| m.cp_number).collect();
         assert_eq!(
-            course_subsequence_taken_with_adds(&punches, &required, &add_counts),
+            course_subsequence_taken_with_adds(&punches, &required, &[], &add_counts),
             4
         );
         let mut courses = HashMap::new();
-        courses.insert("d1".to_string(), required.clone());
+        courses.insert(
+            "d1".to_string(),
+            CourseDef {
+                controls: required.clone(),
+                random_order: Vec::new(),
+            },
+        );
         let result = calculate_orient_result(
             &marks,
             &orient_settings(120),
@@ -14076,11 +14147,17 @@ mod tests {
         let add_counts = orient_add_cp_counts(&corrections, &required);
         let punches: Vec<i64> = marks.iter().map(|m| m.cp_number).collect();
         assert_eq!(
-            course_subsequence_taken_with_adds(&punches, &required, &add_counts),
+            course_subsequence_taken_with_adds(&punches, &required, &[], &add_counts),
             required.len()
         );
         let mut courses = HashMap::new();
-        courses.insert("d1".to_string(), required.clone());
+        courses.insert(
+            "d1".to_string(),
+            CourseDef {
+                controls: required.clone(),
+                random_order: Vec::new(),
+            },
+        );
         let result = calculate_orient_result(
             &marks,
             &orient_settings(120),

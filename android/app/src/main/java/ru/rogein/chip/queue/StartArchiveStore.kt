@@ -307,7 +307,8 @@ private fun EventSnapshot.toJson(): String {
                 .put("controlsJson", course.controlsJson)
                 .put("lengthMeters", course.lengthMeters ?: JSONObject.NULL)
                 .put("climbMeters", course.climbMeters ?: JSONObject.NULL)
-                .put("legsJson", course.legsJson),
+                .put("legsJson", course.legsJson)
+                .put("randomOrderJson", course.randomOrderJson),
         )
     }
     root.put("courses", coursesJson)
@@ -404,6 +405,7 @@ private fun decodePayload(json: String): EventSnapshot {
             lengthMeters = if (obj.has("lengthMeters") && !obj.isNull("lengthMeters")) obj.optInt("lengthMeters") else null,
             climbMeters = if (obj.has("climbMeters") && !obj.isNull("climbMeters")) obj.optInt("climbMeters") else null,
             legsJson = obj.optString("legsJson").ifBlank { "[]" },
+            randomOrderJson = obj.optString("randomOrderJson").ifBlank { "[]" },
         )
     }
     val metaObj = root.optJSONObject("meta")

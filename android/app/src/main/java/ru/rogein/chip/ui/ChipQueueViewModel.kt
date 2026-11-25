@@ -854,11 +854,16 @@ class ChipQueueViewModel(
         }
     }
 
-    fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
+    fun saveCourse(
+        name: String,
+        controls: List<Int>,
+        previousName: String? = null,
+        randomOrder: List<Boolean> = emptyList(),
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 courseMutex.withLock {
-                    repository.startList.saveCourse(name, controls, previousName)
+                    repository.startList.saveCourse(name, controls, previousName, randomOrder)
                 }
                 _status.value = "Дистанция «${name.trim()}» сохранена."
             } catch (e: Exception) {

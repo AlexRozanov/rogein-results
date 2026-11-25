@@ -1703,6 +1703,11 @@ button.active {
   text-decoration: line-through;
 }
 
+.course-chip.cluster .course-chip-num {
+  color: #0f766e;
+  font-weight: 600;
+}
+
 .course-seq-arrow {
   color: #64748b;
   padding: 0 6px;

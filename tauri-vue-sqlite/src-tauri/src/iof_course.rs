@@ -6,6 +6,8 @@ pub const IOF_COURSE_MISMATCH: &str = "IOF_COURSE_MISMATCH";
 pub struct IofCourse {
     pub name: String,
     pub controls: Vec<i64>,
+    /// Parallel to `controls`: true = free order inside a «гроздь».
+    pub random_order: Vec<bool>,
     pub length_meters: Option<i64>,
     pub climb_meters: Option<i64>,
     pub leg_meters: Vec<Option<i64>>,
@@ -48,18 +50,21 @@ pub fn parse_iof_course_xml(text: &str) -> Result<Vec<IofCourse>, String> {
     Ok(rows)
 }
 
-pub fn courses_need_replace(existing: &[(String, Vec<i64>)], incoming: &[IofCourse]) -> bool {
+pub fn courses_need_replace(
+    existing: &[(String, Vec<i64>, Vec<bool>)],
+    incoming: &[IofCourse],
+) -> bool {
     if existing.is_empty() {
         return false;
     }
     for row in incoming {
-        let Some((_, controls)) = existing
+        let Some((_, controls, random_order)) = existing
             .iter()
-            .find(|(name, _)| course_key(name) == course_key(&row.name))
+            .find(|(name, _, _)| course_key(name) == course_key(&row.name))
         else {
             continue;
         };
-        if controls != &row.controls {
+        if controls != &row.controls || random_order != &row.random_order {
             return true;
         }
     }
@@ -70,6 +75,7 @@ fn parse_one_course(inner: &str, name: &str) -> Result<IofCourse, String> {
     let length_meters = parse_meters(&child_text(inner, "Length"));
     let climb_meters = parse_meters(&child_text(inner, "Climb"));
     let mut controls = Vec::new();
+    let mut random_order = Vec::new();
     let mut legs: Vec<Option<i64>> = Vec::new();
     let mut pending_meters = 0_i64;
     let mut pending_has = false;
@@ -98,16 +104,25 @@ fn parse_one_course(inner: &str, name: &str) -> Result<IofCourse, String> {
                 return Err(format!("У дистанции «{name}» номер КП должен быть > 0"));
             }
             controls.push(cp);
+            random_order.push(parse_random_order_attr(attrs.get("randomorder")));
         }
         emitted += 1;
     }
     Ok(IofCourse {
         name: name.to_string(),
         controls,
+        random_order,
         length_meters,
         climb_meters,
         leg_meters: legs,
     })
+}
+
+fn parse_random_order_attr(raw: Option<&String>) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("true") | Some("1") | Some("yes") => true,
+        _ => false,
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -323,5 +338,34 @@ mod tests {
         assert_eq!(rows[1].length_meters, Some(2310));
         assert_eq!(rows[1].controls.len(), 14);
         assert_eq!(rows[1].leg_meters.len(), 15);
+        assert!(rows[0].random_order.iter().all(|v| !*v));
+    }
+
+    #[test]
+    fn parse_random_order_cluster() {
+        let text = r#"<?xml version="1.0"?>
+<CourseData>
+  <RaceCourseData>
+    <Course>
+      <Name>M21_Grozdi</Name>
+      <CourseControl type="Start"><Control>S1</Control></CourseControl>
+      <CourseControl type="Control"><Control>31</Control></CourseControl>
+      <CourseControl type="Control"><Control>32</Control></CourseControl>
+      <CourseControl type="Control" randomOrder="true"><Control>33</Control></CourseControl>
+      <CourseControl type="Control" randomOrder="true"><Control>34</Control></CourseControl>
+      <CourseControl type="Control" randomOrder="true"><Control>35</Control></CourseControl>
+      <CourseControl type="Control" randomOrder="false"><Control>36</Control></CourseControl>
+      <CourseControl type="Control" randomOrder="true"><Control>37</Control></CourseControl>
+      <CourseControl type="Finish"><Control>F1</Control></CourseControl>
+    </Course>
+  </RaceCourseData>
+</CourseData>"#;
+        let rows = parse_iof_course_xml(text).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].controls, vec![31, 32, 33, 34, 35, 36, 37]);
+        assert_eq!(
+            rows[0].random_order,
+            vec![false, false, true, true, true, false, true]
+        );
     }
 }

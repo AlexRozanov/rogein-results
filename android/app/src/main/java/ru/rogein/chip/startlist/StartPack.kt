@@ -15,6 +15,7 @@ data class StartCourse(
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
+    val randomOrder: List<Boolean> = emptyList(),
 )
 
 data class StartPerson(
@@ -39,7 +40,14 @@ fun parseStartPack(json: String): StartPack {
         revision = file.revision,
         sport = file.sport,
         courses = file.courses.map {
-            StartCourse(it.name, it.controls, it.lengthMeters, it.climbMeters, it.legMeters)
+            StartCourse(
+                it.name,
+                it.controls,
+                it.lengthMeters,
+                it.climbMeters,
+                it.legMeters,
+                it.randomOrder,
+            )
         },
         people = file.people.map { person ->
             StartPerson(

@@ -9,6 +9,7 @@ type CourseRow = {
   id: number;
   name: string;
   controls: number[];
+  randomOrder?: boolean[];
 };
 
 type CourseDraft = {
@@ -16,6 +17,7 @@ type CourseDraft = {
   id: number | null;
   name: string;
   controls: number[];
+  randomOrder: boolean[];
   addText: string;
   editingIndex: number | null;
   editText: string;
@@ -54,12 +56,17 @@ onMounted(() => {
   void refresh();
 });
 
+function normalizeFlags(controls: number[], flags?: boolean[]): boolean[] {
+  return controls.map((_, i) => Boolean(flags?.[i]));
+}
+
 function toDraft(row: CourseRow): CourseDraft {
   return {
     key: `id-${row.id}`,
     id: row.id,
     name: row.name,
     controls: [...row.controls],
+    randomOrder: normalizeFlags(row.controls, row.randomOrder),
     addText: "",
     editingIndex: null,
     editText: "",
@@ -107,6 +114,7 @@ function addCourse() {
     id: null,
     name: "",
     controls: [],
+    randomOrder: [],
     addText: "",
     editingIndex: null,
     editText: "",
@@ -138,10 +146,12 @@ async function persist(draft: CourseDraft) {
       courseId: draft.id,
       name,
       controls: draft.controls,
+      randomOrder: normalizeFlags(draft.controls, draft.randomOrder),
     });
     draft.id = saved.id;
     draft.name = saved.name;
     draft.controls = [...saved.controls];
+    draft.randomOrder = normalizeFlags(saved.controls, saved.randomOrder);
     draft.key = `id-${saved.id}`;
     emit("status", `Дистанция «${saved.name}» сохранена, результаты пересчитаны.`);
     emit("saved");
@@ -177,6 +187,7 @@ function addFromInput(draft: CourseDraft) {
   const nums = parseCpList(draft.addText);
   if (!nums.length) return;
   draft.controls.push(...nums);
+  draft.randomOrder.push(...nums.map(() => false));
   draft.addText = "";
   scheduleSave(draft);
 }
@@ -190,6 +201,7 @@ function onAddKeydown(draft: CourseDraft, event: KeyboardEvent) {
   if (event.key === "Backspace" && !draft.addText && draft.controls.length) {
     event.preventDefault();
     draft.controls.pop();
+    draft.randomOrder.pop();
     scheduleSave(draft);
   }
 }
@@ -200,12 +212,14 @@ function onAddPaste(draft: CourseDraft, event: ClipboardEvent) {
   if (nums.length <= 1) return;
   event.preventDefault();
   draft.controls.push(...nums);
+  draft.randomOrder.push(...nums.map(() => false));
   draft.addText = "";
   scheduleSave(draft);
 }
 
 function removeCp(draft: CourseDraft, index: number) {
   draft.controls.splice(index, 1);
+  draft.randomOrder.splice(index, 1);
   if (draft.editingIndex === index) {
     draft.editingIndex = null;
     draft.editText = "";
@@ -213,12 +227,28 @@ function removeCp(draft: CourseDraft, index: number) {
   scheduleSave(draft);
 }
 
+function toggleRandom(draft: CourseDraft, index: number) {
+  if (index < 0 || index >= draft.randomOrder.length) return;
+  draft.randomOrder[index] = !draft.randomOrder[index];
+  scheduleSave(draft);
+}
+
+function onChipClick(draft: CourseDraft, index: number, event: MouseEvent) {
+  if (event.altKey) {
+    toggleRandom(draft, index);
+    return;
+  }
+  startEditChip(draft, index);
+}
+
 function moveCpToSlot(draft: CourseDraft, from: number, slot: number) {
   let to = slot;
   if (from < to) to -= 1;
   if (from === to || to < 0 || to > draft.controls.length - 1) return;
   const [cp] = draft.controls.splice(from, 1);
+  const [flag] = draft.randomOrder.splice(from, 1);
   draft.controls.splice(to, 0, cp);
+  draft.randomOrder.splice(to, 0, flag);
   scheduleSave(draft);
 }
 
@@ -264,7 +294,9 @@ function commitEditChip(draft: CourseDraft) {
     removeCp(draft, index);
     return;
   }
+  const flags = nums.map((_, i) => (i === 0 ? Boolean(draft.randomOrder[index]) : false));
   draft.controls.splice(index, 1, ...nums);
+  draft.randomOrder.splice(index, 1, ...flags);
   scheduleSave(draft);
 }
 
@@ -392,12 +424,14 @@ defineExpose({ refresh });
     <p class="subtitle">
       Порядок КП: <code>1 → 2 → 3</code>. Клик по номеру — изменить, × — удалить из этой дистанции,
       перетаскивание — порядок (полоска показывает, куда встанет КП).
+      ПКМ / Alt+клик по КП — гроздь (свободный порядок, КП в скобках, внутри группы «·»).
       В поле справа введите номер и Enter / пробел; можно вставить список
       <code>32 51 34</code>. Старт и финиш задаются в настройках.
       CSV: строка на дистанцию, <code>D1;31;32;33</code> или <code>D1;31 32 33</code>.
       Также файл WinOrient <code>.Courses.txt</code>:
       <code>D1 3,8 30 S1-36-31-…-F1</code> — S1 старт, F1 финиш, между ними порядок КП.
-      IOF XML 3.0 <code>CourseData</code> добавляет длину, набор высоты и длины перегонов.
+      IOF XML 3.0 <code>CourseData</code> добавляет длину, набор высоты, перегоны и
+      <code>randomOrder</code> для гроздей.
     </p>
     <p v-if="removedCps.size" class="subtitle">
       Зачёркнутый КП снят в настройках для всех участников — как будто его не было на дистанции.
@@ -456,13 +490,21 @@ defineExpose({ refresh });
                     editing: draft.editingIndex === idx,
                     dragging: dragFrom?.key === draft.key && dragFrom.index === idx,
                     voided: isRemovedCp(cp),
+                    cluster: draft.randomOrder[idx],
                   }"
-                  :title="isRemovedCp(cp) ? 'Снят в настройках — как будто не было на дистанции' : undefined"
+                  :title="
+                    isRemovedCp(cp)
+                      ? 'Снят в настройках — как будто не было на дистанции'
+                      : draft.randomOrder[idx]
+                        ? 'Гроздь: свободный порядок. Alt+клик или ПКМ — убрать'
+                        : 'Alt+клик или ПКМ — гроздь (свободный порядок)'
+                  "
                   draggable="true"
                   @dragstart="onDragStart(draft, idx, $event)"
                   @dragover="onChipDragOver(draft, idx, $event)"
                   @drop.prevent="onChipDrop(draft, idx, $event)"
                   @dragend="onDragEnd"
+                  @contextmenu.prevent="toggleRandom(draft, idx)"
                 >
                   <input
                     v-if="draft.editingIndex === idx"
@@ -479,9 +521,9 @@ defineExpose({ refresh });
                       type="button"
                       class="course-chip-num"
                       :disabled="isBusy()"
-                      @click="startEditChip(draft, idx)"
+                      @click="onChipClick(draft, idx, $event)"
                     >
-                      {{ cp }}
+                      {{ draft.randomOrder[idx] ? `[${cp}]` : cp }}
                     </button>
                     <button
                       type="button"
@@ -501,7 +543,9 @@ defineExpose({ refresh });
                   @dragover="setDropSlot(draft, idx + 1, $event)"
                   @drop.prevent="onDropAt(draft, idx + 1)"
                 >
-                  →
+                  {{
+                    draft.randomOrder[idx] && draft.randomOrder[idx + 1] ? "·" : "→"
+                  }}
                 </span>
               </template>
               <span

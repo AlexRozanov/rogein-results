@@ -48,9 +48,20 @@ class IofCourseXmlTest {
     @Test
     fun mismatchWhenControlOrderDiffers() {
         val incoming = CsvImport.courses(javaClass.classLoader.getResource("iof-courses.xml")!!.readText())
-        val existing = listOf("D1" to listOf(31, 32, 33))
+        val existing = listOf(CourseOrderSnapshot("D1", listOf(31, 32, 33)))
         assertTrue(coursesNeedReplace(existing, incoming))
-        assertFalse(coursesNeedReplace(listOf("D1" to incoming[0].controls), incoming))
+        assertFalse(
+            coursesNeedReplace(
+                listOf(
+                    CourseOrderSnapshot(
+                        "D1",
+                        incoming[0].controls,
+                        incoming[0].randomOrder,
+                    ),
+                ),
+                incoming,
+            ),
+        )
         assertFalse(coursesNeedReplace(emptyList(), incoming))
     }
 

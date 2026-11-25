@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod archive_orient;
+pub mod course_order;
 pub mod domain;
 pub mod iof_course;
 pub mod phone_sync;
@@ -1390,13 +1391,20 @@ fn save_course(
     course_id: Option<i64>,
     name: String,
     controls: Vec<i64>,
+    random_order: Option<Vec<bool>>,
 ) -> Result<CourseRow, String> {
     let _guard = state
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
     let mut conn = domain::open_and_init_db(&state.db_path)?;
-    let row = domain::save_course(&conn, course_id, name, controls)?;
+    let row = domain::save_course(
+        &conn,
+        course_id,
+        name,
+        controls,
+        random_order.unwrap_or_default(),
+    )?;
     domain::recalculate(&mut conn)?;
     Ok(row)
 }

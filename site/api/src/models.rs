@@ -47,6 +47,8 @@ pub struct AwardGroupPublic {
     pub max_age: Option<i32>,
     pub sort_order: i32,
     pub course_cps: JsonValue,
+    #[serde(default)]
+    pub course_random_order: JsonValue,
     pub length_meters: Option<i32>,
     pub climb_meters: Option<i32>,
     pub leg_meters: JsonValue,
@@ -308,6 +310,8 @@ pub struct PublishAwardGroup {
     pub sort_order: Option<i32>,
     #[serde(default)]
     pub course_cps: Vec<i32>,
+    #[serde(default)]
+    pub course_random_order: Vec<bool>,
     #[serde(default)]
     pub length_meters: Option<i32>,
     #[serde(default)]

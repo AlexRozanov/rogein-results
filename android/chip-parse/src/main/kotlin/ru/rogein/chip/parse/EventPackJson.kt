@@ -39,6 +39,7 @@ data class EventPackFormatFile(
     val finishCp: Int?,
     val competitionStartTime: String,
     val controls: List<Int> = emptyList(),
+    val randomOrder: List<Boolean> = emptyList(),
     val cpTypeRules: List<EventPackCpTypeRuleFile> = emptyList(),
 )
 
@@ -103,6 +104,14 @@ fun parseEventPackJson(text: String): EventPackFile {
             finishCp = objInt(obj, "finishCp", "finish_cp"),
             competitionStartTime = obj.optStr("competitionStartTime", "competition_start_time"),
             controls = jsonInts(obj.optArr("controls", "cps")),
+            randomOrder = jsonArray(obj.optArr("randomOrder", "random_order")).map { value ->
+                when (value) {
+                    is Boolean -> value
+                    is Number -> value.toInt() != 0
+                    is String -> value.equals("true", true) || value == "1"
+                    else -> false
+                }
+            },
             cpTypeRules = jsonObjects(obj.optArr("cpTypeRules", "cp_type_rules")).mapNotNull { rule ->
                 val type = rule.optStr("type", "cpType", "cp_type")
                 if (type.isEmpty()) return@mapNotNull null

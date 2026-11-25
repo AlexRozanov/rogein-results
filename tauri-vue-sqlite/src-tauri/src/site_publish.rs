@@ -113,6 +113,8 @@ pub struct PublishAwardGroup {
     pub sort_order: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub course_cps: Vec<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub course_random_order: Vec<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length_meters: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -818,6 +820,7 @@ fn collect_rogaine_publish(
             max_age: group.max_age.map(|v| v as i32),
             sort_order: group.sort_order as i32,
             course_cps: Vec::new(),
+            course_random_order: Vec::new(),
             length_meters: None,
             climb_meters: None,
             leg_meters: Vec::new(),
@@ -882,6 +885,15 @@ fn collect_orient_publish(
         if rows.is_empty() {
             continue;
         }
+        let mut course_cps = Vec::new();
+        let mut course_random_order = Vec::new();
+        for (i, cp) in course.controls.iter().copied().enumerate() {
+            if removed_cps.contains(&cp) {
+                continue;
+            }
+            course_cps.push(cp as i32);
+            course_random_order.push(course.random_order.get(i).copied().unwrap_or(false));
+        }
         award_groups.push(PublishAwardGroup {
             source_id: course.id,
             name: course.name.clone(),
@@ -889,13 +901,8 @@ fn collect_orient_publish(
             min_age: None,
             max_age: None,
             sort_order: idx as i32,
-            course_cps: course
-                .controls
-                .iter()
-                .copied()
-                .filter(|cp| !removed_cps.contains(cp))
-                .map(|cp| cp as i32)
-                .collect(),
+            course_cps,
+            course_random_order,
             length_meters: course.length_meters.map(|v| v as i32),
             climb_meters: course.climb_meters.map(|v| v as i32),
             leg_meters: course
@@ -939,6 +946,7 @@ fn collect_orient_publish(
             max_age: None,
             sort_order: 10_000 + extra_idx as i32,
             course_cps: Vec::new(),
+            course_random_order: Vec::new(),
             length_meters: None,
             climb_meters: None,
             leg_meters: Vec::new(),

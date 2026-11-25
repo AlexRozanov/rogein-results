@@ -44,6 +44,7 @@ import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.filterCourseWithOrder
 import ru.rogein.chip.parse.marksWithAddedStart
 import ru.rogein.chip.parse.remapCourseLegMeters
 import ru.rogein.chip.parse.orientCourseLegs
@@ -1034,6 +1035,7 @@ class EventStore(
             exclusions: List<ExclusionEntity>,
         ): List<ScoredResult> {
             val courseMap = courses.associate { courseKey(it.name) to it.controls }
+            val courseRandomOrder = courses.associate { courseKey(it.name) to it.randomOrder }
             val removed = removedCps(corrections)
             val orientSettings = OrientSettings(settings.startCp, settings.finishCp, settings.controlMinutes)
             val rules = exclusions.map {
@@ -1088,6 +1090,7 @@ class EventStore(
                         rules,
                         adds,
                         addTimes,
+                        courseRandomOrder = courseRandomOrder,
                     )
                 }
                 ScoredResult(
@@ -1597,6 +1600,7 @@ class EventStore(
             val maxAge: Int? = null,
             val sortOrder: Int,
             val controls: List<Int>,
+            val randomOrder: List<Boolean> = emptyList(),
             val rows: List<ScoredResult>,
             val lengthMeters: Int? = null,
             val climbMeters: Int? = null,
@@ -1665,7 +1669,11 @@ class EventStore(
                 publishedKeys += key
                 val rows = byCourse[key].orEmpty()
                 if (rows.isEmpty()) return@forEachIndexed
-                val published = filterCourseCps(course.controls, removed)
+                val (published, publishedRandom) = filterCourseWithOrder(
+                    course.controls,
+                    course.randomOrder,
+                    removed,
+                )
                 buckets += ResultBucket(
                     id = index + 1,
                     key = key,
@@ -1674,6 +1682,7 @@ class EventStore(
                     minAge = null,
                     sortOrder = index,
                     controls = published,
+                    randomOrder = publishedRandom,
                     rows = rows,
                     lengthMeters = course.lengthMeters,
                     climbMeters = course.climbMeters,
@@ -2062,6 +2071,7 @@ class EventStore(
                         .put("max_age", bucket.maxAge ?: JSONObject.NULL)
                         .put("sort_order", bucket.sortOrder)
                         .put("course_cps", JSONArray(bucket.controls))
+                        .put("course_random_order", JSONArray(bucket.randomOrder))
                         .put("length_meters", bucket.lengthMeters ?: JSONObject.NULL)
                         .put("climb_meters", bucket.climbMeters ?: JSONObject.NULL)
                         .put("leg_meters", optionalIntJson(bucket.legMeters)),

@@ -610,6 +610,7 @@ class ChipQueueRepository(
                     ChipQueueDatabase.MIGRATION_9_10,
                     ChipQueueDatabase.MIGRATION_10_11,
                     ChipQueueDatabase.MIGRATION_11_12,
+                    ChipQueueDatabase.MIGRATION_12_13,
                 )
                 .build()
             val fieldJournal = FieldJournal.create(appContext, db.fieldJournalDao())

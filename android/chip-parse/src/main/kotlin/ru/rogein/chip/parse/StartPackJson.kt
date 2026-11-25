@@ -16,6 +16,7 @@ data class StartPackCourseFile(
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
+    val randomOrder: List<Boolean> = emptyList(),
 )
 
 data class StartPackPersonFile(
@@ -48,6 +49,14 @@ fun parseStartPackJson(text: String): StartPackFile {
                     is Number -> value.toInt().takeIf { it > 0 }
                     is String -> value.toIntOrNull()?.takeIf { it > 0 }
                     else -> null
+                }
+            },
+            randomOrder = jsonArray(obj.optJSONArray("randomOrder")).map { value ->
+                when (value) {
+                    is Boolean -> value
+                    is Number -> value.toInt() != 0
+                    is String -> value.equals("true", true) || value == "1"
+                    else -> false
                 }
             },
         )

@@ -17,7 +17,9 @@ import ru.rogein.chip.parse.AwardGroupCsvRow
 import ru.rogein.chip.parse.CourseCsvRow
 import ru.rogein.chip.parse.CourseOrderMismatchException
 import ru.rogein.chip.parse.CsvImport
+import ru.rogein.chip.parse.CourseOrderSnapshot
 import ru.rogein.chip.parse.coursesNeedReplace
+import ru.rogein.chip.parse.normalizeRandomOrder
 import ru.rogein.chip.parse.looksLikeIofCourseXml
 import ru.rogein.chip.parse.mergeCourseGeometry
 import ru.rogein.chip.parse.EventPackCpTypeRuleFile
@@ -128,12 +130,18 @@ class StartListStore(
                 existing != null && !replace -> parseInts(existing.controlsJson)
                 else -> emptyList()
             }
+            val nextRandom = when {
+                fromFormat.isNotEmpty() -> normalizeRandomOrder(nextControls.size, format?.randomOrder)
+                existing != null && !replace -> parseBools(existing.randomOrderJson)
+                else -> emptyList()
+            }
             val entity = StartCourseEntity(
                 name = name,
                 controlsJson = JSONArray(nextControls).toString(),
                 lengthMeters = existing?.lengthMeters,
                 climbMeters = existing?.climbMeters,
                 legsJson = existing?.legsJson ?: "[]",
+                randomOrderJson = JSONArray(nextRandom).toString(),
             )
             dao.upsertCourse(entity)
             rememberCourseEntity(entity)
@@ -426,7 +434,13 @@ class StartListStore(
         val rows = CsvImport.courses(text)
         val existing = dao.listCourses()
         if (looksLikeIofCourseXml(text) && !reset && existing.isNotEmpty()) {
-            val pairs = existing.map { it.name to parseInts(it.controlsJson) }
+            val pairs = existing.map {
+                CourseOrderSnapshot(
+                    name = it.name,
+                    controls = parseInts(it.controlsJson),
+                    randomOrder = parseBools(it.randomOrderJson),
+                )
+            }
             if (coursesNeedReplace(pairs, rows)) {
                 throw CourseOrderMismatchException()
             }
@@ -509,7 +523,12 @@ class StartListStore(
         rememberPersonDelete(id)
     }
 
-    suspend fun saveCourse(name: String, controls: List<Int>, previousName: String? = null) {
+    suspend fun saveCourse(
+        name: String,
+        controls: List<Int>,
+        previousName: String? = null,
+        randomOrder: List<Boolean> = emptyList(),
+    ) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) error("Укажите название дистанции")
         if (controls.any { it <= 0 }) error("Номер КП должен быть больше 0")
@@ -521,7 +540,10 @@ class StartListStore(
         }
         val lookup = if (previous.isNotEmpty()) previous else trimmed
         val existing = dao.listCourses().find { it.name.equals(lookup, true) }
-        val sameControls = existing != null && parseInts(existing.controlsJson) == controls
+        val flags = normalizeRandomOrder(controls.size, randomOrder)
+        val sameControls = existing != null &&
+            parseInts(existing.controlsJson) == controls &&
+            parseBools(existing.randomOrderJson) == flags
         dao.upsertCourse(
             StartCourseEntity(
                 name = trimmed,
@@ -529,6 +551,7 @@ class StartListStore(
                 lengthMeters = if (sameControls) existing?.lengthMeters else null,
                 climbMeters = if (sameControls) existing?.climbMeters else null,
                 legsJson = if (sameControls) existing?.legsJson?.ifBlank { "[]" } ?: "[]" else "[]",
+                randomOrderJson = JSONArray(flags).toString(),
             ),
         )
         if (renaming) {
@@ -555,6 +578,7 @@ class StartListStore(
                 lengthMeters = saved.lengthMeters,
                 climbMeters = saved.climbMeters,
                 legsJson = saved.legsJson.ifBlank { "[]" },
+                randomOrder = parseBools(saved.randomOrderJson),
             )
         }
     }
@@ -574,6 +598,7 @@ class StartListStore(
             lengthMeters = source.lengthMeters,
             climbMeters = source.climbMeters,
             legsJson = source.legsJson.ifBlank { "[]" },
+            randomOrder = parseBools(source.randomOrderJson),
         )
         return trimmed
     }
@@ -591,6 +616,7 @@ class StartListStore(
         lengthMeters: Int?,
         climbMeters: Int?,
         legsJson: String,
+        randomOrder: List<Boolean> = emptyList(),
     ) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
@@ -603,6 +629,7 @@ class StartListStore(
                 lengthMeters = lengthMeters,
                 climbMeters = climbMeters,
                 legsJson = legsJson.ifBlank { "[]" },
+                randomOrderJson = JSONArray(normalizeRandomOrder(controls.size, randomOrder)).toString(),
             ),
         )
         if (renaming) {
@@ -634,6 +661,7 @@ class StartListStore(
             lengthMeters = entity.lengthMeters,
             climbMeters = entity.climbMeters,
             legsJson = entity.legsJson,
+            randomOrder = parseBools(entity.randomOrderJson),
         )
     }
 
@@ -644,6 +672,7 @@ class StartListStore(
         lengthMeters: Int?,
         climbMeters: Int?,
         legsJson: String,
+        randomOrder: List<Boolean> = emptyList(),
     ) {
         val journal = fieldJournal ?: return
         runCatching {
@@ -654,6 +683,7 @@ class StartListStore(
                 lengthMeters = lengthMeters,
                 climbMeters = climbMeters,
                 legsJson = legsJson,
+                randomOrder = randomOrder,
                 eventSlug = eventSlug(),
             )
         }
@@ -1251,11 +1281,13 @@ private fun StartCourseEntity.toStartCourse() = StartCourse(
     lengthMeters = lengthMeters,
     climbMeters = climbMeters,
     legMeters = parseOptionalInts(legsJson),
+    randomOrder = parseBools(randomOrderJson),
 )
 
 private fun StartCourseEntity.toCsvRow() = CourseCsvRow(
     name = name,
     controls = parseInts(controlsJson),
+    randomOrder = parseBools(randomOrderJson),
     lengthMeters = lengthMeters,
     climbMeters = climbMeters,
     legMeters = parseOptionalInts(legsJson),
@@ -1264,13 +1296,17 @@ private fun StartCourseEntity.toCsvRow() = CourseCsvRow(
 private fun StartCourse.toCsvRow() = CourseCsvRow(
     name = name,
     controls = controls,
+    randomOrder = randomOrder,
     lengthMeters = lengthMeters,
     climbMeters = climbMeters,
     legMeters = legMeters,
 )
 
 private fun courseEntity(row: CourseCsvRow, existing: StartCourseEntity?): StartCourseEntity {
-    val same = existing != null && parseInts(existing.controlsJson) == row.controls
+    val flags = normalizeRandomOrder(row.controls.size, row.randomOrder)
+    val same = existing != null &&
+        parseInts(existing.controlsJson) == row.controls &&
+        parseBools(existing.randomOrderJson) == flags
     val length = row.lengthMeters ?: if (same) existing?.lengthMeters else null
     val climb = row.climbMeters ?: if (same) existing?.climbMeters else null
     val legs = if (row.legMeters.any { it != null }) {
@@ -1286,5 +1322,21 @@ private fun courseEntity(row: CourseCsvRow, existing: StartCourseEntity?): Start
         lengthMeters = length,
         climbMeters = climb,
         legsJson = encodeOptionalInts(legs),
+        randomOrderJson = JSONArray(flags).toString(),
     )
+}
+
+private fun parseBools(json: String): List<Boolean> {
+    if (json.isBlank()) return emptyList()
+    return runCatching {
+        val array = JSONArray(json)
+        List(array.length()) { index ->
+            when (val value = array.get(index)) {
+                is Boolean -> value
+                is Number -> value.toInt() != 0
+                is String -> value.equals("true", true) || value == "1"
+                else -> false
+            }
+        }
+    }.getOrDefault(emptyList())
 }

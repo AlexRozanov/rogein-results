@@ -2,6 +2,7 @@ package ru.rogein.chip.parse.field
 
 import org.json.JSONArray
 import org.json.JSONObject
+import ru.rogein.chip.parse.normalizeRandomOrder
 
 data class QueueDropPayload(val queueId: String)
 
@@ -19,6 +20,7 @@ data class CourseUpsertPayload(
     val lengthMeters: Int?,
     val climbMeters: Int?,
     val legsJson: String,
+    val randomOrder: List<Boolean> = emptyList(),
 )
 
 data class CourseDeletePayload(val name: String)
@@ -62,13 +64,17 @@ fun courseUpsertPayloadJson(
     lengthMeters: Int?,
     climbMeters: Int?,
     legsJson: String,
+    randomOrder: List<Boolean> = emptyList(),
 ): String {
     val arr = JSONArray()
     controls.forEach { arr.put(it) }
+    val flags = JSONArray()
+    normalizeRandomOrder(controls.size, randomOrder).forEach { flags.put(it) }
     val obj = JSONObject()
         .put("name", name)
         .put("previous_name", previousName)
         .put("controls", arr)
+        .put("random_order", flags)
         .put("legs_json", legsJson)
     if (lengthMeters == null) obj.put("length_meters", JSONObject.NULL) else obj.put("length_meters", lengthMeters)
     if (climbMeters == null) obj.put("climb_meters", JSONObject.NULL) else obj.put("climb_meters", climbMeters)
@@ -127,6 +133,19 @@ fun parseCourseUpsertPayload(payloadJson: String): CourseUpsertPayload {
     val controls = buildList {
         for (i in 0 until controlsArr.length()) add(controlsArr.getInt(i))
     }
+    val flagsArr = obj.optJSONArray("random_order") ?: obj.optJSONArray("randomOrder") ?: JSONArray()
+    val randomOrder = buildList {
+        for (i in 0 until flagsArr.length()) {
+            add(
+                when (val value = flagsArr.get(i)) {
+                    is Boolean -> value
+                    is Number -> value.toInt() != 0
+                    is String -> value.equals("true", true) || value == "1"
+                    else -> false
+                },
+            )
+        }
+    }
     return CourseUpsertPayload(
         name = obj.optString("name"),
         previousName = obj.optString("previous_name"),
@@ -134,6 +153,7 @@ fun parseCourseUpsertPayload(payloadJson: String): CourseUpsertPayload {
         lengthMeters = if (obj.has("length_meters") && !obj.isNull("length_meters")) obj.optInt("length_meters") else null,
         climbMeters = if (obj.has("climb_meters") && !obj.isNull("climb_meters")) obj.optInt("climb_meters") else null,
         legsJson = obj.optString("legs_json", "[]"),
+        randomOrder = normalizeRandomOrder(controls.size, randomOrder),
     )
 }
 

@@ -430,11 +430,12 @@ class FieldJournal(
         lengthMeters: Int?,
         climbMeters: Int?,
         legsJson: String,
+        randomOrder: List<Boolean> = emptyList(),
         eventSlug: String,
     ): FieldOpEnvelope = append(
         type = FieldOpType.COURSE_UPSERT,
         payloadJson = courseUpsertPayloadJson(
-            name, previousName, controls, lengthMeters, climbMeters, legsJson,
+            name, previousName, controls, lengthMeters, climbMeters, legsJson, randomOrder,
         ),
         eventSlug = eventSlug,
     )
