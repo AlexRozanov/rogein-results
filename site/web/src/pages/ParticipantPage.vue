@@ -422,7 +422,29 @@ const orientSplitView = computed(() => {
   const legs = asOptionalIntList(group?.leg_meters ?? group?.legMeters);
   const lengthRaw = Number(group?.length_meters ?? group?.lengthMeters);
   const length = Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
-  const showPace = hasCourseDistances(length, legs);
+  const randomOrder = group?.course_random_order ?? [];
+  const ev = event.value;
+  const w = Number(ev?.map_width) || 0;
+  const h = Number(ev?.map_height) || 0;
+  const mpp = Number(ev?.meters_per_pixel);
+  const positions: Record<number, { x: number; y: number }> = {};
+  let metersPerUnit: number | null = null;
+  if (w > 0 && h > 0 && mpp > 0) {
+    metersPerUnit = mpp;
+    for (const pt of mapPointCoords(ev?.map_points)) {
+      if (pt.cp == null) continue;
+      positions[pt.cp] = { x: pt.x * w, y: pt.y * h };
+    }
+    if (start != null && start > 0 && !(start in positions)) {
+      const startPt = mapPointCoords(ev?.map_points).find((p) => p.kind === "start");
+      if (startPt) positions[start] = { x: startPt.x * w, y: startPt.y * h };
+    }
+    if (finish != null && finish > 0 && !(finish in positions)) {
+      const finishPt = mapPointCoords(ev?.map_points).find((p) => p.kind === "finish");
+      if (finishPt) positions[finish] = { x: finishPt.x * w, y: finishPt.y * h };
+    }
+  }
+  const showPace = hasCourseDistances(length, legs, metersPerUnit, Object.keys(positions).length);
   const startPunch = punches.find((row) => row.kind === "start") ?? punches[0];
   const t0 = parseMarkMs(startPunch.mark_time);
   const rows: Array<{
@@ -450,7 +472,17 @@ const orientSplitView = computed(() => {
     const pace =
       showPace && splitSec != null && prev != null
         ? formatPaceMinPerKm(
-            courseLegMeters(controls, legs, prev.cp, row.cp, start ?? 0, finish ?? 0),
+            courseLegMeters(
+              controls,
+              legs,
+              prev.cp,
+              row.cp,
+              start ?? 0,
+              finish ?? 0,
+              randomOrder,
+              positions,
+              metersPerUnit,
+            ),
             splitSec,
           )
         : null;

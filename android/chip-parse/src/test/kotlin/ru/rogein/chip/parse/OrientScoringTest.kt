@@ -1,6 +1,7 @@
 package ru.rogein.chip.parse
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class OrientScoringTest {
@@ -30,6 +31,50 @@ class OrientScoringTest {
             listOf(241 to 58, 58 to 68, 68 to 58, 58 to 250),
             orientCourseLegs(listOf(58, 68, 58), 241, 250, emptySet()),
         )
+    }
+
+    @Test
+    fun legsKeepClusterEntryAndExitSkipInside() {
+        val controls = listOf(31, 32, 33, 34, 35, 36)
+        val random = listOf(false, false, true, true, true, false)
+        assertEquals(
+            listOf(241 to 31, 31 to 32, 32 to 33, 35 to 36, 36 to 240),
+            orientCourseLegs(controls, 241, 240, emptySet(), random),
+        )
+        assertEquals(
+            "32 → [33·34·35]",
+            formatOrientLegLabel(32, 33, controls, 241, 240, random),
+        )
+        assertEquals(
+            "[33·34·35] → 36",
+            formatOrientLegLabel(35, 36, controls, 241, 240, random),
+        )
+    }
+
+    @Test
+    fun exclusionIntoClusterUsesFirstClusterPunch() {
+        val controls = listOf(31, 32, 33, 34)
+        val random = listOf(false, true, true, false)
+        val window = listOf(
+            mark(241, 10, 0),
+            mark(31, 10, 10),
+            mark(33, 10, 20),
+            mark(32, 10, 25),
+            mark(34, 10, 40),
+            mark(240, 11, 0),
+        )
+        // 31 → гроздь: 10:10→10:20 = 600s (вход на 33, не на 32)
+        val elapsed = applyOrientExclusionRules(
+            window,
+            controls,
+            241,
+            240,
+            null,
+            listOf(OrientExclusion(null, 31, 32)),
+            3600,
+            random,
+        )
+        assertEquals(3000, elapsed)
     }
 
     @Test
@@ -89,6 +134,48 @@ class OrientScoringTest {
         val progress = courseProgress(listOf(241, 250, 240), listOf(241, 250, 250, 240))
         assertEquals(listOf(true, true, false, true), progress.map { it.taken })
         assertEquals(listOf(250 to 1), addableCourseCps(progress))
+    }
+
+    @Test
+    fun courseProgressClusterAnyOrderFullyTaken() {
+        val required = listOf(31, 32, 33, 34)
+        val random = listOf(false, true, true, false)
+        // В грозди порядок 33→32, не как в списке.
+        val punches = listOf(241, 31, 33, 32, 34, 240)
+        val progress = courseProgress(punches, required, randomOrder = random)
+        assertTrue(progress.all { it.taken })
+        assertEquals(emptyList<Pair<Int, Int>>(), addableCourseCps(progress))
+    }
+
+    @Test
+    fun classifyClusterAnyOrderNotWrong() {
+        val marks = listOf(
+            mark(241, 10, 0),
+            mark(31, 10, 5),
+            mark(33, 10, 8),
+            mark(32, 10, 10),
+            mark(34, 10, 15),
+            mark(240, 10, 20),
+        )
+        val classified = classifyActualPunches(
+            marks,
+            listOf(31, 32, 33, 34),
+            241,
+            240,
+            listOf(false, true, true, false),
+        )
+        assertTrue(classified.none { it.wrong })
+        assertEquals(
+            listOf(
+                PunchKind.Start,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Ok,
+                PunchKind.Finish,
+            ),
+            classified.map { it.kind },
+        )
     }
 
     @Test

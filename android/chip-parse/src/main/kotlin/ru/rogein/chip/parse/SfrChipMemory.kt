@@ -170,26 +170,137 @@ object TestCoursePlan {
         return listOf(start) + take + listOf(finish)
     }
 
-    fun fullSequence(controls: List<Int>): List<Int> {
-        val inner = controls.filter { it != CP_START && it != CP_FINISH }
-        require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }
-        return listOf(CP_START) + inner + listOf(CP_FINISH)
+    private fun innerControls(controls: List<Int>): List<Int> =
+        controls.filter { it != CP_START && it != CP_FINISH }
+
+    private fun innerRandomOrder(controls: List<Int>, randomOrder: List<Boolean>): List<Boolean> {
+        val flags = normalizeRandomOrder(controls.size, randomOrder)
+        return controls.mapIndexedNotNull { index, cp ->
+            if (cp == CP_START || cp == CP_FINISH) null else flags[index]
+        }
     }
 
-    /** Не проходит проверку порядка: меняет два КП местами или пропускает единственный. */
-    fun wrongSequence(controls: List<Int>): List<Int> {
-        val seq = fullSequence(controls).toMutableList()
-        val inner = seq.indices.filter { seq[it] != CP_START && seq[it] != CP_FINISH }
-        when {
-            inner.size >= 2 -> {
-                val tmp = seq[inner[0]]
-                seq[inner[0]] = seq[inner[1]]
-                seq[inner[1]] = tmp
+    fun fullSequence(
+        controls: List<Int>,
+        randomOrder: List<Boolean> = emptyList(),
+        random: kotlin.random.Random = kotlin.random.Random.Default,
+    ): List<Int> {
+        val inner = innerControls(controls)
+        require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }
+        val flags = innerRandomOrder(controls, randomOrder)
+        val path = ArrayList<Int>(inner.size)
+        for (seg in courseSegments(inner, flags)) {
+            when (seg) {
+                is CourseSegment.Fixed -> path += seg.cp
+                is CourseSegment.Cluster -> path += seg.cps.shuffled(random)
             }
-            inner.size == 1 -> seq.removeAt(inner[0])
+        }
+        return listOf(CP_START) + path + listOf(CP_FINISH)
+    }
+
+    /**
+     * Не проходит проверку порядка.
+     * Если есть гроздь — ошибка именно в ней: переход на следующий обязательный КП,
+     * не закрыв гроздь (или пропуск КП внутри грозди).
+     * Иначе — как раньше: обмен двух КП или пропуск единственного.
+     */
+    fun wrongSequence(
+        controls: List<Int>,
+        randomOrder: List<Boolean> = emptyList(),
+        random: kotlin.random.Random = kotlin.random.Random.Default,
+    ): List<Int> {
+        val inner = innerControls(controls)
+        require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }
+        val flags = innerRandomOrder(controls, randomOrder)
+        val segments = courseSegments(inner, flags)
+        val clusterIdx = segments.indexOfFirst { it is CourseSegment.Cluster && (it as CourseSegment.Cluster).cps.size >= 1 }
+        if (clusterIdx >= 0) {
+            return wrongClusterSequence(segments, clusterIdx, random)
+        }
+        val seq = (listOf(CP_START) + inner + listOf(CP_FINISH)).toMutableList()
+        val idxs = seq.indices.filter { seq[it] != CP_START && seq[it] != CP_FINISH }
+        when {
+            idxs.size >= 2 -> {
+                val tmp = seq[idxs[0]]
+                seq[idxs[0]] = seq[idxs[1]]
+                seq[idxs[1]] = tmp
+            }
+            idxs.size == 1 -> seq.removeAt(idxs[0])
             else -> error("у дистанции нет порядка КП")
         }
         return seq
+    }
+
+    private fun wrongClusterSequence(
+        segments: List<CourseSegment>,
+        clusterIdx: Int,
+        random: kotlin.random.Random,
+    ): List<Int> {
+        val path = ArrayList<Int>()
+        path += CP_START
+        fun appendRest(from: Int, skipFixed: Int? = null) {
+            for (j in from until segments.size) {
+                when (val later = segments[j]) {
+                    is CourseSegment.Fixed -> if (later.cp != skipFixed) path += later.cp
+                    is CourseSegment.Cluster -> path += later.cps.shuffled(random)
+                }
+            }
+            path += CP_FINISH
+        }
+        for (i in segments.indices) {
+            when (val seg = segments[i]) {
+                is CourseSegment.Fixed -> path += seg.cp
+                is CourseSegment.Cluster -> {
+                    if (i != clusterIdx) {
+                        path += seg.cps.shuffled(random)
+                        continue
+                    }
+                    val shuffled = seg.cps.shuffled(random)
+                    val nextFixed = segments.drop(i + 1)
+                        .firstOrNull { it is CourseSegment.Fixed } as? CourseSegment.Fixed
+                    when {
+                        // Не закрыв гроздь — взять следующий обязательный КП (типичная ошибка randomOrder).
+                        nextFixed != null -> {
+                            if (shuffled.size >= 2) {
+                                path += shuffled.dropLast(1)
+                                path += nextFixed.cp
+                                path += shuffled.last()
+                            } else {
+                                path += nextFixed.cp
+                                path += shuffled
+                            }
+                            appendRest(i + 1, skipFixed = nextFixed.cp)
+                            return path
+                        }
+                        // Гроздь в конце: пропустить один (или единственный) КП.
+                        shuffled.size >= 2 -> {
+                            path += shuffled.dropLast(1)
+                            appendRest(i + 1)
+                            return path
+                        }
+                        else -> {
+                            appendRest(i + 1)
+                            return path
+                        }
+                    }
+                }
+            }
+        }
+        path += CP_FINISH
+        return path
+    }
+
+    /** Подпись порядка КП с квадратными скобками вокруг гроздей. */
+    fun formatControlsLabel(controls: List<Int>, randomOrder: List<Boolean> = emptyList()): String {
+        val inner = innerControls(controls)
+        if (inner.isEmpty()) return ""
+        val flags = innerRandomOrder(controls, randomOrder)
+        return courseSegments(inner, flags).joinToString(" → ") { seg ->
+            when (seg) {
+                is CourseSegment.Fixed -> seg.cp.toString()
+                is CourseSegment.Cluster -> "[${seg.cps.joinToString("·")}]"
+            }
+        }
     }
 
     fun punches(cps: List<Int>, hour: Int, minute: Int, second: Int, stepSeconds: Int = 45): List<Punch> {

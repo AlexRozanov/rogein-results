@@ -101,6 +101,92 @@ class IofCourseXmlTest {
     }
 
     @Test
+    fun courseLegMetersClusterEntryAndExit() {
+        // start→31, 31→32, 32→33, 33→34, 34→finish
+        val controls = listOf(31, 32, 33, 34)
+        val random = listOf(false, true, true, false)
+        val legs = listOf(100, 200, 50, 60, 80)
+        // Вход в гроздь на 33 (не первый в списке) — метры перегона 31→32.
+        assertEquals(200, courseLegMeters(controls, legs, 31, 33, 241, 240, random))
+        // Выход из грозди с 32 — метры 33→34.
+        assertEquals(60, courseLegMeters(controls, legs, 32, 34, 241, 240, random))
+        // Внутри грозди без координат — null.
+        assertNull(courseLegMeters(controls, legs, 33, 32, 241, 240, random))
+    }
+
+    @Test
+    fun courseLegMetersFallsBackToMapStraightLine() {
+        val controls = listOf(31, 32, 33)
+        val random = listOf(false, true, true)
+        val positions = mapOf(
+            32 to (0.0 to 0.0),
+            33 to (3.0 to 4.0), // 5 units
+        )
+        assertEquals(
+            500,
+            courseLegMeters(
+                controls,
+                emptyList(),
+                32,
+                33,
+                241,
+                240,
+                random,
+                positions,
+                metersPerUnit = 100.0,
+            ),
+        )
+    }
+
+    @Test
+    fun parseIofCourseDataReadsScaleAndMapPositions() {
+        val text = javaClass.classLoader.getResource("iof-courses.xml")!!.readText()
+        val data = parseIofCourseData(text)
+        assertEquals(4000, data.mapScaleDenominator)
+        assertEquals(-13.5 to 78.2, data.controlPositionsMm[31])
+        assertTrue(data.courses.isNotEmpty())
+    }
+
+    @Test
+    fun buildOrientSplitPrintShowsPaceOnClusterPath() {
+        val controls = listOf(31, 32, 33, 34)
+        val random = listOf(false, true, true, false)
+        val legs = listOf(100, 200, 50, 60, 80)
+        val positions = mapOf(
+            32 to (0.0 to 0.0),
+            33 to (30.0 to 40.0), // 50 units → 200 m at mpu=4
+        )
+        val punches = listOf(
+            OrientMark(241, 10 * 3600),
+            OrientMark(31, 10 * 3600 + 60),
+            OrientMark(33, 10 * 3600 + 120),
+            OrientMark(32, 10 * 3600 + 180),
+            OrientMark(34, 10 * 3600 + 240),
+            OrientMark(240, 10 * 3600 + 300),
+        )
+        val print = buildOrientSplitPrint(
+            punches = punches,
+            required = controls,
+            startCp = 241,
+            finishCp = 240,
+            elapsedSeconds = 300,
+            status = STATUS_OK,
+            courseControls = controls,
+            lengthMeters = 4820,
+            legMeters = legs,
+            randomOrder = random,
+            courseRandomOrder = random,
+            cpPositions = positions,
+            metersPerUnit = 4.0,
+        )
+        requireNotNull(print)
+        assertTrue(print.rows.none { it.wrong })
+        // Вход 31→33 и выход 32→34 из LegLength; внутри 33→32 по координатам.
+        assertTrue(print.rows.any { it.text.contains("/км") })
+        assertTrue(print.rows.count { it.text.contains("/км") } >= 3)
+    }
+
+    @Test
     fun remapCourseLegMetersKeepsOfficialAdjacentLegs() {
         val full = listOf(31, 32, 33)
         val legs = listOf(100, 200, 150, 80)

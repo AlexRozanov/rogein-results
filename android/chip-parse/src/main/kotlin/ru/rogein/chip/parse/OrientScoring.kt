@@ -483,18 +483,123 @@ fun courseSubsequenceTaken(
     randomOrder: List<Boolean> = emptyList(),
 ): Int = courseTakenWithOrder(punches, required, randomOrder, addCounts)
 
+fun orientCourseSequence(
+    controls: List<Int>,
+    startCp: Int,
+    finishCp: Int,
+    removed: Set<Int>,
+    randomOrder: List<Boolean> = emptyList(),
+): Pair<List<Int>, List<Boolean>> {
+    val flags = normalizeRandomOrder(controls.size, randomOrder)
+    val kept = ArrayList<Int>()
+    val keptFlags = ArrayList<Boolean>()
+    for (i in controls.indices) {
+        if (controls[i] in removed) continue
+        kept += controls[i]
+        keptFlags += flags[i]
+    }
+    val seq = ArrayList<Int>()
+    val seqCluster = ArrayList<Boolean>()
+    if (kept.firstOrNull() != startCp) {
+        seq += startCp
+        seqCluster += false
+    }
+    for (i in kept.indices) {
+        seq += kept[i]
+        seqCluster += keptFlags[i]
+    }
+    if (seq.lastOrNull() != finishCp && finishCp > 0) {
+        seq += finishCp
+        seqCluster += false
+    }
+    return seq to seqCluster
+}
+
+/**
+ * Перегоны для исключения времени.
+ * Внутри грозди перегонов нет; вход (заданный КП → гроздь) и выход (гроздь → заданный КП) остаются.
+ * Для грозди в паре хранится первый/последний КП списка как представитель.
+ */
 fun orientCourseLegs(
     controls: List<Int>,
     startCp: Int,
     finishCp: Int,
     removed: Set<Int>,
+    randomOrder: List<Boolean> = emptyList(),
 ): List<Pair<Int, Int>> {
-    val kept = controls.filter { it !in removed }
-    val seq = ArrayList<Int>()
-    if (kept.firstOrNull() != startCp) seq += startCp
-    seq += kept
-    if (seq.lastOrNull() != finishCp && finishCp > 0) seq += finishCp
-    return seq.zipWithNext().filter { it.first != it.second }
+    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val out = ArrayList<Pair<Int, Int>>()
+    val segments = courseSegments(seq, seqCluster)
+    for (i in 0 until segments.lastIndex) {
+        val a = segments[i]
+        val b = segments[i + 1]
+        when {
+            a is CourseSegment.Fixed && b is CourseSegment.Fixed -> {
+                if (a.cp != b.cp) out += a.cp to b.cp
+            }
+            a is CourseSegment.Fixed && b is CourseSegment.Cluster -> {
+                out += a.cp to b.cps.first()
+            }
+            a is CourseSegment.Cluster && b is CourseSegment.Fixed -> {
+                out += a.cps.last() to b.cp
+            }
+            // Cluster → Cluster: свободный порядок, исключать нечего.
+        }
+    }
+    return out
+}
+
+/** Наборы КП для from/to с учётом входа/выхода грозди. */
+fun exclusionEndpointSets(
+    fromCp: Int,
+    toCp: Int,
+    controls: List<Int>,
+    startCp: Int,
+    finishCp: Int,
+    randomOrder: List<Boolean> = emptyList(),
+    removed: Set<Int> = emptySet(),
+): Pair<Set<Int>, Set<Int>> {
+    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val segments = courseSegments(seq, seqCluster)
+    for (i in 0 until segments.lastIndex) {
+        val a = segments[i]
+        val b = segments[i + 1]
+        when {
+            a is CourseSegment.Fixed && b is CourseSegment.Cluster &&
+                a.cp == fromCp && toCp in b.cps -> return setOf(fromCp) to b.cps.toSet()
+            a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
+                fromCp in a.cps && b.cp == toCp -> return a.cps.toSet() to setOf(toCp)
+        }
+    }
+    return setOf(fromCp) to setOf(toCp)
+}
+
+fun formatOrientLegLabel(
+    fromCp: Int,
+    toCp: Int,
+    controls: List<Int>,
+    startCp: Int,
+    finishCp: Int,
+    randomOrder: List<Boolean> = emptyList(),
+    removed: Set<Int> = emptySet(),
+    formatCp: (Int) -> String = { it.toString() },
+): String {
+    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val segments = courseSegments(seq, seqCluster)
+    fun clusterLabel(cps: List<Int>) = "[${cps.joinToString("·")}]"
+    for (i in 0 until segments.lastIndex) {
+        val a = segments[i]
+        val b = segments[i + 1]
+        when {
+            a is CourseSegment.Fixed && b is CourseSegment.Cluster &&
+                a.cp == fromCp && toCp == b.cps.first() ->
+                return "${formatCp(fromCp)} → ${clusterLabel(b.cps)}"
+            a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
+                fromCp == a.cps.last() && b.cp == toCp ->
+                return "${clusterLabel(a.cps)} → ${formatCp(toCp)}"
+        }
+    }
+    return "${formatCp(fromCp)} → ${formatCp(toCp)}"
 }
 
 fun resolveOrientLegTo(fromCp: Int, required: List<Int>, startCp: Int, finishCp: Int): Int? {
@@ -512,6 +617,7 @@ fun applyOrientExclusionRules(
     courseKey: String?,
     rules: List<OrientExclusion>,
     elapsedSeconds: Int,
+    randomOrder: List<Boolean> = emptyList(),
 ): Int {
     if (window.size < 2 || rules.isEmpty()) return elapsedSeconds
     var adjusted = elapsedSeconds
@@ -528,11 +634,19 @@ fun applyOrientExclusionRules(
         } else {
             resolveOrientLegTo(rule.fromCp, required, startCp, finishCp) ?: continue
         }
+        val (fromSet, toSet) = exclusionEndpointSets(
+            rule.fromCp,
+            toCp,
+            required,
+            startCp,
+            finishCp,
+            randomOrder,
+        )
         var pending: Int? = null
         for (mark in window) {
-            if (mark.cp == rule.fromCp) {
+            if (mark.cp in fromSet) {
                 pending = mark.seconds
-            } else if (mark.cp == toCp) {
+            } else if (mark.cp in toSet) {
                 val t0 = pending
                 pending = null
                 if (t0 != null) {
@@ -647,6 +761,7 @@ private fun calculateOrientResultInner(
             key,
             exclusions,
             elapsed,
+            requiredRandomOrder,
         )
     } else {
         elapsed

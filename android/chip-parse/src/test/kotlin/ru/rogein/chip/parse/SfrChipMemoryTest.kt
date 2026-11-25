@@ -189,6 +189,53 @@ class SfrChipMemoryTest {
     }
 
     @Test
+    fun testCoursePlanClusterCorrectShufflesInsideCluster() {
+        val controls = listOf(31, 32, 33, 34, 35)
+        val randomOrder = listOf(false, true, true, true, false)
+        val seq = TestCoursePlan.fullSequence(controls, randomOrder, random = kotlin.random.Random(7))
+        assertEquals(CP_START, seq.first())
+        assertEquals(CP_FINISH, seq.last())
+        assertEquals(31, seq[1])
+        assertEquals(35, seq[seq.lastIndex - 1])
+        assertEquals(setOf(32, 33, 34), seq.subList(2, 5).toSet())
+        assertEquals(
+            controls.size + 2,
+            courseTakenWithOrder(
+                seq.filter { it != CP_START && it != CP_FINISH },
+                controls,
+                randomOrder,
+            ),
+        )
+    }
+
+    @Test
+    fun testCoursePlanClusterWrongLeavesClusterEarly() {
+        val controls = listOf(31, 32, 33, 34, 35)
+        val randomOrder = listOf(false, true, true, true, false)
+        val seq = TestCoursePlan.wrongSequence(controls, randomOrder, random = kotlin.random.Random(3))
+        val punches = seq.filter { it != CP_START && it != CP_FINISH }
+        assertTrue(punches.contains(35))
+        // Ошибка грозди: взяли 35 до закрытия [32·33·34]
+        val idx35 = punches.indexOf(35)
+        val clusterHits = punches.take(idx35).count { it in setOf(32, 33, 34) }
+        assertTrue(clusterHits < 3)
+        assertTrue(
+            courseTakenWithOrder(punches, controls, randomOrder) < controls.size,
+        )
+    }
+
+    @Test
+    fun testCoursePlanFormatControlsLabelShowsCluster() {
+        assertEquals(
+            "31 → [32·33·34] → 35",
+            TestCoursePlan.formatControlsLabel(
+                listOf(31, 32, 33, 34, 35),
+                listOf(false, true, true, true, false),
+            ),
+        )
+    }
+
+    @Test
     fun writeCoursePlanRoundTripsThroughParser() {
         val punches = TestCoursePlan.punches(
             TestCoursePlan.fullSequence(listOf(31, 32)),

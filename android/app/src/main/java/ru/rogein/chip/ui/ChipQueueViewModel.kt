@@ -48,6 +48,8 @@ import ru.rogein.chip.parse.marksWithAddedStart
 import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.displayBirthDate
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.filterCourseWithOrder
+import ru.rogein.chip.parse.resolveMapMetersPerUnit
 import ru.rogein.chip.parse.personGenderChoice
 import ru.rogein.chip.parse.storedBirthDate
 import ru.rogein.chip.parse.storedPersonGender
@@ -731,7 +733,14 @@ class ChipQueueViewModel(
                         pendingCsvReset,
                         settings.value.sportKind,
                     )
-                    CsvImportKind.Courses -> repository.startList.importCoursesCsv(text, pendingCsvReset)
+                    CsvImportKind.Courses -> {
+                        val imported = repository.startList.importCoursesCsv(text, pendingCsvReset)
+                        repository.event.applyIofMapGeometry(
+                            imported.mapScaleDenominator,
+                            imported.controlPositionsMm,
+                        )
+                        imported.message
+                    }
                     CsvImportKind.Finish -> importFinishCsv(text)
                     CsvImportKind.EventPack -> importEventPackJson(text)
                     CsvImportKind.Formats -> {
@@ -1398,10 +1407,11 @@ class ChipQueueViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _busy.value = true
             try {
+                val randomOrder = course?.randomOrder.orEmpty()
                 val cps = if (correct) {
-                    TestCoursePlan.fullSequence(controls)
+                    TestCoursePlan.fullSequence(controls, randomOrder)
                 } else {
-                    TestCoursePlan.wrongSequence(controls)
+                    TestCoursePlan.wrongSequence(controls, randomOrder)
                 }
                 val now = LocalTime.now()
                 val punches = TestCoursePlan.punches(cps, now.hour, now.minute, now.second)
@@ -2789,8 +2799,9 @@ class ChipQueueViewModel(
         val startClock = parseDaySeconds(settings.competitionStartTime)
             .takeIf { rogaine && settings.startMode == "time" }
         val course = courses.value.find { it.name.equals(row.course, true) }
-        val required = filterCourseCps(
+        val (required, requiredRandom) = filterCourseWithOrder(
             course?.controls.orEmpty(),
+            course?.randomOrder.orEmpty(),
             EventStore.removedCps(corrections.value),
         )
         return ReceiptText.format(
@@ -2815,6 +2826,12 @@ class ChipQueueViewModel(
                 requiredControls = required,
                 lengthMeters = course?.lengthMeters,
                 legMeters = course?.legMeters.orEmpty(),
+                randomOrder = requiredRandom,
+                cpPositions = EventStore.cpPositionsForPace(settings),
+                metersPerUnit = resolveMapMetersPerUnit(
+                    settings.metersPerPixel,
+                    settings.mapScaleDenominator,
+                ),
             ),
         )
     }

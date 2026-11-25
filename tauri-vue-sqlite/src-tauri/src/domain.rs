@@ -3476,6 +3476,7 @@ fn calculate_orient_result(
             course_id,
             exclusion_rules,
             elapsed,
+            required_random,
         )
     } else {
         elapsed
@@ -4023,31 +4024,117 @@ fn resolve_orient_leg_to(
 
 /// Consecutive take-order legs: start → first CP, each course CP to the next, last → finish.
 /// The same CP can appear more than once (e.g. 58→68 and later 58→finish).
+fn orient_course_sequence(
+    controls: &[i64],
+    start_cp: Option<i64>,
+    finish_cp: i64,
+    removed: &HashSet<i64>,
+    random_order: &[bool],
+) -> (Vec<i64>, Vec<bool>) {
+    let flags = crate::course_order::normalize_random_order(controls.len(), random_order);
+    let mut kept = Vec::new();
+    let mut kept_flags = Vec::new();
+    for (i, &cp) in controls.iter().enumerate() {
+        if removed.contains(&cp) {
+            continue;
+        }
+        kept.push(cp);
+        kept_flags.push(flags[i]);
+    }
+    let mut seq = Vec::new();
+    let mut seq_cluster = Vec::new();
+    if let Some(start) = start_cp {
+        if kept.first().copied() != Some(start) {
+            seq.push(start);
+            seq_cluster.push(false);
+        }
+    }
+    for (i, &cp) in kept.iter().enumerate() {
+        seq.push(cp);
+        seq_cluster.push(kept_flags[i]);
+    }
+    if seq.last().copied() != Some(finish_cp) && finish_cp > 0 {
+        seq.push(finish_cp);
+        seq_cluster.push(false);
+    }
+    (seq, seq_cluster)
+}
+
+/// Перегоны для исключения: внутри грозди нет; вход (КП→гроздь) и выход (гроздь→КП) остаются.
 fn orient_course_legs(
     controls: &[i64],
     start_cp: Option<i64>,
     finish_cp: i64,
     removed: &HashSet<i64>,
+    random_order: &[bool],
 ) -> Vec<(i64, i64)> {
-    let kept: Vec<i64> = controls
-        .iter()
-        .copied()
-        .filter(|cp| !removed.contains(cp))
-        .collect();
-    let mut seq = Vec::new();
-    if let Some(start) = start_cp {
-        if kept.first().copied() != Some(start) {
-            seq.push(start);
+    use crate::course_order::CourseSegment;
+    let (seq, seq_cluster) =
+        orient_course_sequence(controls, start_cp, finish_cp, removed, random_order);
+    let segments = crate::course_order::course_segments(&seq, &seq_cluster);
+    let mut out = Vec::new();
+    for i in 0..segments.len().saturating_sub(1) {
+        match (&segments[i], &segments[i + 1]) {
+            (CourseSegment::Fixed(a), CourseSegment::Fixed(b)) => {
+                if a != b {
+                    out.push((*a, *b));
+                }
+            }
+            (CourseSegment::Fixed(a), CourseSegment::Cluster(cps)) => {
+                if let Some(&first) = cps.first() {
+                    out.push((*a, first));
+                }
+            }
+            (CourseSegment::Cluster(cps), CourseSegment::Fixed(b)) => {
+                if let Some(&last) = cps.last() {
+                    out.push((last, *b));
+                }
+            }
+            (CourseSegment::Cluster(_), CourseSegment::Cluster(_)) => {}
         }
     }
-    seq.extend(kept);
-    if seq.last().copied() != Some(finish_cp) && finish_cp > 0 {
-        seq.push(finish_cp);
+    out
+}
+
+fn exclusion_endpoint_sets(
+    from_cp: i64,
+    to_cp: i64,
+    controls: &[i64],
+    start_cp: i64,
+    finish_cp: i64,
+    random_order: &[bool],
+) -> (HashSet<i64>, HashSet<i64>) {
+    use crate::course_order::CourseSegment;
+    let (seq, seq_cluster) = orient_course_sequence(
+        controls,
+        Some(start_cp),
+        finish_cp,
+        &HashSet::new(),
+        random_order,
+    );
+    let segments = crate::course_order::course_segments(&seq, &seq_cluster);
+    for i in 0..segments.len().saturating_sub(1) {
+        match (&segments[i], &segments[i + 1]) {
+            (CourseSegment::Fixed(a), CourseSegment::Cluster(cps))
+                if *a == from_cp && cps.contains(&to_cp) =>
+            {
+                return (
+                    HashSet::from([from_cp]),
+                    cps.iter().copied().collect(),
+                );
+            }
+            (CourseSegment::Cluster(cps), CourseSegment::Fixed(b))
+                if cps.contains(&from_cp) && *b == to_cp =>
+            {
+                return (
+                    cps.iter().copied().collect(),
+                    HashSet::from([to_cp]),
+                );
+            }
+            _ => {}
+        }
     }
-    seq.windows(2)
-        .filter(|pair| pair[0] != pair[1])
-        .map(|pair| (pair[0], pair[1]))
-        .collect()
+    (HashSet::from([from_cp]), HashSet::from([to_cp]))
 }
 
 /// Subtract time from `from_cp` to the next course control (extras in between count).
@@ -4060,6 +4147,7 @@ fn apply_orient_exclusion_rules(
     course_id: Option<i64>,
     rules: &[ExclusionRule],
     elapsed_seconds: i64,
+    random_order: &[bool],
 ) -> i64 {
     if window.len() < 2 || rules.is_empty() {
         return elapsed_seconds;
@@ -4085,11 +4173,19 @@ fn apply_orient_exclusion_rules(
                 None => continue,
             }
         };
+        let (from_set, to_set) = exclusion_endpoint_sets(
+            rule.from_cp,
+            to_cp,
+            required,
+            start_cp,
+            finish_cp,
+            random_order,
+        );
         let mut pending: Option<NaiveDateTime> = None;
         for m in window {
-            if m.cp_number == rule.from_cp {
+            if from_set.contains(&m.cp_number) {
                 pending = Some(m.mark_time);
-            } else if m.cp_number == to_cp {
+            } else if to_set.contains(&m.cp_number) {
                 if let Some(t0) = pending.take() {
                     let delta = (m.mark_time - t0).num_seconds().max(0);
                     let cap = match rule.max_leg_seconds {
@@ -4480,20 +4576,28 @@ fn load_manual_corrections(
     Ok(out)
 }
 
-fn load_course_controls_by_id(conn: &Connection, course_id: i64) -> Result<Vec<i64>, String> {
+fn load_course_controls_with_order_by_id(
+    conn: &Connection,
+    course_id: i64,
+) -> Result<(Vec<i64>, Vec<bool>), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT cp_number FROM course_controls WHERE course_id = ? ORDER BY seq ASC",
+            "SELECT cp_number, COALESCE(random_order, 0) FROM course_controls WHERE course_id = ? ORDER BY seq ASC",
         )
         .map_err(|e| format!("prepare course controls by id: {e}"))?;
     let rows = stmt
-        .query_map(params![course_id], |r| r.get::<_, i64>(0))
+        .query_map(params![course_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("query course controls by id: {e}"))?;
-    let mut out = Vec::new();
+    let mut controls = Vec::new();
+    let mut random_order = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| format!("read course control: {e}"))?);
+        let (cp, flag) = row.map_err(|e| format!("read course control: {e}"))?;
+        controls.push(cp);
+        random_order.push(flag != 0);
     }
-    Ok(out)
+    Ok((controls, random_order))
 }
 
 fn load_course_controls(conn: &Connection, course_name: &str) -> Result<Vec<i64>, String> {
@@ -7421,6 +7525,85 @@ pub fn set_map_scale_denominator(conn: &Connection, denominator: Option<i64>) ->
     Ok(())
 }
 
+const IOF_CONTROL_POSITIONS_MM_KEY: &str = "iof_control_positions_mm";
+
+/// Save Map/Scale + Control/MapPosition from IOF for straight-line pace (mm × scale/1000).
+/// Does not overwrite an existing map scale or already-placed legend coordinates (0…1 map UI).
+pub fn apply_iof_map_geometry(
+    conn: &Connection,
+    map_scale_denominator: Option<i64>,
+    control_positions_mm: &std::collections::BTreeMap<i64, (f64, f64)>,
+) -> Result<(), String> {
+    if let Some(scale) = map_scale_denominator {
+        if scale > 0 && get_map_scale_denominator(conn)?.is_none() {
+            set_map_scale_denominator(conn, Some(scale))?;
+        }
+    }
+    if control_positions_mm.is_empty() {
+        return Ok(());
+    }
+    let mut root = serde_json::Map::new();
+    if let Some(raw) = get_setting_value(conn, IOF_CONTROL_POSITIONS_MM_KEY)? {
+        if let Ok(serde_json::Value::Object(existing)) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            root = existing;
+        }
+    }
+    for (cp, (x, y)) in control_positions_mm {
+        let key = cp.to_string();
+        if root.contains_key(&key) {
+            continue;
+        }
+        root.insert(
+            key,
+            serde_json::json!([x, y]),
+        );
+    }
+    set_setting_value(
+        conn,
+        IOF_CONTROL_POSITIONS_MM_KEY,
+        &serde_json::Value::Object(root).to_string(),
+    )?;
+
+    // Fill empty legend map coords only when there is no raster map (UI expects 0…1 otherwise).
+    let has_raster = get_setting_value(conn, MAP_IMAGE_WIDTH_KEY)?
+        .and_then(|v| v.parse::<f64>().ok())
+        .is_some_and(|w| w > 0.0);
+    if has_raster {
+        return Ok(());
+    }
+    for (cp, (x, y)) in control_positions_mm {
+        let row: Option<(i64, Option<f64>, Option<f64>)> = conn
+            .query_row(
+                "SELECT id, map_x, map_y FROM cp_legends WHERE cp_number = ? LIMIT 1",
+                params![cp],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("read cp_legend for IOF map pos: {e}"))?;
+        match row {
+            Some((id, map_x, map_y)) => {
+                if map_x.is_some() && map_y.is_some() {
+                    continue;
+                }
+                conn.execute(
+                    "UPDATE cp_legends SET map_x = ?, map_y = ? WHERE id = ?",
+                    params![x, y, id],
+                )
+                .map_err(|e| format!("update cp_legend IOF map pos: {e}"))?;
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO cp_legends(cp_number, name, map_x, map_y) VALUES(?, '', ?, ?)",
+                    params![cp, x, y],
+                )
+                .map_err(|e| format!("insert cp_legend IOF map pos: {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn set_course_map_image_size(
     conn: &Connection,
     width: f64,
@@ -8607,9 +8790,15 @@ pub fn import_courses_content(
     reset: bool,
 ) -> Result<CoursesImportSummary, String> {
     let xml = crate::iof_course::looks_like_iof_course_xml(csv_content);
-    let parsed = if xml {
-        crate::iof_course::parse_iof_course_xml(csv_content)?
-            .into_iter()
+    let iof_data = if xml {
+        Some(crate::iof_course::parse_iof_course_data(csv_content)?)
+    } else {
+        None
+    };
+    let parsed = if let Some(ref data) = iof_data {
+        data.courses
+            .iter()
+            .cloned()
             .map(ParsedCourse::from_iof)
             .collect::<Vec<_>>()
     } else {
@@ -8662,6 +8851,13 @@ pub fn import_courses_content(
             .map_err(|e| format!("count courses: {e}"))?;
         tx.commit()
             .map_err(|e| format!("commit courses import: {e}"))?;
+        if let Some(data) = iof_data.as_ref() {
+            apply_iof_map_geometry(
+                conn,
+                data.map_scale_denominator,
+                &data.control_positions_mm,
+            )?;
+        }
         return Ok(CoursesImportSummary {
             imported_rows,
             total_rows,
@@ -8691,6 +8887,13 @@ pub fn import_courses_content(
         .map_err(|e| format!("count courses: {e}"))?;
     tx.commit()
         .map_err(|e| format!("commit courses import: {e}"))?;
+    if let Some(data) = iof_data.as_ref() {
+        apply_iof_map_geometry(
+            conn,
+            data.map_scale_denominator,
+            &data.control_positions_mm,
+        )?;
+    }
     Ok(CoursesImportSummary {
         imported_rows,
         total_rows,
@@ -11092,9 +11295,15 @@ fn prepare_orient_exclusion_fields(
     let course_id = course_id.ok_or_else(|| "Выберите дистанцию".to_string())?;
     require_course_id(conn, course_id)?;
     let settings = get_settings(conn)?;
-    let controls = load_course_controls_by_id(conn, course_id)?;
+    let (controls, random_order) = load_course_controls_with_order_by_id(conn, course_id)?;
     let removed = load_global_removed_course_cps(conn)?;
-    let legs = orient_course_legs(&controls, settings.start_cp, settings.finish_cp, &removed);
+    let legs = orient_course_legs(
+        &controls,
+        settings.start_cp,
+        settings.finish_cp,
+        &removed,
+        &random_order,
+    );
     if !legs.iter().any(|(from, to)| *from == from_cp && *to == to_cp) {
         return Err(format!(
             "Перегона {from_cp} → {to_cp} нет на выбранной дистанции"
@@ -13299,10 +13508,21 @@ mod tests {
 
     #[test]
     fn orient_course_legs_keeps_repeated_from_cp() {
-        let legs = orient_course_legs(&[58, 68, 58], Some(241), 250, &HashSet::new());
+        let legs = orient_course_legs(&[58, 68, 58], Some(241), 250, &HashSet::new(), &[]);
         assert!(legs.contains(&(58, 68)));
         assert!(legs.contains(&(58, 250)));
         assert_eq!(legs, vec![(241, 58), (58, 68), (68, 58), (58, 250)]);
+    }
+
+    #[test]
+    fn orient_course_legs_keeps_cluster_entry_and_exit() {
+        let controls = [31, 32, 33, 34, 35, 36];
+        let random = [false, false, true, true, true, false];
+        let legs = orient_course_legs(&controls, Some(241), 240, &HashSet::new(), &random);
+        assert_eq!(
+            legs,
+            vec![(241, 31), (31, 32), (32, 33), (35, 36), (36, 240)]
+        );
     }
 
     #[test]
@@ -13321,12 +13541,12 @@ mod tests {
         let rules = [orient_rule(32, None)];
         // 10:10→10:20 (600s) and 10:25→10:40 (900s)
         assert_eq!(
-            apply_orient_exclusion_rules(&window, &required, 241, 240, None, &rules, elapsed),
+            apply_orient_exclusion_rules(&window, &required, 241, 240, None, &rules, elapsed, &[]),
             2100
         );
         let capped = [orient_rule(32, Some(300))];
         assert_eq!(
-            apply_orient_exclusion_rules(&window, &required, 241, 240, None, &capped, elapsed),
+            apply_orient_exclusion_rules(&window, &required, 241, 240, None, &capped, elapsed, &[]),
             3000
         );
     }
@@ -13342,11 +13562,11 @@ mod tests {
         let elapsed = 3600;
         let rules = [orient_course_rule(241, 1)];
         assert_eq!(
-            apply_orient_exclusion_rules(&window, &required, 241, 240, Some(1), &rules, elapsed),
+            apply_orient_exclusion_rules(&window, &required, 241, 240, Some(1), &rules, elapsed, &[]),
             3000
         );
         assert_eq!(
-            apply_orient_exclusion_rules(&window, &required, 241, 240, Some(2), &rules, elapsed),
+            apply_orient_exclusion_rules(&window, &required, 241, 240, Some(2), &rules, elapsed, &[]),
             3600
         );
     }

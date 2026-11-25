@@ -20,6 +20,7 @@ type CourseRow = {
   id: number;
   name: string;
   controls: number[];
+  randomOrder?: boolean[];
 };
 
 type NativeSettings = {
@@ -75,7 +76,7 @@ const courseLegOptions = computed(() => {
     from: leg.from,
     to: leg.to,
     used: usedLegs.value.has(legKey(leg.from, leg.to)),
-    label: `${formatCp(leg.from)} → ${formatCp(leg.to)}`,
+    label: leg.label,
   }));
 });
 
@@ -111,16 +112,72 @@ function formatCp(cp: number): string {
   return String(cp);
 }
 
-function courseLegs(course: CourseRow): { from: number; to: number }[] {
-  const controls = filteredControls(course);
+type CourseSeg = { kind: "fixed"; cp: number } | { kind: "cluster"; cps: number[] };
+
+function courseSegments(seq: number[], flags: boolean[]): CourseSeg[] {
+  const out: CourseSeg[] = [];
+  let i = 0;
+  while (i < seq.length) {
+    if (flags[i]) {
+      const cps: number[] = [];
+      while (i < seq.length && flags[i]) {
+        cps.push(seq[i]);
+        i += 1;
+      }
+      out.push({ kind: "cluster", cps });
+    } else {
+      out.push({ kind: "fixed", cp: seq[i] });
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function courseLegs(course: CourseRow): { from: number; to: number; label: string }[] {
+  const kept: number[] = [];
+  const keptFlags: boolean[] = [];
+  for (let i = 0; i < course.controls.length; i += 1) {
+    const cp = course.controls[i];
+    if (removedCps.value.has(cp)) continue;
+    kept.push(cp);
+    keptFlags.push(Boolean(course.randomOrder?.[i]));
+  }
   const seq: number[] = [];
-  if (startCp.value != null && controls[0] !== startCp.value) seq.push(startCp.value);
-  seq.push(...controls);
-  if (finishCp.value && seq[seq.length - 1] !== finishCp.value) seq.push(finishCp.value);
-  const legs: { from: number; to: number }[] = [];
-  for (let i = 0; i < seq.length - 1; i += 1) {
-    if (seq[i] === seq[i + 1]) continue;
-    legs.push({ from: seq[i], to: seq[i + 1] });
+  const seqCluster: boolean[] = [];
+  if (startCp.value != null && kept[0] !== startCp.value) {
+    seq.push(startCp.value);
+    seqCluster.push(false);
+  }
+  for (let i = 0; i < kept.length; i += 1) {
+    seq.push(kept[i]);
+    seqCluster.push(keptFlags[i]);
+  }
+  if (finishCp.value && seq[seq.length - 1] !== finishCp.value) {
+    seq.push(finishCp.value);
+    seqCluster.push(false);
+  }
+  const legs: { from: number; to: number; label: string }[] = [];
+  const segments = courseSegments(seq, seqCluster);
+  const clusterLabel = (cps: number[]) => `[${cps.join("·")}]`;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const a = segments[i];
+    const b = segments[i + 1];
+    if (a.kind === "fixed" && b.kind === "fixed") {
+      if (a.cp === b.cp) continue;
+      legs.push({ from: a.cp, to: b.cp, label: `${formatCp(a.cp)} → ${formatCp(b.cp)}` });
+    } else if (a.kind === "fixed" && b.kind === "cluster") {
+      legs.push({
+        from: a.cp,
+        to: b.cps[0],
+        label: `${formatCp(a.cp)} → ${clusterLabel(b.cps)}`,
+      });
+    } else if (a.kind === "cluster" && b.kind === "fixed") {
+      legs.push({
+        from: a.cps[a.cps.length - 1],
+        to: b.cp,
+        label: `${clusterLabel(a.cps)} → ${formatCp(b.cp)}`,
+      });
+    }
   }
   return legs;
 }
@@ -140,16 +197,47 @@ function filteredControls(course: CourseRow): number[] {
   return course.controls.filter((cp) => !removedCps.value.has(cp));
 }
 
-function toCpText(rule: ExclusionRuleRow): string {
-  if (rule.to_cp > 0) return formatCp(rule.to_cp);
-  const course =
+function ruleCourse(rule: ExclusionRuleRow): CourseRow | undefined {
+  return (
     courses.value.find((item) => item.id === rule.course_id) ??
     (rule.course_name
       ? courses.value.find((item) => item.name === rule.course_name)
-      : undefined);
-  if (!course) return "—";
-  const match = courseLegs(course).find((leg) => leg.from === rule.from_cp);
-  return match ? formatCp(match.to) : "—";
+      : undefined)
+  );
+}
+
+function toCpText(rule: ExclusionRuleRow): string {
+  const course = ruleCourse(rule);
+  if (course) {
+    const to = rule.to_cp > 0
+      ? rule.to_cp
+      : courseLegs(course).find((leg) => leg.from === rule.from_cp)?.to;
+    if (to != null && to > 0) {
+      const match = courseLegs(course).find(
+        (leg) => leg.from === rule.from_cp && leg.to === to,
+      );
+      if (match) {
+        const parts = match.label.split(" → ");
+        return parts[1] ?? match.label;
+      }
+      return formatCp(to);
+    }
+  }
+  if (rule.to_cp > 0) return formatCp(rule.to_cp);
+  return "—";
+}
+
+function fromCpText(rule: ExclusionRuleRow): string {
+  const course = ruleCourse(rule);
+  if (!course || rule.to_cp <= 0) return formatCp(rule.from_cp);
+  const match = courseLegs(course).find(
+    (leg) => leg.from === rule.from_cp && leg.to === rule.to_cp,
+  );
+  if (match) {
+    const parts = match.label.split(" → ");
+    return parts[0] ?? formatCp(rule.from_cp);
+  }
+  return formatCp(rule.from_cp);
 }
 
 function courseText(rule: ExclusionRuleRow): string {
@@ -363,7 +451,7 @@ defineExpose({ refresh });
           </tr>
           <tr v-for="rule in rules" :key="rule.id">
             <td>{{ courseText(rule) }}</td>
-            <td>{{ rule.from_cp }}</td>
+            <td>{{ fromCpText(rule) }}</td>
             <td>{{ toCpText(rule) }}</td>
             <td>{{ maxTimeText(rule.max_leg_seconds) }}</td>
             <td>

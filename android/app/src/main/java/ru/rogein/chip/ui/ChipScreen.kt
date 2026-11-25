@@ -97,12 +97,14 @@ import ru.rogein.chip.parse.ChipCellLog
 import ru.rogein.chip.parse.ChipMemoryLog
 import ru.rogein.chip.parse.SPORT_ORIENT
 import ru.rogein.chip.parse.StationActiveSpeed
+import ru.rogein.chip.parse.TestCoursePlan
 import ru.rogein.chip.parse.field.FieldSyncMode
 import ru.rogein.chip.parse.field.FieldSyncRole
 import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.nextFreeLogicalId
 import ru.rogein.chip.parse.nextFreeTeamId
 import ru.rogein.chip.parse.parseDaySeconds
+import ru.rogein.chip.parse.resolveMapMetersPerUnit
 import ru.rogein.chip.startlist.StartCourse
 import ru.rogein.chip.startlist.StartPerson
 import java.text.SimpleDateFormat
@@ -423,6 +425,11 @@ fun ChipScreen(viewModel: ChipQueueViewModel, csvPicker: CsvPicker, csvShare: Cs
                     awardGroups = EventStore.awardGroups(settings),
                     competitionDate = settings.competitionDate,
                     onEditorOpen = { resultsPersonEditor = it },
+                    cpPositions = EventStore.cpPositionsForPace(settings),
+                    metersPerUnit = resolveMapMetersPerUnit(
+                        settings.metersPerPixel,
+                        settings.mapScaleDenominator,
+                    ),
                 )
                 AppSection.More -> when (morePage) {
                     MorePage.Menu -> MoreMenu(onOpen = viewModel::setMorePage, sportKind = settings.sportKind)
@@ -1587,8 +1594,14 @@ private fun TestsPanel(
     val rogaine = isRogaine(sportKind)
     val person = people.find { it.id == chipLogicalId }
     val courseNames = courses.map { it.name }
-    val currentControls = courses.find { it.name.equals(testCourse, ignoreCase = true) }?.controls.orEmpty()
+    val currentCourse = courses.find { it.name.equals(testCourse, ignoreCase = true) }
+    val currentControls = currentCourse?.controls.orEmpty()
         .filter { it != CP_START && it != CP_FINISH }
+    val controlsLabel = if (currentCourse != null && currentControls.isNotEmpty()) {
+        TestCoursePlan.formatControlsLabel(currentCourse.controls, currentCourse.randomOrder)
+    } else {
+        ""
+    }
     val canWriteOrient = chipReady && person != null && testCourse.isNotBlank() && currentControls.isNotEmpty() && !busy
     val canWriteRogaine = chipReady && person != null && !busy
     val canDump = chipReady && !busy
@@ -1652,7 +1665,7 @@ private fun TestsPanel(
                     )
                 } else {
                     Text(
-                        "КП: ${currentControls.joinToString(" → ")}",
+                        "КП: $controlsLabel",
                         color = Color(0xFF5C5C5C),
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 2,

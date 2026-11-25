@@ -373,6 +373,7 @@ export function buildRouteStats(opts: {
   totalMeters?: number | null;
   courseControls?: number[];
   legMeters?: Array<number | null>;
+  randomOrder?: boolean[];
 }): RouteStats | null {
   const timed = timedWindow(opts.selfMarks, opts.startCp, opts.finishCp);
   const pairs = collectPairs(timed);
@@ -413,15 +414,27 @@ export function buildRouteStats(opts: {
     const splits = (splitsByPair.get(key) ?? [pair.splitSec]).slice().sort((a, b) => a - b);
     const bestSec = splits[0] ?? null;
     const faster = splits.filter((sec) => sec < pair.splitSec).length;
+    const mapPositions: Record<number, { x: number; y: number }> = {};
+    let mapMpu: number | null = null;
+    if (opts.map && opts.map.width > 0 && opts.map.height > 0 && opts.map.metersPerPixel > 0) {
+      mapMpu = opts.map.metersPerPixel;
+      for (const pt of opts.map.points) {
+        if (pt.cp == null) continue;
+        mapPositions[pt.cp] = { x: pt.x * opts.map.width, y: pt.y * opts.map.height };
+      }
+    }
     const xmlMeters =
-      !opts.rogaine && opts.courseControls && opts.legMeters
+      !opts.rogaine && opts.courseControls
         ? courseLegMeters(
             opts.courseControls,
-            opts.legMeters,
+            opts.legMeters ?? [],
             pair.from,
             pair.to,
             startCp ?? 0,
             finishCp ?? 0,
+            opts.randomOrder ?? [],
+            mapPositions,
+            mapMpu,
           )
         : null;
     let meters = xmlMeters;

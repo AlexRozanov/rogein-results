@@ -411,6 +411,20 @@ export function formatPaceMinPerKm(meters: number | null | undefined, seconds: n
   return `${min}:${String(sec).padStart(2, "0")}/км`;
 }
 
+export function mapStraightMeters(
+  fromCp: number,
+  toCp: number,
+  positions: Record<number, { x: number; y: number }>,
+  metersPerUnit: number | null | undefined,
+): number | null {
+  if (metersPerUnit == null || !(metersPerUnit > 0)) return null;
+  const a = positions[fromCp];
+  const b = positions[toCp];
+  if (!a || !b) return null;
+  const meters = Math.hypot(a.x - b.x, a.y - b.y) * metersPerUnit;
+  return Number.isFinite(meters) && meters > 0 ? Math.round(meters) : null;
+}
+
 export function courseLegMeters(
   controls: number[],
   legMeters: Array<number | null | undefined>,
@@ -418,22 +432,59 @@ export function courseLegMeters(
   toCp: number,
   startCp: number,
   finishCp: number,
+  randomOrder: unknown = [],
+  positions: Record<number, { x: number; y: number }> = {},
+  metersPerUnit: number | null | undefined = null,
 ): number | null {
-  if (!legMeters.length) return null;
-  const seq = [startCp, ...controls, finishCp];
-  const fromIdx = seq.indexOf(fromCp);
-  const toIdx = seq.indexOf(toCp);
-  if (fromIdx < 0 || toIdx !== fromIdx + 1) return null;
-  const meters = Number(legMeters[fromIdx]);
-  return Number.isFinite(meters) && meters > 0 ? meters : null;
+  if (legMeters.length) {
+    const seq = [startCp, ...controls, finishCp];
+    const flags = [false, ...asBoolList(randomOrder, controls.length), false];
+    const fromIdx = seq.indexOf(fromCp);
+    const toIdx = seq.indexOf(toCp);
+    if (fromIdx >= 0 && toIdx === fromIdx + 1) {
+      const meters = Number(legMeters[fromIdx]);
+      if (Number.isFinite(meters) && meters > 0) return meters;
+    }
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const segments = courseSegments(seq, flags);
+      let idx = 0;
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        const a = segments[i];
+        const b = segments[i + 1];
+        if (
+          a.kind === "fixed" &&
+          b.kind === "cluster" &&
+          a.cp === fromCp &&
+          b.cps.includes(toCp)
+        ) {
+          const meters = Number(legMeters[idx]);
+          if (Number.isFinite(meters) && meters > 0) return meters;
+        }
+        if (
+          a.kind === "cluster" &&
+          b.kind === "fixed" &&
+          a.cps.includes(fromCp) &&
+          b.cp === toCp
+        ) {
+          const meters = Number(legMeters[idx + a.cps.length - 1]);
+          if (Number.isFinite(meters) && meters > 0) return meters;
+        }
+        idx += a.kind === "fixed" ? 1 : a.cps.length;
+      }
+    }
+  }
+  return mapStraightMeters(fromCp, toCp, positions, metersPerUnit);
 }
 
 export function hasCourseDistances(
   lengthMeters: number | null | undefined,
   legMeters: Array<number | null | undefined>,
+  metersPerUnit: number | null | undefined = null,
+  positionCount = 0,
 ): boolean {
   if (lengthMeters != null && lengthMeters > 0) return true;
-  return legMeters.some((m) => m != null && Number(m) > 0);
+  if (legMeters.some((m) => m != null && Number(m) > 0)) return true;
+  return metersPerUnit != null && metersPerUnit > 0 && positionCount >= 2;
 }
 
 function orientDiagnosticLabel(code: string): string {

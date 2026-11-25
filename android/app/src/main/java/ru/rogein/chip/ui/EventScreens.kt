@@ -143,6 +143,7 @@ import ru.rogein.chip.parse.STATUS_OK
 import ru.rogein.chip.parse.addableCourseCps
 import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.buildOrientSplitPrint
+import ru.rogein.chip.parse.formatOrientLegLabel
 import ru.rogein.chip.parse.normalizeRandomOrder
 import ru.rogein.chip.parse.resultStatusLine
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
@@ -157,6 +158,7 @@ import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.uniqueCourseCopyName
 import ru.rogein.chip.parse.courseProgress
 import ru.rogein.chip.parse.filterCourseCps
+import ru.rogein.chip.parse.filterCourseWithOrder
 import ru.rogein.chip.parse.nextFreeTeamId
 import ru.rogein.chip.parse.formatDayClock
 import ru.rogein.chip.parse.formatElapsed
@@ -2345,9 +2347,17 @@ private fun CourseEditorCard(
             )
             legs.forEach { (fromCp, toCp) ->
                 val excluded = (fromCp to toCp) in excludedLegs
+                val legLabel = formatOrientLegLabel(
+                    fromCp,
+                    toCp,
+                    course.controls,
+                    settings.startCp,
+                    settings.finishCp,
+                    course.randomOrder,
+                    formatCp = { formatCp(it, settings) },
+                )
                 CourseLegExclusionRow(
-                    fromLabel = formatCp(fromCp, settings),
-                    toLabel = formatCp(toCp, settings),
+                    label = legLabel,
                     excluded = excluded,
                     onClick = { onToggleExclusion(course.name, fromCp, toCp) },
                 )
@@ -2400,8 +2410,7 @@ private fun CourseEditorCard(
 
 @Composable
 private fun CourseLegExclusionRow(
-    fromLabel: String,
-    toLabel: String,
+    label: String,
     excluded: Boolean,
     onClick: () -> Unit,
 ) {
@@ -2414,7 +2423,7 @@ private fun CourseLegExclusionRow(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            "$fromLabel → $toLabel",
+            label,
             color = if (excluded) Danger else OkGreen,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f),
@@ -2812,6 +2821,8 @@ fun ResultsScreen(
     awardGroups: List<AwardGroupView> = emptyList(),
     competitionDate: String = "",
     onEditorOpen: (Boolean) -> Unit = {},
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    metersPerUnit: Double? = null,
 ) {
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(emptySet<String>()) }
@@ -2883,6 +2894,8 @@ fun ResultsScreen(
             rogaine = rogaine,
             startClockSeconds = startClockSeconds,
             legendCps = legendCps,
+            cpPositions = cpPositions,
+            metersPerUnit = metersPerUnit,
         )
     } else {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -3226,10 +3239,14 @@ private fun ResultRowDetails(
     rogaine: Boolean = false,
     startClockSeconds: Int? = null,
     legendCps: List<Int> = emptyList(),
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    metersPerUnit: Double? = null,
 ) {
     val id = row.logicalId
-    val required = filterCourseCps(
-        courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+    val course = courses.find { it.name.equals(row.course, true) }
+    val (required, requiredRandom) = filterCourseWithOrder(
+        course?.controls.orEmpty(),
+        course?.randomOrder.orEmpty(),
         removedCps,
     )
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
@@ -3259,7 +3276,6 @@ private fun ResultRowDetails(
         else punchCopyTargets(row.logicalId, row.teamId, copyPeople, copyFinishes)
     }
     val copiedFrom = EventStore.copiedFromLogicalId(row.logicalId, corrections)
-    val course = courses.find { it.name.equals(row.course, true) }
     val title = buildString {
         append("№ ${row.logicalId ?: "—"}")
         if (row.name.isNotBlank()) append(" · ${row.name}")
@@ -3462,6 +3478,10 @@ private fun ResultRowDetails(
             lengthMeters = course?.lengthMeters,
             courseControls = course?.controls.orEmpty(),
             legMeters = course?.legMeters.orEmpty(),
+            randomOrder = requiredRandom,
+            courseRandomOrder = course?.randomOrder.orEmpty(),
+            cpPositions = cpPositions,
+            metersPerUnit = metersPerUnit,
         )
     }
     if (courseChangeOpen && id != null) {
@@ -3589,6 +3609,10 @@ private fun UsedMarksDialog(
     lengthMeters: Int? = null,
     courseControls: List<Int> = emptyList(),
     legMeters: List<Int?> = emptyList(),
+    randomOrder: List<Boolean> = emptyList(),
+    courseRandomOrder: List<Boolean> = emptyList(),
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    metersPerUnit: Double? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3630,6 +3654,10 @@ private fun UsedMarksDialog(
                         courseControls = courseControls,
                         lengthMeters = lengthMeters,
                         legMeters = legMeters,
+                        randomOrder = randomOrder,
+                        courseRandomOrder = courseRandomOrder,
+                        cpPositions = cpPositions,
+                        metersPerUnit = metersPerUnit,
                     )
                     if (print == null) {
                         Text("Нет отметок", color = Muted)
@@ -4148,7 +4176,21 @@ fun ExclusionsScreen(
                     current = selectedLeg,
                     placeholder = "Выберите перегон",
                     optionLabel = { (from, to) ->
-                        "${formatCp(from, settings)} → ${formatCp(to, settings)}"
+                        val course = selectedCourse
+                        if (course == null) {
+                            "${formatCp(from, settings)} → ${formatCp(to, settings)}"
+                        } else {
+                            formatOrientLegLabel(
+                                from,
+                                to,
+                                course.controls,
+                                settings.startCp,
+                                settings.finishCp,
+                                course.randomOrder,
+                                removed,
+                                formatCp = { formatCp(it, settings) },
+                            )
+                        }
                     },
                     onSelect = { selectedLeg = it },
                 )
@@ -4860,8 +4902,10 @@ private fun addableCpsFor(
     finishCp: Int,
 ): List<Pair<Int, Int>> {
     val id = row.logicalId ?: return emptyList()
-    val required = filterCourseCps(
-        courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+    val course = courses.find { it.name.equals(row.course, true) }
+    val (required, randomOrder) = filterCourseWithOrder(
+        course?.controls.orEmpty(),
+        course?.randomOrder.orEmpty(),
         removedCps,
     )
     val addCounts = EventStore.addCpCounts(id, row.course, corrections)
@@ -4869,7 +4913,9 @@ private fun addableCpsFor(
     val base = marksWithAddedStart(row.punches, startCp, addCounts, addTimes)
     val window = orientPunchWindow(base, startCp, finishCp)
     val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp, addTimes)
-    val fromCourse = addableCourseCps(courseProgress(expanded.map { it.cp }, required))
+    val fromCourse = addableCourseCps(
+        courseProgress(expanded.map { it.cp }, required, randomOrder = randomOrder),
+    )
     val startMissing = startCp > 0 &&
         row.punches.none { it.cp == startCp } &&
         (addCounts[startCp] ?: 0) == 0

@@ -13,6 +13,15 @@ pub struct IofCourse {
     pub leg_meters: Vec<Option<i64>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IofCourseData {
+    pub courses: Vec<IofCourse>,
+    /// Map scale denominator (1:4000 → 4000).
+    pub map_scale_denominator: Option<i64>,
+    /// Control MapPosition coordinates, usually millimetres on the printed map.
+    pub control_positions_mm: BTreeMap<i64, (f64, f64)>,
+}
+
 pub fn looks_like_iof_course_xml(text: &str) -> bool {
     let trimmed = text.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
     let head: String = trimmed.chars().take(400).collect::<String>().to_ascii_lowercase();
@@ -20,13 +29,46 @@ pub fn looks_like_iof_course_xml(text: &str) -> bool {
 }
 
 pub fn parse_iof_course_xml(text: &str) -> Result<Vec<IofCourse>, String> {
+    Ok(parse_iof_course_data(text)?.courses)
+}
+
+pub fn parse_iof_course_data(text: &str) -> Result<IofCourseData, String> {
     let xml = strip_xml_comments(text);
     let root_inner = element_inner(&xml, "CourseData").ok_or_else(|| {
         "Это не файл дистанций IOF XML (нужен CourseData)".to_string()
     })?;
     let mut rows = Vec::new();
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    let mut map_scale_denominator: Option<i64> = None;
+    let mut control_positions_mm: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
     for race_inner in element_inners(root_inner, "RaceCourseData") {
+        if map_scale_denominator.is_none() {
+            if let Some(map_inner) = element_inner(race_inner, "Map") {
+                if let Some(scale) = parse_meters(&child_text(map_inner, "Scale")) {
+                    if scale > 0 {
+                        map_scale_denominator = Some(scale);
+                    }
+                }
+            }
+        }
+        for (_attrs, control_inner) in elements(race_inner, "Control") {
+            let id = child_text(control_inner, "Id");
+            let Ok(cp) = id.parse::<i64>() else { continue };
+            if cp <= 0 {
+                continue;
+            }
+            let Some((pos_attrs, _)) = elements(control_inner, "MapPosition").into_iter().next()
+            else {
+                continue;
+            };
+            let Some(x) = pos_attrs.get("x").and_then(|s| s.parse::<f64>().ok()) else {
+                continue;
+            };
+            let Some(y) = pos_attrs.get("y").and_then(|s| s.parse::<f64>().ok()) else {
+                continue;
+            };
+            control_positions_mm.entry(cp).or_insert((x, y));
+        }
         for (attrs, course_inner) in elements(race_inner, "Course") {
             let _ = attrs;
             let name = child_text(course_inner, "Name");
@@ -47,7 +89,11 @@ pub fn parse_iof_course_xml(text: &str) -> Result<Vec<IofCourse>, String> {
     if rows.is_empty() {
         return Err("В IOF XML нет дистанций".to_string());
     }
-    Ok(rows)
+    Ok(IofCourseData {
+        courses: rows,
+        map_scale_denominator,
+        control_positions_mm,
+    })
 }
 
 pub fn courses_need_replace(
@@ -325,7 +371,8 @@ mod tests {
     #[test]
     fn parse_ocad_sample() {
         let text = include_str!("fixtures/iof-courses.xml");
-        let rows = parse_iof_course_xml(text).unwrap();
+        let data = parse_iof_course_data(text).unwrap();
+        let rows = &data.courses;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name, "D1");
         assert_eq!(rows[0].length_meters, Some(4820));
@@ -339,6 +386,8 @@ mod tests {
         assert_eq!(rows[1].controls.len(), 14);
         assert_eq!(rows[1].leg_meters.len(), 15);
         assert!(rows[0].random_order.iter().all(|v| !*v));
+        assert_eq!(data.map_scale_denominator, Some(4000));
+        assert_eq!(data.control_positions_mm.get(&31), Some(&(-13.5, 78.2)));
     }
 
     #[test]

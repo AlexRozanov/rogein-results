@@ -22,6 +22,7 @@ import ru.rogein.chip.parse.coursesNeedReplace
 import ru.rogein.chip.parse.normalizeRandomOrder
 import ru.rogein.chip.parse.looksLikeIofCourseXml
 import ru.rogein.chip.parse.mergeCourseGeometry
+import ru.rogein.chip.parse.parseIofCourseData
 import ru.rogein.chip.parse.EventPackCpTypeRuleFile
 import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.FormatCsvRow
@@ -430,10 +431,22 @@ class StartListStore(
         }
     }
 
-    suspend fun importCoursesCsv(text: String, reset: Boolean): String {
-        val rows = CsvImport.courses(text)
+    data class CoursesImportResult(
+        val message: String,
+        val mapScaleDenominator: Int? = null,
+        val controlPositionsMm: Map<Int, Pair<Double, Double>> = emptyMap(),
+    )
+
+    suspend fun importCoursesCsv(text: String, reset: Boolean): CoursesImportResult {
+        val iof = if (looksLikeIofCourseXml(text)) parseIofCourseData(text) else null
+        val rows = iof?.courses ?: CsvImport.courses(text)
+        val mapExtras = CoursesImportResult(
+            message = "",
+            mapScaleDenominator = iof?.mapScaleDenominator,
+            controlPositionsMm = iof?.controlPositionsMm.orEmpty(),
+        )
         val existing = dao.listCourses()
-        if (looksLikeIofCourseXml(text) && !reset && existing.isNotEmpty()) {
+        if (iof != null && !reset && existing.isNotEmpty()) {
             val pairs = existing.map {
                 CourseOrderSnapshot(
                     name = it.name,
@@ -457,7 +470,7 @@ class StartListStore(
                 dao.upsertCourse(entity)
                 rememberCourseEntity(entity)
             }
-            return "Дистанции: длины и перегоны дописаны для ${rows.size}."
+            return mapExtras.copy(message = "Дистанции: длины и перегоны дописаны для ${rows.size}.")
         }
         if (reset) {
             val keep = rows.map { it.name.lowercase() }.toSet()
@@ -474,7 +487,7 @@ class StartListStore(
             dao.upsertCourse(entity)
             rememberCourseEntity(entity)
         }
-        return "Дистанции: ${rows.size}, КП загружены."
+        return mapExtras.copy(message = "Дистанции: ${rows.size}, КП загружены.")
     }
 
     suspend fun importFormatsCsv(text: String, reset: Boolean): Pair<String, List<FormatCsvRow>> {

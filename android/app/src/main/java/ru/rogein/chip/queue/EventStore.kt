@@ -91,6 +91,8 @@ data class EventSettings(
     val livePublishEnabled: Boolean = true,
     val sportKind: String = SPORT_ORIENT,
     val metersPerPixel: Double? = null,
+    /** Знаменатель масштаба карты из IOF (1:4000 → 4000), для MapPosition в мм. */
+    val mapScaleDenominator: Int? = null,
     val mapWidth: Int? = null,
     val mapHeight: Int? = null,
     val mapPointsJson: String = "",
@@ -125,6 +127,8 @@ data class LegendView(
     val cp: Int,
     val name: String,
     val type: String,
+    val mapX: Double? = null,
+    val mapY: Double? = null,
 )
 
 data class ScoredResult(
@@ -182,9 +186,62 @@ class EventStore(
         )
         eventDao.upsertSetting(SettingEntity("sport_kind", normalizeSportKind(next.sportKind)))
         eventDao.upsertSetting(SettingEntity("meters_per_pixel", next.metersPerPixel?.toString().orEmpty()))
+        eventDao.upsertSetting(
+            SettingEntity("map_scale_denominator", next.mapScaleDenominator?.toString().orEmpty()),
+        )
         eventDao.upsertSetting(SettingEntity("map_image_width", next.mapWidth?.toString().orEmpty()))
         eventDao.upsertSetting(SettingEntity("map_image_height", next.mapHeight?.toString().orEmpty()))
         rememberEventConfigIfChanged(prev, next)
+    }
+
+    /** Дописать MapPosition/Scale из IOF, не затирая уже заданные координаты легенды. */
+    suspend fun applyIofMapGeometry(
+        mapScaleDenominator: Int?,
+        controlPositionsMm: Map<Int, Pair<Double, Double>>,
+    ) {
+        if (mapScaleDenominator == null && controlPositionsMm.isEmpty()) return
+        val current = settingsNow()
+        if (mapScaleDenominator != null && mapScaleDenominator > 0 && current.mapScaleDenominator == null) {
+            eventDao.upsertSetting(SettingEntity("map_scale_denominator", mapScaleDenominator.toString()))
+        }
+        if (controlPositionsMm.isEmpty()) return
+        val array = try {
+            JSONArray(current.legendsJson.ifBlank { "[]" })
+        } catch (_: Exception) {
+            JSONArray()
+        }
+        val byCp = LinkedHashMap<Int, JSONObject>()
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val cp = item.optInt("cp", 0).takeIf { it > 0 }
+                ?: item.optInt("cpNumber", 0).takeIf { it > 0 }
+                ?: continue
+            byCp[cp] = item
+        }
+        var changed = false
+        for ((cp, pos) in controlPositionsMm) {
+            val existing = byCp[cp]
+            if (existing != null) {
+                val hasX = existing.has("mapX") && !existing.isNull("mapX")
+                val hasY = existing.has("mapY") && !existing.isNull("mapY")
+                if (hasX && hasY) continue
+                existing.put("mapX", pos.first)
+                existing.put("mapY", pos.second)
+                changed = true
+            } else {
+                byCp[cp] = JSONObject()
+                    .put("cp", cp)
+                    .put("name", "")
+                    .put("type", "")
+                    .put("mapX", pos.first)
+                    .put("mapY", pos.second)
+                changed = true
+            }
+        }
+        if (!changed) return
+        val out = JSONArray()
+        for (item in byCp.values) out.put(item)
+        eventDao.upsertSetting(SettingEntity("cp_legends", out.toString()))
     }
 
     fun saveChipLog(text: String, logicalId: Int?, uid: String): File {
@@ -1146,7 +1203,13 @@ class EventStore(
         }
 
         fun legsFor(course: StartCourse, settings: EventSettings, removed: Set<Int>): List<Pair<Int, Int>> =
-            orientCourseLegs(course.controls, settings.startCp, settings.finishCp, removed)
+            orientCourseLegs(
+                course.controls,
+                settings.startCp,
+                settings.finishCp,
+                removed,
+                course.randomOrder,
+            )
 
         fun removedCps(corrections: List<CorrectionEntity>): Set<Int> =
             corrections.filter { it.type == "remove_cp" && it.logicalId == null }
@@ -1287,6 +1350,7 @@ class EventStore(
                 livePublishEnabled = map["live_publish"] != "0",
                 sportKind = normalizeSportKind(map["sport_kind"]),
                 metersPerPixel = map["meters_per_pixel"]?.toDoubleOrNull(),
+                mapScaleDenominator = map["map_scale_denominator"]?.toIntOrNull()?.takeIf { it > 0 },
                 mapWidth = map["map_image_width"]?.toIntOrNull()?.takeIf { it > 0 },
                 mapHeight = map["map_image_height"]?.toIntOrNull()?.takeIf { it > 0 },
                 mapPointsJson = map["map_points"].orEmpty(),
@@ -1304,10 +1368,14 @@ class EventStore(
                     val cp = item.optInt("cp", 0).takeIf { it > 0 }
                         ?: item.optInt("cpNumber", 0).takeIf { it > 0 }
                         ?: return@mapNotNull null
+                    val mapX = item.optDoubleOrNull("mapX") ?: item.optDoubleOrNull("map_x")
+                    val mapY = item.optDoubleOrNull("mapY") ?: item.optDoubleOrNull("map_y")
                     LegendView(
                         cp = cp,
                         name = item.optString("name").trim(),
                         type = item.optString("type").ifBlank { item.optString("cpType") }.trim(),
+                        mapX = mapX,
+                        mapY = mapY,
                     )
                 }.distinctBy { it.cp }
             } catch (_: Exception) {
@@ -1316,6 +1384,41 @@ class EventStore(
         }
 
         fun legendCps(settings: EventSettings): List<Int> = legends(settings).map { it.cp }
+
+        /** Координаты КП для расчёта темпа (легенда + точки карты старт/финиш). */
+        fun cpPositionsForPace(settings: EventSettings): Map<Int, Pair<Double, Double>> {
+            val out = LinkedHashMap<Int, Pair<Double, Double>>()
+            for (row in legends(settings)) {
+                val x = row.mapX ?: continue
+                val y = row.mapY ?: continue
+                out[row.cp] = x to y
+            }
+            try {
+                val points = JSONArray(settings.mapPointsJson.ifBlank { "[]" })
+                for (i in 0 until points.length()) {
+                    val item = points.optJSONObject(i) ?: continue
+                    val cp = when {
+                        item.optInt("cp", 0) > 0 -> item.optInt("cp")
+                        item.optString("kind").equals("start", true) -> settings.startCp
+                        item.optString("kind").equals("finish", true) -> settings.finishCp
+                        else -> continue
+                    }
+                    if (cp <= 0 || out.containsKey(cp)) continue
+                    val x = item.optDoubleOrNull("mapX") ?: item.optDoubleOrNull("map_x") ?: continue
+                    val y = item.optDoubleOrNull("mapY") ?: item.optDoubleOrNull("map_y") ?: continue
+                    out[cp] = x to y
+                }
+            } catch (_: Exception) {
+                // ignore
+            }
+            return out
+        }
+
+        private fun JSONObject.optDoubleOrNull(key: String): Double? {
+            if (!has(key) || isNull(key)) return null
+            val v = optDouble(key, Double.NaN)
+            return v.takeIf { it.isFinite() }
+        }
 
         fun legendTypeByCp(settings: EventSettings): Map<Int, String> =
             legends(settings).associate { it.cp to it.type }

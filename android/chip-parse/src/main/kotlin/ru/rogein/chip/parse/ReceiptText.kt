@@ -27,6 +27,9 @@ data class SplitReceipt(
     val requiredControls: List<Int> = emptyList(),
     val lengthMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
+    val randomOrder: List<Boolean> = emptyList(),
+    val cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    val metersPerUnit: Double? = null,
 )
 
 object ReceiptText {
@@ -81,6 +84,10 @@ object ReceiptText {
             courseControls = data.courseControls,
             lengthMeters = data.lengthMeters,
             legMeters = data.legMeters,
+            randomOrder = data.randomOrder,
+            courseRandomOrder = data.randomOrder,
+            cpPositions = data.cpPositions,
+            metersPerUnit = data.metersPerUnit,
         )
         if (print == null) {
             lines += "Нет отметок"

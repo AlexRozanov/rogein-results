@@ -18,7 +18,17 @@ fun looksLikeIofCourseXml(text: String): Boolean {
     return head.contains("coursedata") || head.contains("iofversion")
 }
 
-fun parseIofCourseXml(text: String): List<CourseCsvRow> {
+data class IofCourseData(
+    val courses: List<CourseCsvRow>,
+    /** Знаменатель масштаба карты (1:4000 → 4000). */
+    val mapScaleDenominator: Int? = null,
+    /** Координаты КП из MapPosition, обычно в мм на карте. */
+    val controlPositionsMm: Map<Int, Pair<Double, Double>> = emptyMap(),
+)
+
+fun parseIofCourseXml(text: String): List<CourseCsvRow> = parseIofCourseData(text).courses
+
+fun parseIofCourseData(text: String): IofCourseData {
     val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
     val document = try {
         factory.newDocumentBuilder().parse(ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)))
@@ -32,7 +42,21 @@ fun parseIofCourseXml(text: String): List<CourseCsvRow> {
     }
     val rows = ArrayList<CourseCsvRow>()
     val seen = HashSet<String>()
+    var mapScale: Int? = null
+    val positions = LinkedHashMap<Int, Pair<Double, Double>>()
     for (race in childElements(root, "RaceCourseData")) {
+        if (mapScale == null) {
+            mapScale = childElements(race, "Map").firstOrNull()
+                ?.let { childText(it, "Scale").toDoubleOrNull()?.toInt()?.takeIf { s -> s > 0 } }
+        }
+        for (control in childElements(race, "Control")) {
+            val id = childText(control, "Id").trim()
+            val cp = id.toIntOrNull()?.takeIf { it > 0 } ?: continue
+            val pos = childElements(control, "MapPosition").firstOrNull() ?: continue
+            val x = pos.getAttribute("x").toDoubleOrNull() ?: continue
+            val y = pos.getAttribute("y").toDoubleOrNull() ?: continue
+            positions.putIfAbsent(cp, x to y)
+        }
         for (course in childElements(race, "Course")) {
             val name = childText(course, "Name").trim()
             if (name.isEmpty()) continue
@@ -44,7 +68,7 @@ fun parseIofCourseXml(text: String): List<CourseCsvRow> {
         }
     }
     if (rows.isEmpty()) error("В IOF XML нет дистанций")
-    return rows
+    return IofCourseData(rows, mapScale, positions)
 }
 
 data class CourseOrderSnapshot(
@@ -79,8 +103,35 @@ fun mergeCourseGeometry(existing: CourseCsvRow, incoming: CourseCsvRow): CourseC
     )
 }
 
-fun hasCourseDistances(lengthMeters: Int?, legMeters: List<Int?>): Boolean =
-    (lengthMeters != null && lengthMeters > 0) || legMeters.any { it != null && it > 0 }
+fun hasCourseDistances(
+    lengthMeters: Int?,
+    legMeters: List<Int?>,
+    metersPerUnit: Double? = null,
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+): Boolean =
+    (lengthMeters != null && lengthMeters > 0) ||
+        legMeters.any { it != null && it > 0 } ||
+        (metersPerUnit != null && metersPerUnit > 0 && cpPositions.size >= 2)
+
+/** Прямая между двумя КП: координаты × metersPerUnit (мм×scale/1000 или px×metersPerPixel). */
+fun mapStraightMeters(
+    fromCp: Int,
+    toCp: Int,
+    positions: Map<Int, Pair<Double, Double>>,
+    metersPerUnit: Double?,
+): Int? {
+    if (metersPerUnit == null || metersPerUnit <= 0) return null
+    val a = positions[fromCp] ?: return null
+    val b = positions[toCp] ?: return null
+    val dx = a.first - b.first
+    val dy = a.second - b.second
+    val meters = kotlin.math.hypot(dx, dy) * metersPerUnit
+    return kotlin.math.round(meters).toInt().takeIf { it > 0 }
+}
+
+fun resolveMapMetersPerUnit(metersPerPixel: Double?, mapScaleDenominator: Int?): Double? =
+    metersPerPixel?.takeIf { it > 0 }
+        ?: mapScaleDenominator?.takeIf { it > 0 }?.let { it / 1000.0 }
 
 fun splitSpeedKmh(meters: Int?, seconds: Int?): Double? {
     if (meters == null || meters <= 0 || seconds == null || seconds <= 0) return null
@@ -181,10 +232,16 @@ fun buildOrientSplitPrint(
     courseControls: List<Int> = emptyList(),
     lengthMeters: Int? = null,
     legMeters: List<Int?> = emptyList(),
+    randomOrder: List<Boolean> = emptyList(),
+    /** Parallel to [courseControls]; defaults to [randomOrder] when empty. */
+    courseRandomOrder: List<Boolean> = emptyList(),
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    metersPerUnit: Double? = null,
 ): OrientSplitPrint? {
-    val classified = classifyActualPunches(punches, required, startCp, finishCp)
+    val classified = classifyActualPunches(punches, required, startCp, finishCp, randomOrder)
     if (classified.isEmpty()) return null
-    val showPace = hasCourseDistances(lengthMeters, legMeters)
+    val showPace = hasCourseDistances(lengthMeters, legMeters, metersPerUnit, cpPositions)
+    val metersOrder = courseRandomOrder.ifEmpty { randomOrder }
     val t0 = classified.firstOrNull { it.kind == PunchKind.Start }?.mark?.seconds
         ?: classified.first().mark.seconds
     val startLine = classified.firstOrNull { it.kind == PunchKind.Start }?.let { start ->
@@ -212,6 +269,9 @@ fun buildOrientSplitPrint(
                 mark.cp,
                 startCp,
                 finishCp,
+                metersOrder,
+                cpPositions,
+                metersPerUnit,
             )
             formatPaceMinPerKm(meters, splitSeconds)
         }
@@ -270,17 +330,48 @@ fun courseLegMeters(
     toCp: Int,
     startCp: Int,
     finishCp: Int,
+    randomOrder: List<Boolean> = emptyList(),
+    cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
+    metersPerUnit: Double? = null,
 ): Int? {
-    if (legMeters.isEmpty()) return null
-    val seq = ArrayList<Int>(controls.size + 2)
-    seq += startCp
-    seq += controls
-    seq += finishCp
-    val fromIdx = seq.indexOf(fromCp).takeIf { it >= 0 } ?: return null
-    val toIdx = seq.indexOf(toCp).takeIf { it >= 0 } ?: return null
-    if (toIdx != fromIdx + 1) return null
-    val meters = legMeters.getOrNull(fromIdx) ?: return null
-    return meters.takeIf { it > 0 }
+    if (legMeters.isNotEmpty()) {
+        val seq = ArrayList<Int>(controls.size + 2)
+        seq += startCp
+        seq += controls
+        seq += finishCp
+        val flags = ArrayList<Boolean>(seq.size).apply {
+            add(false)
+            addAll(normalizeRandomOrder(controls.size, randomOrder))
+            add(false)
+        }
+        val fromIdx = seq.indexOf(fromCp)
+        val toIdx = seq.indexOf(toCp)
+        if (fromIdx >= 0 && toIdx == fromIdx + 1) {
+            legMeters.getOrNull(fromIdx)?.takeIf { it > 0 }?.let { return it }
+        }
+        // Вход/выход грозди: любой КП грозди вместо первого/последнего в списке.
+        if (fromIdx >= 0 && toIdx >= 0) {
+            val segments = courseSegments(seq, flags)
+            var idx = 0
+            for (i in 0 until segments.lastIndex) {
+                val a = segments[i]
+                val b = segments[i + 1]
+                when {
+                    a is CourseSegment.Fixed && b is CourseSegment.Cluster &&
+                        a.cp == fromCp && toCp in b.cps ->
+                        legMeters.getOrNull(idx)?.takeIf { it > 0 }?.let { return it }
+                    a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
+                        fromCp in a.cps && b.cp == toCp ->
+                        legMeters.getOrNull(idx + a.cps.size - 1)?.takeIf { it > 0 }?.let { return it }
+                }
+                idx += when (a) {
+                    is CourseSegment.Fixed -> 1
+                    is CourseSegment.Cluster -> a.cps.size
+                }
+            }
+        }
+    }
+    return mapStraightMeters(fromCp, toCp, cpPositions, metersPerUnit)
 }
 
 private fun parseIofCourse(course: Element, name: String): CourseCsvRow {
