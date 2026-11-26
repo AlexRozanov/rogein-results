@@ -373,6 +373,7 @@ async function openCpRemapWindow() {
 let unlistenResultsUpdated: UnlistenFn | null = null;
 let phonePollTimer: ReturnType<typeof setInterval> | null = null;
 let phonePollInFlight = false;
+let fieldSyncPollInFlight = false;
 
 function formatPhoneSummary(summary: PhoneReadSummary): string {
   const extra = summary.snapshot_note ? ` ${summary.snapshot_note}` : "";
@@ -409,8 +410,10 @@ onMounted(() => {
     });
   phonePollTimer = setInterval(() => {
     void pollPhoneUsb();
+    void pollFieldSync();
   }, 4000);
   void pollPhoneUsb();
+  void pollFieldSync();
 });
 
 onBeforeUnmount(() => {
@@ -483,6 +486,34 @@ async function readPhoneQueue() {
     nativeStatus.value = `Ошибка чтения с телефона: ${String(error)}`;
   } finally {
     nativeBusy.value = false;
+  }
+}
+
+async function pollFieldSync() {
+  if (fieldSyncPollInFlight || nativeBusy.value || isArchiveMode.value) return;
+  fieldSyncPollInFlight = true;
+  try {
+    const result = await invoke<{
+      enabled: boolean;
+      applied: number;
+      status: string;
+      error: string;
+    }>("field_sync_tick");
+    if (!result.enabled) return;
+    if (result.applied > 0) {
+      nativeStatus.value = `Полевой журнал: ${result.status || `+${result.applied}`}`;
+      pageOffset.value = 0;
+      await refreshNativeData();
+    } else if (result.error?.trim()) {
+      const text = `Полевой журнал: ${result.error}`;
+      if (nativeStatus.value !== text) {
+        nativeStatus.value = text;
+      }
+    }
+  } catch {
+    /* settings may be incomplete; Site Publish panel shows details */
+  } finally {
+    fieldSyncPollInFlight = false;
   }
 }
 

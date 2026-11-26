@@ -675,7 +675,7 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-fn normalize_base_url(raw: &str) -> Result<String, String> {
+pub fn normalize_base_url(raw: &str) -> Result<String, String> {
     let url = raw.trim().trim_end_matches('/').to_string();
     if url.is_empty() {
         return Err("Укажите адрес сайта (например http://127.0.0.1:18790).".into());

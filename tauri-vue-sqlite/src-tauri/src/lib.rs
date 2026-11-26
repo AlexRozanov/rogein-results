@@ -2,6 +2,7 @@ pub mod archive;
 pub mod archive_orient;
 pub mod course_order;
 pub mod domain;
+pub mod field_sync;
 pub mod iof_course;
 pub mod phone_sync;
 pub mod site_publish;
@@ -26,6 +27,7 @@ use domain::{
 };
 use serde::Serialize;
 use archive_orient::ArchiveOrientPreview;
+use field_sync::{FieldSyncTickResult, FieldSyncUiSettings};
 use site_publish::{SitePublishResult, SitePublishSettings, UpcomingSiteStart};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -359,6 +361,62 @@ fn publish_current_start(
         &slug,
         &title,
     )
+}
+
+#[tauri::command]
+fn get_field_sync_settings(state: State<'_, AppState>) -> Result<FieldSyncUiSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    field_sync::ui_settings(&state.app_data_dir, &conn)
+}
+
+#[tauri::command]
+fn save_field_sync_settings(
+    state: State<'_, AppState>,
+    mode: String,
+    start_code: String,
+    device_name: Option<String>,
+    lan_endpoint: Option<String>,
+) -> Result<FieldSyncUiSettings, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut settings = field_sync::load_settings(&state.app_data_dir);
+    settings.mode = mode;
+    settings.start_code = start_code;
+    if let Some(endpoint) = lan_endpoint {
+        settings.lan_endpoint = endpoint;
+    }
+    if let Some(name) = device_name {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            settings.device_name = trimmed.to_string();
+        }
+    }
+    field_sync::save_settings(&state.app_data_dir, &settings)?;
+    let conn = domain::open_and_init_db(&state.db_path)?;
+    field_sync::ui_settings(&state.app_data_dir, &conn)
+}
+
+#[tauri::command]
+fn field_sync_tick(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<FieldSyncTickResult, String> {
+    let _guard = state
+        .db_lock
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?;
+    let mut conn = domain::open_and_init_db(&state.db_path)?;
+    let result = field_sync::tick(&state.app_data_dir, &mut conn)?;
+    if result.applied > 0 {
+        let _ = app.emit("results-updated", ());
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -763,6 +821,8 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
         },
     );
 
+    // Пока идёт приём полевого журнала — не подмешиваем USB chip-queue.
+    let field_receive_on = field_sync::is_receive_enabled(&state.app_data_dir);
     match domain::gate_phone_usb_import(
         &conn,
         protocol_body,
@@ -774,21 +834,45 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
             blocked_reason = reason;
         }
         domain::PhoneImportGate::Allow => {
-            match import_phone_payloads(&mut conn, protocol_body, queue_body) {
-                Ok(summary) => {
-                    let deleted = if let Some(read) = queue.as_ref() {
-                        phone_sync::delete_snapshot_if_unchanged(read)?
-                    } else {
-                        phone_sync::SnapshotDelete {
-                            deleted: false,
-                            note: String::new(),
-                        }
-                    };
-                    read_summary = phone_read_from_import(summary, deleted);
+            if field_receive_on && queue_body.is_some() {
+                // Протокол с телефона можно принять; очередь — только из field ops.
+                let protocol_only = if protocol_body.is_some() {
+                    import_phone_payloads(&mut conn, protocol_body, None)
+                } else {
+                    Ok(domain::phone_import_summary(&conn, 0, 0, 0, 0, 0)?)
+                };
+                match protocol_only {
+                    Ok(summary) => {
+                        read_summary = phone_read_from_import(
+                            summary,
+                            phone_sync::SnapshotDelete {
+                                deleted: false,
+                                note: "USB-очередь пропущена: включён приём полевого журнала"
+                                    .to_string(),
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        blocked_reason = format!("Снимок с телефона пропущен: {err}");
+                    }
                 }
-                Err(err) => {
-                    // Импорт сломан — пакет ПК → телефон всё равно пробуем (если slug ок).
-                    blocked_reason = format!("Снимок с телефона пропущен: {err}");
+            } else {
+                match import_phone_payloads(&mut conn, protocol_body, queue_body) {
+                    Ok(summary) => {
+                        let deleted = if let Some(read) = queue.as_ref() {
+                            phone_sync::delete_snapshot_if_unchanged(read)?
+                        } else {
+                            phone_sync::SnapshotDelete {
+                                deleted: false,
+                                note: String::new(),
+                            }
+                        };
+                        read_summary = phone_read_from_import(summary, deleted);
+                    }
+                    Err(err) => {
+                        // Импорт сломан — пакет ПК → телефон всё равно пробуем (если slug ок).
+                        blocked_reason = format!("Снимок с телефона пропущен: {err}");
+                    }
                 }
             }
         }
@@ -2354,6 +2438,9 @@ pub fn run() {
             pick_start_archive_file,
             get_site_publish_settings,
             save_site_publish_settings,
+            get_field_sync_settings,
+            save_field_sync_settings,
+            field_sync_tick,
             test_site_publish_connection,
             site_event_exists,
             fetch_upcoming_site_starts,

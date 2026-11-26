@@ -33,6 +33,30 @@ type UpcomingSiteStart = {
   summary: string;
 };
 
+type FieldSyncMode = "off" | "cloud" | "lan";
+
+type FieldSyncUiSettings = {
+  mode: FieldSyncMode | string;
+  enabled: boolean;
+  startCode: string;
+  deviceId: string;
+  deviceName: string;
+  lanEndpoint: string;
+  hasSiteAccess: boolean;
+  slug: string;
+};
+
+type FieldSyncTickResult = {
+  enabled: boolean;
+  mode: string;
+  pulled: number;
+  applied: number;
+  skipped: number;
+  linked: boolean;
+  status: string;
+  error: string;
+};
+
 const props = defineProps<{
   busy: boolean;
   accessOnly?: boolean;
@@ -52,6 +76,14 @@ const title = ref("");
 const suggestedSlug = ref("");
 const suggestedTitle = ref("");
 const overwriteOpen = ref(false);
+const fieldMode = ref<FieldSyncMode>("off");
+const fieldStartCode = ref("");
+const fieldDeviceName = ref("Десктоп");
+const fieldLanEndpoint = ref("");
+const fieldStatus = ref("");
+const fieldError = ref("");
+const fieldLinked = ref(false);
+const fieldReceiveOn = computed(() => fieldMode.value !== "off");
 
 const pickerOpen = ref(false);
 const pickerLoading = ref(false);
@@ -68,8 +100,90 @@ async function refresh() {
   try {
     const settings = await invoke<SitePublishSettings>("get_site_publish_settings");
     applySettings(settings);
+    await refreshFieldSync();
   } catch (error) {
     emit("status", `Ошибка настроек публикации: ${String(error)}`);
+  }
+}
+
+function normalizeFieldMode(raw: string | undefined, enabledFallback: boolean): FieldSyncMode {
+  const mode = (raw || "").trim().toLowerCase();
+  if (mode === "cloud" || mode === "lan" || mode === "off") return mode;
+  return enabledFallback ? "cloud" : "off";
+}
+
+async function refreshFieldSync() {
+  try {
+    const field = await invoke<FieldSyncUiSettings>("get_field_sync_settings");
+    fieldMode.value = normalizeFieldMode(field.mode, field.enabled);
+    fieldStartCode.value = field.startCode || "";
+    fieldDeviceName.value = field.deviceName || "Десктоп";
+    fieldLanEndpoint.value = field.lanEndpoint || "";
+    if (fieldMode.value === "off") {
+      fieldLinked.value = false;
+      fieldStatus.value = "выкл";
+      fieldError.value = "";
+    }
+  } catch (error) {
+    fieldError.value = String(error);
+  }
+}
+
+async function saveFieldSync() {
+  localBusy.value = true;
+  try {
+    const field = await invoke<FieldSyncUiSettings>("save_field_sync_settings", {
+      mode: fieldMode.value,
+      startCode: fieldStartCode.value.trim(),
+      deviceName: fieldDeviceName.value.trim() || "Десктоп",
+      lanEndpoint: fieldLanEndpoint.value.trim(),
+    });
+    fieldMode.value = normalizeFieldMode(field.mode, field.enabled);
+    fieldStartCode.value = field.startCode;
+    fieldDeviceName.value = field.deviceName;
+    fieldLanEndpoint.value = field.lanEndpoint || "";
+    const statusByMode =
+      fieldMode.value === "cloud"
+        ? "Приём полевого журнала: облако (только чтение)."
+        : fieldMode.value === "lan"
+          ? "Приём полевого журнала: LAN (только чтение)."
+          : "Приём полевого журнала выключен.";
+    emit("status", statusByMode);
+    if (fieldMode.value !== "off") {
+      await tickFieldSync(true);
+    } else {
+      fieldLinked.value = false;
+      fieldStatus.value = "выкл";
+      fieldError.value = "";
+    }
+  } catch (error) {
+    emit("status", `Ошибка полевого обмена: ${String(error)}`);
+  } finally {
+    localBusy.value = false;
+  }
+}
+
+async function tickFieldSync(forceStatus = false) {
+  if (fieldMode.value === "off") return;
+  try {
+    const result = await invoke<FieldSyncTickResult>("field_sync_tick");
+    fieldLinked.value = result.linked;
+    fieldStatus.value = result.status || (result.linked ? "ок" : "");
+    fieldError.value = result.error || "";
+    if (result.applied > 0 || forceStatus) {
+      emit(
+        "status",
+        result.error
+          ? `Полевой журнал: ${result.error}`
+          : `Полевой журнал: ${result.status || "ок"}`,
+      );
+    }
+    if (result.applied > 0) {
+      emit("settingsChanged");
+    }
+  } catch (error) {
+    fieldError.value = String(error);
+    fieldLinked.value = false;
   }
 }
 
@@ -293,7 +407,7 @@ async function verifyEventPack() {
   }
 }
 
-defineExpose({ refresh });
+defineExpose({ refresh, tickFieldSync });
 </script>
 
 <template>
@@ -334,6 +448,63 @@ defineExpose({ refresh });
     <div class="native-row">
       <button type="button" :disabled="isBusy" @click="saveAccess">Сохранить доступ</button>
       <button type="button" :disabled="isBusy" @click="testConnection">Проверить связь</button>
+    </div>
+
+    <h3>Полевой журнал (приём)</h3>
+    <p class="subtitle" style="margin-top: 0">
+      Подтягивает финиши и правки со всех телефонов. Десктоп только читает;
+      правки на ПК обратно не уходят. Режим: облако (<code>/api/field</code>) или LAN
+      к телефону-хосту (<code>:8787</code>). Один режим за раз; slug и код старта — как на телефонах.
+    </p>
+    <div class="native-settings site-publish-settings">
+      <label>
+        Режим
+        <select v-model="fieldMode" :disabled="isBusy">
+          <option value="off">Выкл</option>
+          <option value="cloud">Облако</option>
+          <option value="lan">LAN</option>
+        </select>
+      </label>
+      <label v-if="fieldMode === 'lan'" class="site-publish-wide">
+        Адрес хоста
+        <input
+          v-model="fieldLanEndpoint"
+          type="text"
+          autocomplete="off"
+          placeholder="192.168.43.1 или rogein-field://…"
+          :disabled="isBusy"
+        />
+      </label>
+      <label>
+        Код старта
+        <input
+          v-model="fieldStartCode"
+          type="text"
+          autocomplete="off"
+          placeholder="как на телефоне"
+          :disabled="isBusy"
+        />
+      </label>
+      <label>
+        Имя устройства
+        <input v-model="fieldDeviceName" type="text" :disabled="isBusy" />
+      </label>
+    </div>
+    <p class="subtitle" style="margin-top: 4px">
+      Статус:
+      <template v-if="fieldError">{{ fieldError }}</template>
+      <template v-else-if="fieldLinked">{{ fieldStatus || "ок" }}</template>
+      <template v-else>{{ fieldStatus || "не подключено" }}</template>
+    </p>
+    <div class="native-row">
+      <button type="button" :disabled="isBusy" @click="saveFieldSync">Сохранить обмен</button>
+      <button
+        type="button"
+        :disabled="isBusy || !fieldReceiveOn"
+        @click="tickFieldSync(true)"
+      >
+        Проверить сейчас
+      </button>
     </div>
 
     <template v-if="!props.accessOnly">

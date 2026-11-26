@@ -642,7 +642,7 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
     Ok(false)
 }
 
-fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
+pub(crate) fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
     if !table_has_column(conn, "start_protocol", "team_id")? {
         conn.execute(
             "ALTER TABLE start_protocol ADD COLUMN team_id INTEGER NULL",
@@ -799,9 +799,38 @@ fn ensure_schema_extras(conn: &Connection) -> Result<(), String> {
             queue_id TEXT PRIMARY KEY,
             imported_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS field_ops (
+            op_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            device_seq INTEGER NOT NULL,
+            op_type TEXT NOT NULL,
+            clock_ms INTEGER NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_field_ops_device_seq
+            ON field_ops(device_id, device_seq);
+        CREATE TABLE IF NOT EXISTS field_cursors (
+            device_id TEXT PRIMARY KEY,
+            max_seq INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS field_queue_finishes (
+            queue_id TEXT PRIMARY KEY,
+            finish_participant_id INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS field_correction_map (
+            correction_id TEXT PRIMARY KEY,
+            local_correction_id INTEGER NOT NULL,
+            source_table TEXT NOT NULL DEFAULT 'manual_corrections'
+        );
+        CREATE TABLE IF NOT EXISTS field_exclusion_map (
+            exclusion_id TEXT PRIMARY KEY,
+            local_rule_id INTEGER NOT NULL
+        );
         "#,
     )
-    .map_err(|e| format!("ensure phone_chip_imports: {e}"))?;
+    .map_err(|e| format!("ensure phone_chip_imports / field_sync: {e}"))?;
     ensure_start_protocol_courses_schema(conn)?;
     Ok(())
 }
@@ -2220,6 +2249,905 @@ pub fn phone_import_summary(
         protocol_added: 0,
         protocol_updated: 0,
     })
+}
+
+/// Вход chip_read из полевого журнала.
+#[derive(Debug, Clone)]
+pub struct FieldChipReadInput {
+    pub queue_id: String,
+    pub uid: String,
+    pub logical_id: Option<i64>,
+    pub punches: Vec<(i64, i32)>,
+    pub course_hint: String,
+    pub replace: bool,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldApplyChange {
+    Applied,
+    Skipped,
+}
+
+fn format_day_clock(seconds: i32) -> String {
+    let s = seconds.max(0);
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    format!("{h:02}:{m:02}:{sec:02}")
+}
+
+fn field_queue_finish_id(conn: &Connection, queue_id: &str) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT finish_participant_id FROM field_queue_finishes WHERE queue_id = ?",
+        params![queue_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("lookup field queue finish: {e}"))
+}
+
+/// Материализует chip_read в participants/marks (как USB-снимок, с upsert по queue_id).
+pub fn apply_field_chip_read(
+    conn: &mut Connection,
+    input: &FieldChipReadInput,
+) -> Result<FieldApplyChange, String> {
+    let queue_id = input.queue_id.trim();
+    if queue_id.is_empty() {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    if let Some(finish_id) = field_queue_finish_id(conn, queue_id)? {
+        if !input.replace {
+            let existing = mark_count(conn, finish_id)?;
+            if existing as usize >= input.punches.len() && !input.punches.is_empty() {
+                return Ok(FieldApplyChange::Skipped);
+            }
+            if existing > 0 && input.punches.is_empty() {
+                return Ok(FieldApplyChange::Skipped);
+            }
+        }
+    }
+    let settings = get_settings(conn)?;
+    let competition_date = NaiveDate::parse_from_str(settings.competition_date.trim(), "%Y-%m-%d")
+        .map_err(|_| {
+            "Укажите дату соревнования в настройках (ГГГГ-ММ-ДД): на чипе только время суток."
+                .to_string()
+        })?;
+    let orient = settings.sport_kind == "orient";
+    let punches: Vec<PhoneSnapshotPunch> = input
+        .punches
+        .iter()
+        .filter(|(cp, _)| *cp > 0 && *cp != PHONE_CLEAR_CP)
+        .map(|(cp, sec)| PhoneSnapshotPunch {
+            cp: *cp,
+            time: format_day_clock(*sec),
+        })
+        .collect();
+    let item = PhoneSnapshotItem {
+        id: queue_id.to_string(),
+        uid: input.uid.clone(),
+        logical_id: input.logical_id.filter(|id| *id > 0),
+        punches,
+        name: input.name.clone(),
+        course_name: {
+            let c = input.course_hint.trim();
+            if c.is_empty() {
+                None
+            } else {
+                Some(c.to_string())
+            }
+        },
+        dnf: false,
+    };
+    let Some(row) = prepare_phone_item(conn, &item, competition_date, orient)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    let mapped = field_queue_finish_id(conn, queue_id)?;
+    let existing = if let Some(id) = mapped {
+        vec![id]
+    } else {
+        match row.logical_id {
+            Some(logical_id) if logical_id > 0 => {
+                find_phone_finish_ids(conn, &row.uid, logical_id, &row.course_name)?
+            }
+            _ => Vec::new(),
+        }
+    };
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("field chip_read transaction: {e}"))?;
+    let finish_id = if let Some((keep_id, extras)) = existing.split_first() {
+        tx.execute(
+            r#"
+            UPDATE participants
+            SET chip_raw_id = ?, name = ?, start_station_id = ?, start_time = ?, course_name = ?
+            WHERE id = ?
+            "#,
+            params![
+                row.uid,
+                row.name,
+                row.start_station_id,
+                row.start_time,
+                row.course_name,
+                keep_id
+            ],
+        )
+        .map_err(|e| format!("update field finish: {e}"))?;
+        tx.execute(
+            "DELETE FROM marks_raw WHERE finish_participant_id = ?",
+            params![keep_id],
+        )
+        .map_err(|e| format!("clear field marks: {e}"))?;
+        for extra_id in extras {
+            tx.execute("DELETE FROM participants WHERE id = ?", params![extra_id])
+                .map_err(|e| format!("remove duplicate field finish: {e}"))?;
+        }
+        *keep_id
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO participants(
+                participant_id, chip_raw_id, name, start_station_id, start_time, source_row, course_name
+            ) VALUES(?, ?, ?, ?, ?, 0, ?)
+            "#,
+            params![
+                row.bib,
+                row.uid,
+                row.name,
+                row.start_station_id,
+                row.start_time,
+                row.course_name
+            ],
+        )
+        .map_err(|e| format!("insert field finish: {e}"))?;
+        tx.last_insert_rowid()
+    };
+    for (seq, cp, mark_time) in &row.marks {
+        tx.execute(
+            "INSERT INTO marks_raw(finish_participant_id, seq, cp_number, mark_time) VALUES(?, ?, ?, ?)",
+            params![finish_id, seq, cp, mark_time],
+        )
+        .map_err(|e| format!("insert field mark: {e}"))?;
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO phone_chip_imports(queue_id) VALUES(?)",
+        params![queue_id],
+    )
+    .map_err(|e| format!("remember field queue import: {e}"))?;
+    tx.execute(
+        r#"
+        INSERT INTO field_queue_finishes(queue_id, finish_participant_id)
+        VALUES(?, ?)
+        ON CONFLICT(queue_id) DO UPDATE SET finish_participant_id = excluded.finish_participant_id
+        "#,
+        params![queue_id, finish_id],
+    )
+    .map_err(|e| format!("map field queue finish: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit field chip_read: {e}"))?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_queue_drop(conn: &mut Connection, queue_id: &str) -> Result<FieldApplyChange, String> {
+    let queue_id = queue_id.trim();
+    if queue_id.is_empty() {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    let Some(finish_id) = field_queue_finish_id(conn, queue_id)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("field queue_drop transaction: {e}"))?;
+    tx.execute("DELETE FROM participants WHERE id = ?", params![finish_id])
+        .map_err(|e| format!("delete field finish: {e}"))?;
+    tx.execute(
+        "DELETE FROM field_queue_finishes WHERE queue_id = ?",
+        params![queue_id],
+    )
+    .map_err(|e| format!("clear field queue map: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit field queue_drop: {e}"))?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_finish_reassign(
+    conn: &Connection,
+    queue_id: &str,
+    new_logical_id: i64,
+    uid: &str,
+) -> Result<FieldApplyChange, String> {
+    let queue_id = queue_id.trim();
+    if queue_id.is_empty() || new_logical_id <= 0 {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    let Some(finish_id) = field_queue_finish_id(conn, queue_id)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    let hits = protocol_hits_for_bib(conn, new_logical_id)?;
+    let (bib, name, course) = if hits.len() == 1 {
+        let (b, n, f) = &hits[0];
+        (b.clone(), n.clone(), f.clone())
+    } else {
+        (
+            new_logical_id.to_string(),
+            format!("№ {new_logical_id}"),
+            String::new(),
+        )
+    };
+    let chip = {
+        let u = uid.trim();
+        if u.is_empty() {
+            None
+        } else {
+            Some(u.to_string())
+        }
+    };
+    conn.execute(
+        r#"
+        UPDATE participants
+        SET participant_id = ?,
+            name = ?,
+            course_name = CASE WHEN TRIM(?) = '' THEN course_name ELSE ? END,
+            chip_raw_id = COALESCE(?, chip_raw_id)
+        WHERE id = ?
+        "#,
+        params![bib, name, course, course, chip, finish_id],
+    )
+    .map_err(|e| format!("field finish_reassign: {e}"))?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn finish_id_for_logical(conn: &Connection, logical_id: i64) -> Result<Option<i64>, String> {
+    if logical_id <= 0 {
+        return Ok(None);
+    }
+    let finishes = finishes_for_bib(conn, logical_id)?;
+    Ok(finishes.first().map(|(id, _)| *id))
+}
+
+pub fn remember_field_correction(
+    conn: &Connection,
+    correction_id: &str,
+    local_id: i64,
+) -> Result<(), String> {
+    let id = correction_id.trim();
+    if id.is_empty() || local_id <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        INSERT INTO field_correction_map(correction_id, local_correction_id, source_table)
+        VALUES(?, ?, 'manual_corrections')
+        ON CONFLICT(correction_id) DO UPDATE SET local_correction_id = excluded.local_correction_id
+        "#,
+        params![id, local_id],
+    )
+    .map_err(|e| format!("remember field correction: {e}"))?;
+    Ok(())
+}
+
+pub fn lookup_field_correction(conn: &Connection, correction_id: &str) -> Result<Option<i64>, String> {
+    let id = correction_id.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT local_correction_id FROM field_correction_map WHERE correction_id = ?",
+        params![id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("lookup field correction: {e}"))
+}
+
+pub fn forget_field_correction(conn: &Connection, correction_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM field_correction_map WHERE correction_id = ?",
+        params![correction_id.trim()],
+    )
+    .map_err(|e| format!("forget field correction: {e}"))?;
+    Ok(())
+}
+
+pub fn last_manual_correction_id(conn: &Connection) -> Result<Option<i64>, String> {
+    conn.query_row("SELECT MAX(id) FROM manual_corrections", [], |r| {
+        r.get::<_, Option<i64>>(0)
+    })
+    .map_err(|e| format!("last manual correction id: {e}"))
+}
+
+/// person_upsert из журнала → стартовый протокол.
+pub fn apply_field_person_upsert(
+    conn: &mut Connection,
+    logical_id: i64,
+    name: &str,
+    gender: &str,
+    birth_date: &str,
+    course: &str,
+    courses: &[String],
+) -> Result<FieldApplyChange, String> {
+    if logical_id <= 0 {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    let bib = logical_id.to_string();
+    let phone_name = name.trim();
+    let phone_format = course.trim();
+    let primary = if phone_format.is_empty() {
+        courses
+            .iter()
+            .map(|c| c.trim())
+            .find(|c| !c.is_empty())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        phone_format.to_string()
+    };
+    let (phone_birth_raw, phone_birth_iso) = parse_phone_birth(birth_date);
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("field person_upsert transaction: {e}"))?;
+    match find_protocol_by_bib_tx(&tx, &bib)? {
+        None => {
+            let (format_id, format_name) = if primary.is_empty() {
+                (None, String::new())
+            } else {
+                let course_name = ensure_course_name_tx(&tx, &primary)?;
+                (Some(ensure_format_id_tx(&tx, &course_name)?), course_name)
+            };
+            tx.execute(
+                r#"
+                INSERT INTO start_protocol(
+                    participant_id, name, format_id, format_name,
+                    gender, birth_date_raw, birth_date_iso, source_row
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+                "#,
+                params![
+                    bib,
+                    phone_name,
+                    format_id,
+                    format_name,
+                    if gender.trim().is_empty() {
+                        None
+                    } else {
+                        Some(gender.trim())
+                    },
+                    phone_birth_raw.as_deref(),
+                    phone_birth_iso.as_deref()
+                ],
+            )
+            .map_err(|e| format!("field person_upsert insert: {e}"))?;
+            let entry_id = tx.last_insert_rowid();
+            if !format_name.is_empty() {
+                link_protocol_course_tx(&tx, entry_id, &format_name)?;
+            }
+            for extra in courses {
+                let c = extra.trim();
+                if c.is_empty() || c.eq_ignore_ascii_case(&format_name) {
+                    continue;
+                }
+                let course_name = ensure_course_name_tx(&tx, c)?;
+                link_protocol_course_tx(&tx, entry_id, &course_name)?;
+            }
+        }
+        Some((entry_id, _)) => {
+            if !phone_name.is_empty() {
+                tx.execute(
+                    "UPDATE start_protocol SET name = ? WHERE id = ?",
+                    params![phone_name, entry_id],
+                )
+                .map_err(|e| format!("field person_upsert name: {e}"))?;
+            }
+            if !gender.trim().is_empty() {
+                tx.execute(
+                    "UPDATE start_protocol SET gender = ? WHERE id = ?",
+                    params![gender.trim(), entry_id],
+                )
+                .map_err(|e| format!("field person_upsert gender: {e}"))?;
+            }
+            if phone_birth_raw.is_some() || phone_birth_iso.is_some() {
+                tx.execute(
+                    "UPDATE start_protocol SET birth_date_raw = ?, birth_date_iso = ? WHERE id = ?",
+                    params![phone_birth_raw, phone_birth_iso, entry_id],
+                )
+                .map_err(|e| format!("field person_upsert birth: {e}"))?;
+            }
+            if !primary.is_empty() {
+                let course_name = ensure_course_name_tx(&tx, &primary)?;
+                let format_id = ensure_format_id_tx(&tx, &course_name)?;
+                tx.execute(
+                    "UPDATE start_protocol SET format_id = ?, format_name = ? WHERE id = ?",
+                    params![format_id, course_name, entry_id],
+                )
+                .map_err(|e| format!("field person_upsert course: {e}"))?;
+                link_protocol_course_tx(&tx, entry_id, &course_name)?;
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("commit field person_upsert: {e}"))?;
+    Ok(FieldApplyChange::Applied)
+}
+
+fn protocol_entry_id_for_logical(conn: &Connection, logical_id: i64) -> Result<Option<i64>, String> {
+    if logical_id <= 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        r#"
+        SELECT id FROM start_protocol
+        WHERE CAST(TRIM(participant_id) AS INTEGER) = ?
+        ORDER BY id LIMIT 1
+        "#,
+        params![logical_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("protocol entry by logical: {e}"))
+}
+
+pub fn apply_field_person_delete(
+    conn: &Connection,
+    logical_id: i64,
+) -> Result<FieldApplyChange, String> {
+    let Some(entry_id) = protocol_entry_id_for_logical(conn, logical_id)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    delete_start_protocol_entry(conn, entry_id)?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_person_course(
+    conn: &mut Connection,
+    logical_id: i64,
+    course: &str,
+    courses: &[String],
+) -> Result<FieldApplyChange, String> {
+    apply_field_person_upsert(conn, logical_id, "", "", "", course, courses)
+}
+
+pub fn apply_field_team_join(
+    conn: &Connection,
+    logical_id: i64,
+    other_logical_id: i64,
+    team_id: i64,
+    dropped_team_id: i64,
+) -> Result<FieldApplyChange, String> {
+    if team_id <= 0 {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    if dropped_team_id > 0 && dropped_team_id != team_id {
+        conn.execute(
+            "UPDATE start_protocol SET team_id = ? WHERE team_id = ?",
+            params![team_id, dropped_team_id],
+        )
+        .map_err(|e| format!("field team_join migrate dropped: {e}"))?;
+    }
+    let mut touched = false;
+    for lid in [logical_id, other_logical_id] {
+        if let Some(entry_id) = protocol_entry_id_for_logical(conn, lid)? {
+            conn.execute(
+                "UPDATE start_protocol SET team_id = ? WHERE id = ?",
+                params![team_id, entry_id],
+            )
+            .map_err(|e| format!("field team_join assign: {e}"))?;
+            touched = true;
+        }
+    }
+    Ok(if touched {
+        FieldApplyChange::Applied
+    } else {
+        FieldApplyChange::Skipped
+    })
+}
+
+pub fn apply_field_team_leave(
+    conn: &Connection,
+    logical_id: i64,
+) -> Result<FieldApplyChange, String> {
+    let Some(entry_id) = protocol_entry_id_for_logical(conn, logical_id)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    leave_start_protocol_team(conn, entry_id)?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_team_assign(
+    conn: &Connection,
+    logical_id: i64,
+    team_id: i64,
+) -> Result<FieldApplyChange, String> {
+    let Some(entry_id) = protocol_entry_id_for_logical(conn, logical_id)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    if team_id <= 0 {
+        leave_start_protocol_team(conn, entry_id)?;
+    } else {
+        conn.execute(
+            "UPDATE start_protocol SET team_id = ? WHERE id = ?",
+            params![team_id, entry_id],
+        )
+        .map_err(|e| format!("field team_assign: {e}"))?;
+    }
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_event_config(
+    conn: &Connection,
+    payload: &serde_json::Value,
+) -> Result<FieldApplyChange, String> {
+    let mut changed = false;
+    let mut patch = |key: &str, setting_key: &str| -> Result<(), String> {
+        if let Some(v) = payload.get(key) {
+            if v.is_null() {
+                return Ok(());
+            }
+            let text = match v {
+                serde_json::Value::String(s) => s.trim().to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                other => other.to_string(),
+            };
+            set_setting_value(conn, setting_key, &text)?;
+            changed = true;
+        }
+        Ok(())
+    };
+    patch("control_minutes", "control_minutes")?;
+    patch("start_cp", "start_cp")?;
+    patch("finish_cp", "finish_cp")?;
+    patch("penalty_per_minute", "penalty_per_minute")?;
+    patch("dq_minutes", "dq_minutes")?;
+    patch("start_mode", "start_mode")?;
+    patch("competition_start_time", "competition_start_time")?;
+    patch("competition_date", "competition_date")?;
+    patch("sport_kind", "sport_kind")?;
+    if let Some(title) = payload.get("title").and_then(|v| v.as_str()) {
+        let title = title.trim();
+        if !title.is_empty() {
+            let (slug, _) = crate::site_publish::load_event_meta(conn).unwrap_or_default();
+            let slug = if slug.is_empty() { title.to_string() } else { slug };
+            crate::site_publish::save_event_meta(conn, &slug, title)?;
+            changed = true;
+        }
+    }
+    // Nested JSON blobs (formats/awards/legends) — store raw for parity; scoring uses typed tables.
+    for (key, setting_key) in [
+        ("format_settings", "field_format_settings_json"),
+        ("award_groups", "field_award_groups_json"),
+        ("cp_legends", "field_cp_legends_json"),
+        ("map_points", "field_map_points_json"),
+    ] {
+        if let Some(v) = payload.get(key) {
+            if v.is_null() {
+                continue;
+            }
+            let text = if let Some(s) = v.as_str() {
+                s.to_string()
+            } else {
+                v.to_string()
+            };
+            set_setting_value(conn, setting_key, &text)?;
+            changed = true;
+        }
+    }
+    Ok(if changed {
+        FieldApplyChange::Applied
+    } else {
+        FieldApplyChange::Skipped
+    })
+}
+
+fn course_id_by_name(conn: &Connection, name: &str) -> Result<Option<i64>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT id FROM courses WHERE name = ? COLLATE NOCASE LIMIT 1",
+        params![name],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("course by name: {e}"))
+}
+
+pub fn apply_field_course_upsert(
+    conn: &Connection,
+    name: &str,
+    previous_name: &str,
+    controls: &[i64],
+    random_order: &[i32],
+    length_meters: Option<i64>,
+    climb_meters: Option<i64>,
+    legs_json: &str,
+) -> Result<FieldApplyChange, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(FieldApplyChange::Skipped);
+    }
+    let prev = previous_name.trim();
+    let existing_id = if !prev.is_empty() {
+        course_id_by_name(conn, prev)?
+    } else {
+        course_id_by_name(conn, name)?
+    };
+    let row = save_course(
+        conn,
+        existing_id,
+        name.to_string(),
+        controls.to_vec(),
+        random_order.to_vec(),
+    )?;
+    let legs = if legs_json.trim().is_empty() {
+        "[]"
+    } else {
+        legs_json.trim()
+    };
+    conn.execute(
+        "UPDATE courses SET length_meters = ?, climb_meters = ?, legs_json = ? WHERE id = ?",
+        params![length_meters, climb_meters, legs, row.id],
+    )
+    .map_err(|e| format!("field course geometry: {e}"))?;
+    if !prev.is_empty() && !prev.eq_ignore_ascii_case(name) {
+        let _ = conn.execute(
+            "UPDATE start_protocol SET format_name = ? WHERE format_name = ? COLLATE NOCASE",
+            params![name, prev],
+        );
+        // Drop old course links that would collide with the new name, then rename the rest.
+        let _ = conn.execute(
+            r#"
+            DELETE FROM start_protocol_courses
+            WHERE course_name = ? COLLATE NOCASE
+              AND protocol_id IN (
+                SELECT protocol_id FROM start_protocol_courses AS spc
+                WHERE spc.course_name = ? COLLATE NOCASE
+              )
+            "#,
+            params![prev, name],
+        );
+        let _ = conn.execute(
+            "UPDATE start_protocol_courses SET course_name = ? WHERE course_name = ? COLLATE NOCASE",
+            params![name, prev],
+        );
+        let _ = conn.execute(
+            "UPDATE start_protocol_formats SET format_name = ? WHERE format_name = ? COLLATE NOCASE",
+            params![name, prev],
+        );
+    }
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_course_delete(
+    conn: &Connection,
+    name: &str,
+) -> Result<FieldApplyChange, String> {
+    let Some(id) = course_id_by_name(conn, name)? else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    delete_course(conn, id)?;
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_exclusion_upsert(
+    conn: &Connection,
+    exclusion_id: &str,
+    course_name: &str,
+    from_cp: i64,
+    to_cp: i64,
+    max_leg_seconds: Option<i64>,
+) -> Result<FieldApplyChange, String> {
+    let exclusion_id = exclusion_id.trim();
+    if let Some(local) = lookup_field_exclusion(conn, exclusion_id)? {
+        let _ = delete_exclusion_rule(conn, local);
+        forget_field_exclusion(conn, exclusion_id)?;
+    } else {
+        // Also replace by endpoints if no id match.
+        if let Some(id) = find_exclusion_rule_id(conn, course_name, from_cp, to_cp)? {
+            let _ = delete_exclusion_rule(conn, id);
+        }
+    }
+    let course_id = course_id_by_name(conn, course_name)?;
+    add_exclusion_rule(
+        conn,
+        "all".to_string(),
+        None,
+        None,
+        course_id,
+        from_cp,
+        to_cp,
+        "forward".to_string(),
+        "always".to_string(),
+        max_leg_seconds,
+    )?;
+    let local = last_exclusion_rule_id(conn)?.unwrap_or(0);
+    if !exclusion_id.is_empty() && local > 0 {
+        remember_field_exclusion(conn, exclusion_id, local)?;
+    }
+    Ok(FieldApplyChange::Applied)
+}
+
+pub fn apply_field_exclusion_delete(
+    conn: &Connection,
+    exclusion_id: &str,
+    course_name: &str,
+    from_cp: i64,
+    to_cp: i64,
+) -> Result<FieldApplyChange, String> {
+    let exclusion_id = exclusion_id.trim();
+    let local = if !exclusion_id.is_empty() {
+        lookup_field_exclusion(conn, exclusion_id)?
+    } else {
+        None
+    };
+    let local = local.or(find_exclusion_rule_id(conn, course_name, from_cp, to_cp)?);
+    let Some(id) = local else {
+        return Ok(FieldApplyChange::Skipped);
+    };
+    delete_exclusion_rule(conn, id)?;
+    if !exclusion_id.is_empty() {
+        forget_field_exclusion(conn, exclusion_id)?;
+    }
+    Ok(FieldApplyChange::Applied)
+}
+
+fn find_exclusion_rule_id(
+    conn: &Connection,
+    course_name: &str,
+    from_cp: i64,
+    to_cp: i64,
+) -> Result<Option<i64>, String> {
+    let course_id = course_id_by_name(conn, course_name)?;
+    if let Some(cid) = course_id {
+        if let Some(id) = conn
+            .query_row(
+                r#"
+                SELECT id FROM leg_exclusion_rules
+                WHERE course_id = ? AND from_cp = ? AND to_cp = ?
+                ORDER BY id DESC LIMIT 1
+                "#,
+                params![cid, from_cp, to_cp],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("find exclusion by course: {e}"))?
+        {
+            return Ok(Some(id));
+        }
+    }
+    conn.query_row(
+        r#"
+        SELECT id FROM leg_exclusion_rules
+        WHERE from_cp = ? AND to_cp = ?
+        ORDER BY id DESC LIMIT 1
+        "#,
+        params![from_cp, to_cp],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("find exclusion by cps: {e}"))
+}
+
+fn last_exclusion_rule_id(conn: &Connection) -> Result<Option<i64>, String> {
+    conn.query_row("SELECT MAX(id) FROM leg_exclusion_rules", [], |r| {
+        r.get::<_, Option<i64>>(0)
+    })
+    .map_err(|e| format!("last exclusion id: {e}"))
+}
+
+fn remember_field_exclusion(
+    conn: &Connection,
+    exclusion_id: &str,
+    local_id: i64,
+) -> Result<(), String> {
+    conn.execute(
+        r#"
+        INSERT INTO field_exclusion_map(exclusion_id, local_rule_id)
+        VALUES(?, ?)
+        ON CONFLICT(exclusion_id) DO UPDATE SET local_rule_id = excluded.local_rule_id
+        "#,
+        params![exclusion_id, local_id],
+    )
+    .map_err(|e| format!("remember field exclusion: {e}"))?;
+    Ok(())
+}
+
+fn lookup_field_exclusion(conn: &Connection, exclusion_id: &str) -> Result<Option<i64>, String> {
+    if exclusion_id.is_empty() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT local_rule_id FROM field_exclusion_map WHERE exclusion_id = ?",
+        params![exclusion_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("lookup field exclusion: {e}"))
+}
+
+fn forget_field_exclusion(conn: &Connection, exclusion_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM field_exclusion_map WHERE exclusion_id = ?",
+        params![exclusion_id],
+    )
+    .map_err(|e| format!("forget field exclusion: {e}"))?;
+    Ok(())
+}
+
+/// Есть ли сохранённые курсоры / ops полевого приёма (для USB-guard).
+pub fn field_receive_has_progress(conn: &Connection) -> Result<bool, String> {
+    let ops: i64 = conn
+        .query_row("SELECT COUNT(*) FROM field_ops", [], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(ops > 0)
+}
+
+pub fn load_field_cursors(conn: &Connection) -> Result<std::collections::BTreeMap<String, i64>, String> {
+    let mut stmt = conn
+        .prepare("SELECT device_id, max_seq FROM field_cursors")
+        .map_err(|e| format!("prepare field cursors: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("query field cursors: {e}"))?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, seq) = row.map_err(|e| format!("read field cursor: {e}"))?;
+        out.insert(id, seq);
+    }
+    Ok(out)
+}
+
+pub fn field_op_known(conn: &Connection, op_id: &str) -> Result<bool, String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM field_ops WHERE op_id = ?",
+            params![op_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("check field op: {e}"))?;
+    Ok(n > 0)
+}
+
+pub fn store_field_op(
+    conn: &Connection,
+    op_id: &str,
+    device_id: &str,
+    device_seq: i64,
+    op_type: &str,
+    clock_ms: i64,
+    actor: &str,
+    payload_json: &str,
+) -> Result<(), String> {
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO field_ops(
+            op_id, device_id, device_seq, op_type, clock_ms, actor, payload_json
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)
+        "#,
+        params![
+            op_id,
+            device_id,
+            device_seq,
+            op_type,
+            clock_ms,
+            actor,
+            payload_json
+        ],
+    )
+    .map_err(|e| format!("store field op: {e}"))?;
+    conn.execute(
+        r#"
+        INSERT INTO field_cursors(device_id, max_seq) VALUES(?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET
+          max_seq = CASE
+            WHEN excluded.max_seq > field_cursors.max_seq THEN excluded.max_seq
+            ELSE field_cursors.max_seq
+          END
+        "#,
+        params![device_id, device_seq],
+    )
+    .map_err(|e| format!("update field cursor: {e}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -13112,6 +14040,12 @@ mod tests {
         delete_finish_participant, copy_team_punches, mark_did_not_finish, team_punch_copy_options,
         build_start_pack, calculate_result, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
         gate_phone_usb_pack_push, get_settings, PhoneImportGate, Participant,
+        apply_field_chip_read, apply_field_course_upsert, apply_field_event_config,
+        apply_field_exclusion_delete, apply_field_exclusion_upsert, apply_field_person_course,
+        apply_field_person_delete, apply_field_team_join, FieldApplyChange, FieldChipReadInput,
+        field_op_known, finish_id_for_logical, forget_field_correction, last_manual_correction_id,
+        lookup_field_correction, remember_field_correction, store_field_op,
+        delete_correction_entry,
         FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, register_search_functions, resolve_orient_leg_to,
@@ -13623,6 +14557,227 @@ mod tests {
         let settings = get_settings(&conn).unwrap();
         assert_eq!(settings.start_cp, Some(241));
         assert_eq!(settings.finish_cp, 240);
+    }
+
+    #[test]
+    fn field_chip_read_applies_and_is_idempotent_by_queue() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "time").unwrap();
+        set_setting_value(&conn, "competition_start_time", "10:00:00").unwrap();
+        set_setting_value(&conn, "start_cp", "241").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата\n8;Иванов Иван;4ч;;\n",
+            true,
+        )
+        .unwrap();
+        let first = apply_field_chip_read(
+            &mut conn,
+            &FieldChipReadInput {
+                queue_id: "q-field-1".to_string(),
+                uid: "AA11".to_string(),
+                logical_id: Some(8),
+                punches: vec![(31, 10 * 3600 + 120), (240, 10 * 3600 + 600)],
+                course_hint: String::new(),
+                replace: false,
+                name: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(first, FieldApplyChange::Applied);
+        recalculate(&mut conn).unwrap();
+        let points: i64 = conn
+            .query_row(
+                "SELECT points_raw FROM results WHERE CAST(TRIM(participant_id) AS INTEGER) = 8",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(points, 3);
+        let second = apply_field_chip_read(
+            &mut conn,
+            &FieldChipReadInput {
+                queue_id: "q-field-1".to_string(),
+                uid: "AA11".to_string(),
+                logical_id: Some(8),
+                punches: vec![(31, 10 * 3600 + 120), (240, 10 * 3600 + 600)],
+                course_hint: String::new(),
+                replace: false,
+                name: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(second, FieldApplyChange::Skipped);
+        store_field_op(
+            &conn,
+            "op-1",
+            "phone-a",
+            1,
+            "chip_read",
+            1,
+            "Финиш",
+            "{}",
+        )
+        .unwrap();
+        assert!(field_op_known(&conn, "op-1").unwrap());
+        store_field_op(
+            &conn,
+            "op-1",
+            "phone-a",
+            1,
+            "chip_read",
+            1,
+            "Финиш",
+            "{}",
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM field_ops WHERE op_id = 'op-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn field_person_course_team_config_exclusion_apply() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        import_courses_content(&conn, "D1;31;32;33\nD2;41;42\n", true).unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Иванов Иван;D1\n9;Петров Пётр;D1\n",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            apply_field_person_course(&mut conn, 8, "D2", &["D2".to_string()]).unwrap(),
+            FieldApplyChange::Applied
+        );
+        let course: String = conn
+            .query_row(
+                "SELECT format_name FROM start_protocol WHERE CAST(TRIM(participant_id) AS INTEGER) = 8",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(course, "D2");
+
+        assert_eq!(
+            apply_field_team_join(&conn, 8, 9, 77, 0).unwrap(),
+            FieldApplyChange::Applied
+        );
+        let team8: i64 = conn
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE CAST(TRIM(participant_id) AS INTEGER) = 8",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let team9: i64 = conn
+            .query_row(
+                "SELECT team_id FROM start_protocol WHERE CAST(TRIM(participant_id) AS INTEGER) = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(team8, 77);
+        assert_eq!(team9, 77);
+
+        assert_eq!(
+            apply_field_event_config(
+                &conn,
+                &serde_json::json!({"control_minutes": 90, "penalty_per_minute": 2}),
+            )
+            .unwrap(),
+            FieldApplyChange::Applied
+        );
+        assert_eq!(get_settings(&conn).unwrap().control_minutes, 90);
+
+        assert_eq!(
+            apply_field_course_upsert(
+                &conn,
+                "D3",
+                "",
+                &[51, 52],
+                &[],
+                Some(1000),
+                Some(50),
+                "[]",
+            )
+            .unwrap(),
+            FieldApplyChange::Applied
+        );
+        assert!(list_courses(&conn)
+            .unwrap()
+            .iter()
+            .any(|c| c.name == "D3" && c.controls == vec![51, 52]));
+
+        assert_eq!(
+            apply_field_exclusion_upsert(&conn, "ex-1", "D3", 51, 52, Some(120)).unwrap(),
+            FieldApplyChange::Applied
+        );
+        assert_eq!(
+            apply_field_exclusion_delete(&conn, "ex-1", "D3", 51, 52).unwrap(),
+            FieldApplyChange::Applied
+        );
+        assert_eq!(
+            apply_field_person_delete(&conn, 9).unwrap(),
+            FieldApplyChange::Applied
+        );
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM start_protocol WHERE CAST(TRIM(participant_id) AS INTEGER) = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn field_correction_add_cp_maps_uuid() {
+        let mut conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "rogaine").unwrap();
+        set_setting_value(&conn, "competition_date", "2026-08-02").unwrap();
+        set_setting_value(&conn, "start_mode", "time").unwrap();
+        set_setting_value(&conn, "competition_start_time", "10:00:00").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;формат;пол;дата\n8;Иванов Иван;4ч;;\n",
+            true,
+        )
+        .unwrap();
+        apply_field_chip_read(
+            &mut conn,
+            &FieldChipReadInput {
+                queue_id: "q-corr".to_string(),
+                uid: "BB22".to_string(),
+                logical_id: Some(8),
+                punches: vec![(31, 36000), (240, 36600)],
+                course_hint: String::new(),
+                replace: false,
+                name: None,
+            },
+        )
+        .unwrap();
+        let finish_id = finish_id_for_logical(&conn, 8).unwrap().unwrap();
+        add_cp_correction(&conn, &finish_id.to_string(), 51, "").unwrap();
+        let local = last_manual_correction_id(&conn).unwrap().unwrap();
+        remember_field_correction(&conn, "corr-uuid-1", local).unwrap();
+        assert_eq!(
+            lookup_field_correction(&conn, "corr-uuid-1").unwrap(),
+            Some(local)
+        );
+        delete_correction_entry(&conn, "manual_corrections".to_string(), local).unwrap();
+        forget_field_correction(&conn, "corr-uuid-1").unwrap();
+        assert!(lookup_field_correction(&conn, "corr-uuid-1")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
