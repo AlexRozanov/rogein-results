@@ -25,6 +25,50 @@ class OrientPackFixturesTest {
     }
 
     @Test
+    fun startPackParsesMapScaleAndControlPositions() {
+        val json = """
+            {
+              "revision": 2,
+              "sport": "orient",
+              "mapScaleDenominator": 4000,
+              "controlPositionsMm": {
+                "46": [-571.9, -208.3],
+                "35": [-555.1, -254.0]
+              },
+              "courses": [{"name": "D2", "controls": [46, 35]}],
+              "people": []
+            }
+        """.trimIndent()
+        val pack = parseStartPackJson(json)
+        assertEquals(4000, pack.mapScaleDenominator)
+        assertEquals(-571.9 to -208.3, pack.controlPositionsMm[46])
+        assertEquals(-555.1 to -254.0, pack.controlPositionsMm[35])
+        assertEquals(null, pack.exclusions)
+    }
+
+    @Test
+    fun startPackParsesExclusionsWhenPresent() {
+        val json = """
+            {
+              "revision": 3,
+              "sport": "orient",
+              "courses": [{"name": "D2", "controls": [46, 35]}],
+              "people": [],
+              "exclusions": [
+                {"course": "D2", "fromCp": 65, "toCp": 46, "maxLegSeconds": 120}
+              ]
+            }
+        """.trimIndent()
+        val pack = parseStartPackJson(json)
+        val rules = requireNotNull(pack.exclusions)
+        assertEquals(1, rules.size)
+        assertEquals("D2", rules[0].course)
+        assertEquals(65, rules[0].fromCp)
+        assertEquals(46, rules[0].toCp)
+        assertEquals(120, rules[0].maxLegSeconds)
+    }
+
+    @Test
     fun startPackIgnoresUnknownRogaineKeys() {
         val json = """
             {

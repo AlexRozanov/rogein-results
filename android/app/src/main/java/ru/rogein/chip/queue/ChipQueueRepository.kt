@@ -625,6 +625,12 @@ class ChipQueueRepository(
                 fieldJournal,
                 eventSlug = { event.settingsNow().slug },
                 chipQueue = db.dao(),
+                applyMapGeometry = { scale, positions ->
+                    event.applyIofMapGeometry(scale, positions)
+                },
+                applyExclusions = { rules ->
+                    event.replaceExclusions(rules)
+                },
             )
             val fieldSync = FieldSyncEngine(
                 context = appContext,

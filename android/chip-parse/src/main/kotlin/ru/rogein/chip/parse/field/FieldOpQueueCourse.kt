@@ -2,7 +2,7 @@ package ru.rogein.chip.parse.field
 
 import org.json.JSONArray
 import org.json.JSONObject
-import ru.rogein.chip.parse.normalizeRandomOrder
+import ru.rogein.chip.parse.parseClusterGroups
 
 data class QueueDropPayload(val queueId: String)
 
@@ -20,7 +20,7 @@ data class CourseUpsertPayload(
     val lengthMeters: Int?,
     val climbMeters: Int?,
     val legsJson: String,
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
 )
 
 data class CourseDeletePayload(val name: String)
@@ -64,12 +64,12 @@ fun courseUpsertPayloadJson(
     lengthMeters: Int?,
     climbMeters: Int?,
     legsJson: String,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): String {
     val arr = JSONArray()
     controls.forEach { arr.put(it) }
     val flags = JSONArray()
-    normalizeRandomOrder(controls.size, randomOrder).forEach { flags.put(it) }
+    parseClusterGroups(randomOrder, controls.size).forEach { flags.put(it) }
     val obj = JSONObject()
         .put("name", name)
         .put("previous_name", previousName)
@@ -134,17 +134,8 @@ fun parseCourseUpsertPayload(payloadJson: String): CourseUpsertPayload {
         for (i in 0 until controlsArr.length()) add(controlsArr.getInt(i))
     }
     val flagsArr = obj.optJSONArray("random_order") ?: obj.optJSONArray("randomOrder") ?: JSONArray()
-    val randomOrder = buildList {
-        for (i in 0 until flagsArr.length()) {
-            add(
-                when (val value = flagsArr.get(i)) {
-                    is Boolean -> value
-                    is Number -> value.toInt() != 0
-                    is String -> value.equals("true", true) || value == "1"
-                    else -> false
-                },
-            )
-        }
+    val rawOrder = buildList<Any?> {
+        for (i in 0 until flagsArr.length()) add(flagsArr.get(i))
     }
     return CourseUpsertPayload(
         name = obj.optString("name"),
@@ -153,7 +144,7 @@ fun parseCourseUpsertPayload(payloadJson: String): CourseUpsertPayload {
         lengthMeters = if (obj.has("length_meters") && !obj.isNull("length_meters")) obj.optInt("length_meters") else null,
         climbMeters = if (obj.has("climb_meters") && !obj.isNull("climb_meters")) obj.optInt("climb_meters") else null,
         legsJson = obj.optString("legs_json", "[]"),
-        randomOrder = normalizeRandomOrder(controls.size, randomOrder),
+        randomOrder = parseClusterGroups(rawOrder, controls.size),
     )
 }
 

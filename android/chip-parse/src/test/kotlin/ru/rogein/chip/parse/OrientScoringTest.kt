@@ -36,7 +36,7 @@ class OrientScoringTest {
     @Test
     fun legsKeepClusterEntryAndExitSkipInside() {
         val controls = listOf(31, 32, 33, 34, 35, 36)
-        val random = listOf(false, false, true, true, true, false)
+        val random = listOf(0, 0, 1, 1, 1, 0)
         assertEquals(
             listOf(241 to 31, 31 to 32, 32 to 33, 35 to 36, 36 to 240),
             orientCourseLegs(controls, 241, 240, emptySet(), random),
@@ -52,9 +52,43 @@ class OrientScoringTest {
     }
 
     @Test
+    fun adjacentClustersAddLegBetweenThem() {
+        val controls = (71..79).toList()
+        val groups = listOf(0, 0, 0, 1, 1, 1, 2, 2, 0)
+        assertEquals(
+            listOf(241 to 71, 71 to 72, 72 to 73, 73 to 74, 76 to 77, 78 to 79, 79 to 240),
+            orientCourseLegs(controls, 241, 240, emptySet(), groups),
+        )
+        assertEquals(
+            "[74·75·76] → [77·78]",
+            formatOrientLegLabel(76, 77, controls, 241, 240, groups),
+        )
+        val (from, to) = exclusionEndpointSets(75, 78, controls, 241, 240, groups)
+        assertEquals(setOf(74, 75, 76), from)
+        assertEquals(setOf(77, 78), to)
+    }
+
+    @Test
+    fun adjacentClustersEarlyPunchOfSecondClusterIsOutOfOrder() {
+        val controls = (71..79).toList()
+        val groups = listOf(0, 0, 0, 1, 1, 1, 2, 2, 0)
+        val ok = listOf(241, 71, 72, 73, 75, 74, 76, 78, 77, 79, 240)
+            .mapIndexed { i, cp -> mark(cp, 10, i) }
+        assertTrue(classifyActualPunches(ok, controls, 241, 240, groups).none { it.wrong })
+        val early = listOf(241, 71, 72, 73, 74, 75, 77, 76, 78, 79, 240)
+            .mapIndexed { i, cp -> mark(cp, 10, i) }
+        val kinds = classifyActualPunches(early, controls, 241, 240, groups)
+        assertTrue(kinds.first { it.mark.cp == 77 }.wrong)
+        assertEquals(
+            5,
+            courseSubsequenceTaken(early.map { it.cp }.filter { it != 241 && it != 240 }, controls, randomOrder = groups),
+        )
+    }
+
+    @Test
     fun exclusionIntoClusterUsesFirstClusterPunch() {
         val controls = listOf(31, 32, 33, 34)
-        val random = listOf(false, true, true, false)
+        val random = listOf(0, 1, 1, 0)
         val window = listOf(
             mark(241, 10, 0),
             mark(31, 10, 10),
@@ -139,7 +173,7 @@ class OrientScoringTest {
     @Test
     fun courseProgressClusterAnyOrderFullyTaken() {
         val required = listOf(31, 32, 33, 34)
-        val random = listOf(false, true, true, false)
+        val random = listOf(0, 1, 1, 0)
         // В грозди порядок 33→32, не как в списке.
         val punches = listOf(241, 31, 33, 32, 34, 240)
         val progress = courseProgress(punches, required, randomOrder = random)
@@ -162,7 +196,7 @@ class OrientScoringTest {
             listOf(31, 32, 33, 34),
             241,
             240,
-            listOf(false, true, true, false),
+            listOf(0, 1, 1, 0),
         )
         assertTrue(classified.none { it.wrong })
         assertEquals(
@@ -316,6 +350,59 @@ class OrientScoringTest {
         )
         assertEquals(listOf(31, 36, 31, 44, 45), expanded.map { it.cp })
         assertEquals(listOf(false, false, true, false, false), expanded.map { it.added })
+    }
+
+    @Test
+    fun addCpCoversMissingCpInsideClusterAnyOrder() {
+        // 71→72→[74 75 76]→79, punches took 76 then 74, missing 75 → add 75
+        val controls = listOf(71, 72, 74, 75, 76, 79)
+        val groups = listOf(0, 0, 1, 1, 1, 0)
+        val marks = listOf(
+            mark(241, 10, 0),
+            mark(71, 10, 1),
+            mark(72, 10, 2),
+            mark(76, 10, 3),
+            mark(74, 10, 4),
+            mark(79, 10, 5),
+            mark(240, 10, 20),
+        )
+        val without = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to controls),
+            emptySet(),
+            emptyList(),
+            emptyMap(),
+            courseRandomOrder = mapOf("d1" to groups),
+        )
+        assertEquals(STATUS_DQ, without.status)
+        val withAdd = calculateOrientResult(
+            marks,
+            OrientSettings(241, 240, 120),
+            "D1",
+            mapOf("d1" to controls),
+            emptySet(),
+            emptyList(),
+            mapOf(75 to 1),
+            courseRandomOrder = mapOf("d1" to groups),
+        )
+        assertEquals(STATUS_OK, withAdd.status)
+        assertEquals(6, withAdd.taken)
+        val expanded = applyAddedCps(
+            marks,
+            controls,
+            mapOf(75 to 1),
+            241,
+            240,
+            emptyMap(),
+            groups,
+        )
+        assertTrue(expanded.any { it.cp == 75 && it.added })
+        assertEquals(
+            6,
+            courseSubsequenceTaken(expanded.map { it.cp }, controls, randomOrder = groups),
+        )
     }
 
     @Test

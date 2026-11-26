@@ -19,7 +19,7 @@ type AwardGroup = {
   source_id: number;
   name: string;
   course_cps?: number[] | null;
-  course_random_order?: boolean[] | null;
+  course_random_order?: Array<number | boolean> | null;
 };
 
 type ResultRow = {

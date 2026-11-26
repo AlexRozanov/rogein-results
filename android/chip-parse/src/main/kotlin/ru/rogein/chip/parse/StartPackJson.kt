@@ -8,6 +8,10 @@ data class StartPackFile(
     val sport: String,
     val courses: List<StartPackCourseFile>,
     val people: List<StartPackPersonFile>,
+    val mapScaleDenominator: Int? = null,
+    val controlPositionsMm: Map<Int, Pair<Double, Double>> = emptyMap(),
+    /** null = поле отсутствует в JSON (старый пакет) — исключения на телефоне не трогаем. */
+    val exclusions: List<EventPackExclusionFile>? = null,
 )
 
 data class StartPackCourseFile(
@@ -16,7 +20,7 @@ data class StartPackCourseFile(
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
 )
 
 data class StartPackPersonFile(
@@ -32,15 +36,17 @@ fun parseStartPackJson(text: String): StartPackFile {
         val obj = item as? JSONObject ?: return@mapNotNull null
         val name = obj.optString("name").trim()
         if (name.isEmpty()) return@mapNotNull null
+        val controls = jsonArray(obj.optJSONArray("controls")).mapNotNull { value ->
+            when (value) {
+                is Number -> value.toInt()
+                is String -> value.toIntOrNull()
+                else -> null
+            }
+        }
+        val rawOrder = jsonArray(obj.optJSONArray("randomOrder"))
         StartPackCourseFile(
             name = name,
-            controls = jsonArray(obj.optJSONArray("controls")).mapNotNull { value ->
-                when (value) {
-                    is Number -> value.toInt()
-                    is String -> value.toIntOrNull()
-                    else -> null
-                }
-            },
+            controls = controls,
             lengthMeters = obj.optIntOrNull("lengthMeters"),
             climbMeters = obj.optIntOrNull("climbMeters"),
             legMeters = jsonArray(obj.optJSONArray("legMeters")).map { value ->
@@ -51,14 +57,7 @@ fun parseStartPackJson(text: String): StartPackFile {
                     else -> null
                 }
             },
-            randomOrder = jsonArray(obj.optJSONArray("randomOrder")).map { value ->
-                when (value) {
-                    is Boolean -> value
-                    is Number -> value.toInt() != 0
-                    is String -> value.equals("true", true) || value == "1"
-                    else -> false
-                }
-            },
+            randomOrder = parseClusterGroups(rawOrder, controls.size),
         )
     }
     val people = jsonArray(root.optJSONArray("people")).mapNotNull { item ->
@@ -77,12 +76,64 @@ fun parseStartPackJson(text: String): StartPackFile {
             currentCourse = current,
         )
     }
+    val controlPositionsMm = LinkedHashMap<Int, Pair<Double, Double>>()
+    val positionsObj = root.optJSONObject("controlPositionsMm")
+        ?: root.optJSONObject("control_positions_mm")
+    if (positionsObj != null) {
+        val keys = positionsObj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val cp = key.toIntOrNull()?.takeIf { it > 0 } ?: continue
+            val arr = positionsObj.optJSONArray(key) ?: continue
+            if (arr.length() < 2) continue
+            val x = arr.optDouble(0, Double.NaN)
+            val y = arr.optDouble(1, Double.NaN)
+            if (!x.isFinite() || !y.isFinite()) continue
+            controlPositionsMm[cp] = x to y
+        }
+    }
+    val mapScale = when {
+        root.has("mapScaleDenominator") && !root.isNull("mapScaleDenominator") ->
+            root.optInt("mapScaleDenominator").takeIf { it > 0 }
+        root.has("map_scale_denominator") && !root.isNull("map_scale_denominator") ->
+            root.optInt("map_scale_denominator").takeIf { it > 0 }
+        else -> null
+    }
+    val exclusions = if (root.has("exclusions") && !root.isNull("exclusions")) {
+        jsonObjects(root.optJSONArray("exclusions")).mapNotNull { obj ->
+            val fromCp = obj.optInt("fromCp", obj.optInt("from_cp", 0))
+            val toCp = obj.optInt("toCp", obj.optInt("to_cp", 0))
+            if (fromCp <= 0 || toCp <= 0) return@mapNotNull null
+            EventPackExclusionFile(
+                course = obj.optString("course").trim(),
+                fromCp = fromCp,
+                toCp = toCp,
+                maxLegSeconds = when {
+                    obj.has("maxLegSeconds") && !obj.isNull("maxLegSeconds") ->
+                        obj.optInt("maxLegSeconds").takeIf { it > 0 }
+                    obj.has("max_leg_seconds") && !obj.isNull("max_leg_seconds") ->
+                        obj.optInt("max_leg_seconds").takeIf { it > 0 }
+                    else -> null
+                },
+            )
+        }
+    } else {
+        null
+    }
     return StartPackFile(
         revision = root.optLong("revision"),
         sport = normalizeSportKind(root.optString("sport")),
         courses = courses,
         people = people,
+        mapScaleDenominator = mapScale,
+        controlPositionsMm = controlPositionsMm,
+        exclusions = exclusions,
     )
+}
+
+private fun jsonObjects(array: JSONArray?): List<JSONObject> {
+    if (array == null) return emptyList()
+    return (0 until array.length()).mapNotNull { array.optJSONObject(it) }
 }
 
 fun parseChipQueueJson(text: String): ChipQueueFile {

@@ -74,7 +74,7 @@ fun parseIofCourseData(text: String): IofCourseData {
 data class CourseOrderSnapshot(
     val name: String,
     val controls: List<Int>,
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
 )
 
 fun coursesNeedReplace(
@@ -84,17 +84,17 @@ fun coursesNeedReplace(
     if (existing.isEmpty()) return false
     for (row in incoming) {
         val old = existing.find { courseKey(it.name) == courseKey(row.name) } ?: continue
-        val oldFlags = normalizeRandomOrder(old.controls.size, old.randomOrder)
-        val newFlags = normalizeRandomOrder(row.controls.size, row.randomOrder)
-        if (old.controls != row.controls || oldFlags != newFlags) return true
+        val oldGroups = parseClusterGroups(old.randomOrder, old.controls.size)
+        val newGroups = parseClusterGroups(row.randomOrder, row.controls.size)
+        if (old.controls != row.controls || oldGroups != newGroups) return true
     }
     return false
 }
 
 fun mergeCourseGeometry(existing: CourseCsvRow, incoming: CourseCsvRow): CourseCsvRow {
     val sameOrder = existing.controls == incoming.controls &&
-        normalizeRandomOrder(existing.controls.size, existing.randomOrder) ==
-        normalizeRandomOrder(incoming.controls.size, incoming.randomOrder)
+        parseClusterGroups(existing.randomOrder, existing.controls.size) ==
+        parseClusterGroups(incoming.randomOrder, incoming.controls.size)
     if (!sameOrder) return existing
     return existing.copy(
         lengthMeters = incoming.lengthMeters ?: existing.lengthMeters,
@@ -232,9 +232,9 @@ fun buildOrientSplitPrint(
     courseControls: List<Int> = emptyList(),
     lengthMeters: Int? = null,
     legMeters: List<Int?> = emptyList(),
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
     /** Parallel to [courseControls]; defaults to [randomOrder] when empty. */
-    courseRandomOrder: List<Boolean> = emptyList(),
+    courseRandomOrder: List<Int> = emptyList(),
     cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
     metersPerUnit: Double? = null,
 ): OrientSplitPrint? {
@@ -311,11 +311,15 @@ fun remapCourseLegMeters(
         addAll(publishedControls)
         add(finishCp)
     }
+    val usedOrig = BooleanArray(orig.lastIndex.coerceAtLeast(0))
     return (0 until published.lastIndex).map { index ->
         val from = published[index]
         val to = published[index + 1]
-        val fromIdx = orig.indexOf(from)
-        if (fromIdx >= 0 && orig.getOrNull(fromIdx + 1) == to) {
+        val fromIdx = (0 until orig.lastIndex).firstOrNull { i ->
+            !usedOrig[i] && orig[i] == from && orig[i + 1] == to
+        }
+        if (fromIdx != null) {
+            usedOrig[fromIdx] = true
             legs.getOrNull(fromIdx)?.takeIf { it > 0 }
         } else {
             null
@@ -330,7 +334,7 @@ fun courseLegMeters(
     toCp: Int,
     startCp: Int,
     finishCp: Int,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
     cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
     metersPerUnit: Double? = null,
 ): Int? {
@@ -339,19 +343,20 @@ fun courseLegMeters(
         seq += startCp
         seq += controls
         seq += finishCp
-        val flags = ArrayList<Boolean>(seq.size).apply {
-            add(false)
-            addAll(normalizeRandomOrder(controls.size, randomOrder))
-            add(false)
+        val groups = ArrayList<Int>(seq.size).apply {
+            add(0)
+            addAll(parseClusterGroups(randomOrder, controls.size))
+            add(0)
         }
-        val fromIdx = seq.indexOf(fromCp)
-        val toIdx = seq.indexOf(toCp)
-        if (fromIdx >= 0 && toIdx == fromIdx + 1) {
-            legMeters.getOrNull(fromIdx)?.takeIf { it > 0 }?.let { return it }
+        // Любое соседство в опубликованном порядке (в т.ч. повтор КП на дистанции).
+        for (i in 0 until seq.lastIndex) {
+            if (seq[i] == fromCp && seq[i + 1] == toCp) {
+                legMeters.getOrNull(i)?.takeIf { it > 0 }?.let { return it }
+            }
         }
         // Вход/выход грозди: любой КП грозди вместо первого/последнего в списке.
-        if (fromIdx >= 0 && toIdx >= 0) {
-            val segments = courseSegments(seq, flags)
+        if (seq.indexOf(fromCp) >= 0 && seq.indexOf(toCp) >= 0) {
+            val segments = courseSegments(seq, groups)
             var idx = 0
             for (i in 0 until segments.lastIndex) {
                 val a = segments[i]
@@ -362,6 +367,9 @@ fun courseLegMeters(
                         legMeters.getOrNull(idx)?.takeIf { it > 0 }?.let { return it }
                     a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
                         fromCp in a.cps && b.cp == toCp ->
+                        legMeters.getOrNull(idx + a.cps.size - 1)?.takeIf { it > 0 }?.let { return it }
+                    a is CourseSegment.Cluster && b is CourseSegment.Cluster &&
+                        fromCp in a.cps && toCp in b.cps ->
                         legMeters.getOrNull(idx + a.cps.size - 1)?.takeIf { it > 0 }?.let { return it }
                 }
                 idx += when (a) {
@@ -378,7 +386,7 @@ private fun parseIofCourse(course: Element, name: String): CourseCsvRow {
     val length = childText(course, "Length").toDoubleOrNull()?.toInt()
     val climb = childText(course, "Climb").toDoubleOrNull()?.toInt()
     val controls = ArrayList<Int>()
-    val randomOrder = ArrayList<Boolean>()
+    val randomFlags = ArrayList<Boolean>()
     val legs = ArrayList<Int?>()
     var pendingMeters = 0
     var pendingHas = false
@@ -403,14 +411,14 @@ private fun parseIofCourse(course: Element, name: String): CourseCsvRow {
                 ?: error("У дистанции «$name» некорректный номер КП «$code»")
             if (cp <= 0) error("У дистанции «$name» номер КП должен быть > 0")
             controls += cp
-            randomOrder += parseRandomOrderAttr(node.getAttribute("randomOrder"))
+            randomFlags += parseRandomOrderAttr(node.getAttribute("randomOrder"))
         }
         emitted += 1
     }
     return CourseCsvRow(
         name = name,
         controls = controls,
-        randomOrder = randomOrder,
+        randomOrder = boolRunsToGroups(randomFlags),
         lengthMeters = length?.takeIf { it >= 0 },
         climbMeters = climb?.takeIf { it >= 0 },
         legMeters = legs,

@@ -246,9 +246,10 @@ pub struct CourseRow {
     pub id: i64,
     pub name: String,
     pub controls: Vec<i64>,
-    /// Parallel to `controls`; true = free order («гроздь»).
+    /// Parallel to `controls`; 0 = fixed, >0 = cluster group id («гроздь»).
+    /// Same id in a row = one cluster; different ids back-to-back = adjacent ordered clusters.
     #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "randomOrder")]
-    pub random_order: Vec<bool>,
+    pub random_order: Vec<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
     pub length_meters: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
@@ -3160,10 +3161,10 @@ fn course_subsequence_taken(punches: &[i64], required: &[i64]) -> usize {
 fn course_subsequence_taken_with_adds(
     punches: &[i64],
     required: &[i64],
-    random_order: &[bool],
+    random_order: &[i32],
     add_counts: &HashMap<i64, usize>,
 ) -> usize {
-    crate::course_order::course_taken_with_order(punches, required, random_order, add_counts)
+    crate::course_order::course_taken_with_groups(punches, required, random_order, add_counts)
 }
 
 fn orient_add_cp_counts(
@@ -3196,12 +3197,12 @@ fn filter_course_cps(cps: &[i64], removed: &HashSet<i64>) -> Vec<i64> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CourseDef {
     controls: Vec<i64>,
-    random_order: Vec<bool>,
+    random_order: Vec<i32>,
 }
 
 fn filter_course_def(course: &CourseDef, removed: &HashSet<i64>) -> CourseDef {
     let (controls, random_order) =
-        crate::course_order::filter_course_with_order(&course.controls, &course.random_order, removed);
+        crate::course_order::filter_course_with_groups(&course.controls, &course.random_order, removed);
     CourseDef {
         controls,
         random_order,
@@ -3267,7 +3268,13 @@ fn load_courses_map_tx(tx: &Transaction<'_>) -> Result<HashMap<String, CourseDef
         let (name, cp, random_order) = row.map_err(|e| format!("read course map row: {e}"))?;
         let entry = out.entry(course_key(&name)).or_default();
         entry.controls.push(cp);
-        entry.random_order.push(random_order != 0);
+        entry.random_order.push(random_order as i32);
+    }
+    for entry in out.values_mut() {
+        entry.random_order = crate::course_order::normalize_cluster_groups(
+            entry.controls.len(),
+            &entry.random_order,
+        );
     }
     Ok(out)
 }
@@ -4029,9 +4036,9 @@ fn orient_course_sequence(
     start_cp: Option<i64>,
     finish_cp: i64,
     removed: &HashSet<i64>,
-    random_order: &[bool],
-) -> (Vec<i64>, Vec<bool>) {
-    let flags = crate::course_order::normalize_random_order(controls.len(), random_order);
+    random_order: &[i32],
+) -> (Vec<i64>, Vec<i32>) {
+    let flags = crate::course_order::normalize_cluster_groups(controls.len(), random_order);
     let mut kept = Vec::new();
     let mut kept_flags = Vec::new();
     for (i, &cp) in controls.iter().enumerate() {
@@ -4046,7 +4053,7 @@ fn orient_course_sequence(
     if let Some(start) = start_cp {
         if kept.first().copied() != Some(start) {
             seq.push(start);
-            seq_cluster.push(false);
+            seq_cluster.push(0);
         }
     }
     for (i, &cp) in kept.iter().enumerate() {
@@ -4055,7 +4062,7 @@ fn orient_course_sequence(
     }
     if seq.last().copied() != Some(finish_cp) && finish_cp > 0 {
         seq.push(finish_cp);
-        seq_cluster.push(false);
+        seq_cluster.push(0);
     }
     (seq, seq_cluster)
 }
@@ -4066,12 +4073,12 @@ fn orient_course_legs(
     start_cp: Option<i64>,
     finish_cp: i64,
     removed: &HashSet<i64>,
-    random_order: &[bool],
+    random_order: &[i32],
 ) -> Vec<(i64, i64)> {
     use crate::course_order::CourseSegment;
     let (seq, seq_cluster) =
         orient_course_sequence(controls, start_cp, finish_cp, removed, random_order);
-    let segments = crate::course_order::course_segments(&seq, &seq_cluster);
+    let segments = crate::course_order::course_segments_from_groups(&seq, &seq_cluster);
     let mut out = Vec::new();
     for i in 0..segments.len().saturating_sub(1) {
         match (&segments[i], &segments[i + 1]) {
@@ -4090,7 +4097,12 @@ fn orient_course_legs(
                     out.push((last, *b));
                 }
             }
-            (CourseSegment::Cluster(_), CourseSegment::Cluster(_)) => {}
+            // Adjacent ordered clusters: representative exit→entry leg.
+            (CourseSegment::Cluster(a), CourseSegment::Cluster(b)) => {
+                if let (Some(&from), Some(&to)) = (a.last(), b.first()) {
+                    out.push((from, to));
+                }
+            }
         }
     }
     out
@@ -4102,7 +4114,7 @@ fn exclusion_endpoint_sets(
     controls: &[i64],
     start_cp: i64,
     finish_cp: i64,
-    random_order: &[bool],
+    random_order: &[i32],
 ) -> (HashSet<i64>, HashSet<i64>) {
     use crate::course_order::CourseSegment;
     let (seq, seq_cluster) = orient_course_sequence(
@@ -4112,7 +4124,7 @@ fn exclusion_endpoint_sets(
         &HashSet::new(),
         random_order,
     );
-    let segments = crate::course_order::course_segments(&seq, &seq_cluster);
+    let segments = crate::course_order::course_segments_from_groups(&seq, &seq_cluster);
     for i in 0..segments.len().saturating_sub(1) {
         match (&segments[i], &segments[i + 1]) {
             (CourseSegment::Fixed(a), CourseSegment::Cluster(cps))
@@ -4131,6 +4143,14 @@ fn exclusion_endpoint_sets(
                     HashSet::from([to_cp]),
                 );
             }
+            (CourseSegment::Cluster(a), CourseSegment::Cluster(b))
+                if a.contains(&from_cp) && b.contains(&to_cp) =>
+            {
+                return (
+                    a.iter().copied().collect(),
+                    b.iter().copied().collect(),
+                );
+            }
             _ => {}
         }
     }
@@ -4147,7 +4167,7 @@ fn apply_orient_exclusion_rules(
     course_id: Option<i64>,
     rules: &[ExclusionRule],
     elapsed_seconds: i64,
-    random_order: &[bool],
+    random_order: &[i32],
 ) -> i64 {
     if window.len() < 2 || rules.is_empty() {
         return elapsed_seconds;
@@ -4579,7 +4599,7 @@ fn load_manual_corrections(
 fn load_course_controls_with_order_by_id(
     conn: &Connection,
     course_id: i64,
-) -> Result<(Vec<i64>, Vec<bool>), String> {
+) -> Result<(Vec<i64>, Vec<i32>), String> {
     let mut stmt = conn
         .prepare(
             "SELECT cp_number, COALESCE(random_order, 0) FROM course_controls WHERE course_id = ? ORDER BY seq ASC",
@@ -4595,8 +4615,10 @@ fn load_course_controls_with_order_by_id(
     for row in rows {
         let (cp, flag) = row.map_err(|e| format!("read course control: {e}"))?;
         controls.push(cp);
-        random_order.push(flag != 0);
+        random_order.push(flag as i32);
     }
+    random_order =
+        crate::course_order::normalize_cluster_groups(controls.len(), &random_order);
     Ok((controls, random_order))
 }
 
@@ -8474,8 +8496,16 @@ pub fn list_courses(conn: &Connection) -> Result<Vec<CourseRow>, String> {
         });
         if let Some(cp_number) = cp {
             entry.controls.push(cp_number);
-            entry.random_order.push(random_flag.unwrap_or(0) != 0);
+            entry.random_order.push(random_flag.unwrap_or(0) as i32);
         }
+    }
+    for entry in by_id.values_mut() {
+        // SQLite stores our group ids as-is; do not reinterpret 0/1 as legacy bool runs
+        // (that would collapse adjacent clusters like [1,1,2,2] if ever remapped wrongly).
+        entry.random_order = crate::course_order::normalize_cluster_groups(
+            entry.controls.len(),
+            &entry.random_order,
+        );
     }
     let mut out: Vec<CourseRow> = by_id.into_values().collect();
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -8487,16 +8517,16 @@ fn replace_course_controls_tx(
     course_id: i64,
     name: &str,
     controls: &[i64],
-    random_order: &[bool],
+    random_order: &[i32],
 ) -> Result<(), String> {
-    let flags = crate::course_order::normalize_random_order(controls.len(), random_order);
+    let flags = crate::course_order::normalize_cluster_groups(controls.len(), random_order);
     tx.execute(
         "DELETE FROM course_controls WHERE course_id = ?",
         params![course_id],
     )
     .map_err(|e| format!("replace course controls «{name}»: {e}"))?;
     for (idx, cp) in controls.iter().enumerate() {
-        let flag = if flags[idx] { 1_i64 } else { 0_i64 };
+        let flag = flags[idx] as i64;
         tx.execute(
             "INSERT INTO course_controls(course_id, seq, cp_number, random_order) VALUES(?, ?, ?, ?)",
             params![course_id, (idx as i64) + 1, cp, flag],
@@ -8525,14 +8555,14 @@ pub fn save_course(
     course_id: Option<i64>,
     name: String,
     controls: Vec<i64>,
-    random_order: Vec<bool>,
+    random_order: Vec<i32>,
 ) -> Result<CourseRow, String> {
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() {
         return Err("Укажите название дистанции.".to_string());
     }
     let controls = normalize_course_controls(&controls)?;
-    let random_order = crate::course_order::normalize_random_order(controls.len(), &random_order);
+    let random_order = crate::course_order::parse_cluster_groups(&random_order, controls.len());
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("save course transaction: {e}"))?;
@@ -8549,7 +8579,7 @@ pub fn save_course(
             return Err(format!("Дистанция «{name}» уже есть."));
         }
     }
-    let (old_controls, old_random): (Vec<i64>, Vec<bool>) = if let Some(id) = course_id {
+    let (old_controls, old_random): (Vec<i64>, Vec<i32>) = if let Some(id) = course_id {
         course_controls_with_order_tx(&tx, id)?
     } else {
         (Vec::new(), Vec::new())
@@ -8571,7 +8601,9 @@ pub fn save_course(
         tx.last_insert_rowid()
     };
     replace_course_controls_tx(&tx, id, &name, &controls, &random_order)?;
-    let keep_geometry = old_controls == controls && old_random == random_order;
+    // Длины/перегоны из IOF зависят от последовательности КП, не от флагов грозди.
+    let _ = old_random;
+    let keep_geometry = old_controls == controls;
     if !keep_geometry {
         tx.execute(
             "UPDATE courses SET length_meters = NULL, climb_meters = NULL, legs_json = '[]' WHERE id = ?",
@@ -8628,7 +8660,7 @@ pub fn delete_course(conn: &Connection, course_id: i64) -> Result<(), String> {
 struct ParsedCourse {
     name: String,
     controls: Vec<i64>,
-    random_order: Vec<bool>,
+    random_order: Vec<i32>,
     length_meters: Option<i64>,
     climb_meters: Option<i64>,
     leg_meters: Vec<Option<i64>>,
@@ -8647,10 +8679,14 @@ impl ParsedCourse {
     }
 
     fn from_iof(course: crate::iof_course::IofCourse) -> Self {
+        let random_order = crate::course_order::cluster_groups_from_flags(
+            course.controls.len(),
+            &course.random_order,
+        );
         Self {
             name: course.name,
             controls: course.controls,
-            random_order: course.random_order,
+            random_order,
             length_meters: course.length_meters,
             climb_meters: course.climb_meters,
             leg_meters: course.leg_meters,
@@ -8817,7 +8853,7 @@ pub fn import_courses_content(
                 (
                     row.name.clone(),
                     row.controls.clone(),
-                    row.random_order.clone(),
+                    crate::course_order::groups_to_bool_flags(&row.random_order),
                 )
             })
             .collect();
@@ -8826,7 +8862,7 @@ pub fn import_courses_content(
             .map(|row| crate::iof_course::IofCourse {
                 name: row.name.clone(),
                 controls: row.controls.clone(),
-                random_order: row.random_order.clone(),
+                random_order: crate::course_order::groups_to_bool_flags(&row.random_order),
                 length_meters: row.length_meters,
                 climb_meters: row.climb_meters,
                 leg_meters: row.leg_meters.clone(),
@@ -8989,7 +9025,7 @@ fn upsert_imported_course_tx(
 fn course_controls_with_order_tx(
     tx: &rusqlite::Transaction<'_>,
     course_id: i64,
-) -> Result<(Vec<i64>, Vec<bool>), String> {
+) -> Result<(Vec<i64>, Vec<i32>), String> {
     let mut stmt = tx
         .prepare(
             "SELECT cp_number, COALESCE(random_order, 0) FROM course_controls WHERE course_id = ? ORDER BY seq ASC",
@@ -9005,8 +9041,10 @@ fn course_controls_with_order_tx(
     for row in rows {
         let (cp, flag) = row.map_err(|e| format!("read course control: {e}"))?;
         controls.push(cp);
-        random_order.push(flag != 0);
+        random_order.push(flag as i32);
     }
+    random_order =
+        crate::course_order::normalize_cluster_groups(controls.len(), &random_order);
     Ok((controls, random_order))
 }
 
@@ -10231,6 +10269,23 @@ pub struct StartPack {
     pub sport: String,
     pub courses: Vec<StartPackCourse>,
     pub people: Vec<StartPackPerson>,
+    /// IOF Map/Scale — для темпа внутри грозди по прямой (мм × scale/1000).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "mapScaleDenominator"
+    )]
+    pub map_scale_denominator: Option<i64>,
+    /// Control/MapPosition из IOF (мм на карте), ключ — номер КП.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        rename = "controlPositionsMm"
+    )]
+    pub control_positions_mm: std::collections::BTreeMap<i64, [f64; 2]>,
+    /// Исключения перегонов (глобальные, по дистанции). Всегда в пакете, даже пустой список.
+    #[serde(default)]
+    pub exclusions: Vec<EventPackExclusion>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -10238,7 +10293,7 @@ pub struct StartPackCourse {
     pub name: String,
     pub controls: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "randomOrder")]
-    pub random_order: Vec<bool>,
+    pub random_order: Vec<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lengthMeters")]
     pub length_meters: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "climbMeters")]
@@ -10289,20 +10344,76 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
             current_course: row.format_name.trim().to_string(),
         });
     }
+    let map_scale_denominator = get_map_scale_denominator(conn)?;
+    let control_positions_mm = load_iof_control_positions_mm(conn)?;
+    let exclusions = query_event_pack_exclusions(conn)?;
     Ok(StartPack {
-        revision: start_pack_revision(settings.sport_kind.as_str(), &courses, &people),
+        revision: start_pack_revision(
+            settings.sport_kind.as_str(),
+            &courses,
+            &people,
+            map_scale_denominator,
+            &control_positions_mm,
+            &exclusions,
+        ),
         sport: settings.sport_kind,
         courses,
         people,
+        map_scale_denominator,
+        control_positions_mm,
+        exclusions,
     })
 }
 
-fn start_pack_revision(sport: &str, courses: &[StartPackCourse], people: &[StartPackPerson]) -> i64 {
+fn load_iof_control_positions_mm(
+    conn: &Connection,
+) -> Result<std::collections::BTreeMap<i64, [f64; 2]>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(raw) = get_setting_value(conn, IOF_CONTROL_POSITIONS_MM_KEY)? else {
+        return Ok(out);
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(out);
+    };
+    for (key, value) in map {
+        let Ok(cp) = key.parse::<i64>() else {
+            continue;
+        };
+        if cp <= 0 {
+            continue;
+        }
+        let pair = match value {
+            serde_json::Value::Array(arr) if arr.len() >= 2 => {
+                let x = arr[0].as_f64();
+                let y = arr[1].as_f64();
+                match (x, y) {
+                    (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some([x, y]),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(xy) = pair {
+            out.insert(cp, xy);
+        }
+    }
+    Ok(out)
+}
+
+fn start_pack_revision(
+    sport: &str,
+    courses: &[StartPackCourse],
+    people: &[StartPackPerson],
+    map_scale_denominator: Option<i64>,
+    control_positions_mm: &std::collections::BTreeMap<i64, [f64; 2]>,
+    exclusions: &[EventPackExclusion],
+) -> i64 {
     let mut hasher = DefaultHasher::new();
     sport.hash(&mut hasher);
     for course in courses {
         course.name.hash(&mut hasher);
         course.controls.hash(&mut hasher);
+        course.random_order.hash(&mut hasher);
         course.length_meters.hash(&mut hasher);
         course.climb_meters.hash(&mut hasher);
         course.leg_meters.hash(&mut hasher);
@@ -10312,6 +10423,18 @@ fn start_pack_revision(sport: &str, courses: &[StartPackCourse], people: &[Start
         person.name.hash(&mut hasher);
         person.courses.hash(&mut hasher);
         person.current_course.hash(&mut hasher);
+    }
+    map_scale_denominator.hash(&mut hasher);
+    for (cp, xy) in control_positions_mm {
+        cp.hash(&mut hasher);
+        xy[0].to_bits().hash(&mut hasher);
+        xy[1].to_bits().hash(&mut hasher);
+    }
+    for rule in exclusions {
+        rule.course.hash(&mut hasher);
+        rule.from_cp.hash(&mut hasher);
+        rule.to_cp.hash(&mut hasher);
+        rule.max_leg_seconds.hash(&mut hasher);
     }
     hasher.finish() as i64
 }
@@ -10369,7 +10492,7 @@ pub struct EventPackFormat {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub random_order: Vec<bool>,
+    pub random_order: Vec<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cp_type_rules: Vec<EventPackCpTypeRule>,
 }
@@ -10540,11 +10663,8 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
             team: row.teammates,
         });
     }
-    let exclusions = if orient {
-        Vec::new()
-    } else {
-        query_event_pack_exclusions(conn)?
-    };
+    // И ориентирование, и рогейн: глобальные исключения перегонов (course_id / format_id).
+    let exclusions = query_event_pack_exclusions(conn)?;
     let map_points = collect_event_pack_map_points(conn)?;
     let meters_per_pixel = get_map_georef_info(conn)
         .ok()
@@ -12942,7 +13062,7 @@ fn payload_str(payload: &Value, key: &str) -> Result<String, String> {
 mod tests {
     use super::{
         apply_orient_exclusion_rules, assign_course_correction,
-        add_cp_correction, calculate_orient_result, CourseDef, ManualCorrection,
+        add_cp_correction, add_exclusion_rule, calculate_orient_result, CourseDef, ManualCorrection,
         course_subsequence_taken, course_subsequence_taken_with_adds, orient_add_cp_counts,
         ensure_schema_extras, filter_course_cps, first_course_mark,
         import_courses_content, import_csv_content, import_phone_snapshot, import_phone_protocol,
@@ -13347,6 +13467,53 @@ mod tests {
         assert_eq!(d1.leg_meters.last().copied().flatten(), Some(274));
         assert_eq!(d2.length_meters, Some(2310));
         assert_eq!(d2.controls.len(), 14);
+        let pack = build_start_pack(&conn).unwrap();
+        assert_eq!(pack.map_scale_denominator, Some(4000));
+        assert!(
+            pack.control_positions_mm.contains_key(&31),
+            "IOF MapPosition must travel in start-pack for cluster pace"
+        );
+    }
+
+    #[test]
+    fn orient_exclusions_travel_in_start_and_event_pack() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        import_courses_content(&conn, "D2;65;46;35\n", true).unwrap();
+        let course_id = list_courses(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == "D2")
+            .unwrap()
+            .id;
+        add_exclusion_rule(
+            &conn,
+            "all".into(),
+            None,
+            None,
+            Some(course_id),
+            65,
+            46,
+            "forward".into(),
+            "remove_legs".into(),
+            Some(90),
+        )
+        .unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Тест;D2\n",
+            true,
+        )
+        .unwrap();
+        let start = build_start_pack(&conn).unwrap();
+        assert_eq!(start.exclusions.len(), 1);
+        assert_eq!(start.exclusions[0].course, "D2");
+        assert_eq!(start.exclusions[0].from_cp, 65);
+        assert_eq!(start.exclusions[0].to_cp, 46);
+        let event = build_event_pack(&conn, "Тест").unwrap();
+        assert_eq!(event.exclusions.len(), 1);
+        assert_eq!(event.exclusions[0].course, "D2");
+        assert_eq!(event.exclusions[0].from_cp, 65);
     }
 
     #[test]
@@ -13517,11 +13684,30 @@ mod tests {
     #[test]
     fn orient_course_legs_keeps_cluster_entry_and_exit() {
         let controls = [31, 32, 33, 34, 35, 36];
-        let random = [false, false, true, true, true, false];
+        let random = [0, 0, 1, 1, 1, 0];
         let legs = orient_course_legs(&controls, Some(241), 240, &HashSet::new(), &random);
         assert_eq!(
             legs,
             vec![(241, 31), (31, 32), (32, 33), (35, 36), (36, 240)]
+        );
+    }
+
+    #[test]
+    fn orient_course_legs_adjacent_clusters() {
+        let controls = [71, 72, 73, 74, 75, 76, 77, 78, 79];
+        let groups = [0, 0, 0, 1, 1, 1, 2, 2, 0];
+        let legs = orient_course_legs(&controls, Some(241), 240, &HashSet::new(), &groups);
+        assert_eq!(
+            legs,
+            vec![
+                (241, 71),
+                (71, 72),
+                (72, 73),
+                (73, 74),
+                (76, 77),
+                (78, 79),
+                (79, 240),
+            ]
         );
     }
 

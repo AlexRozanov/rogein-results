@@ -1391,7 +1391,7 @@ fn save_course(
     course_id: Option<i64>,
     name: String,
     controls: Vec<i64>,
-    random_order: Option<Vec<bool>>,
+    random_order: Option<Vec<i32>>,
 ) -> Result<CourseRow, String> {
     let _guard = state
         .db_lock

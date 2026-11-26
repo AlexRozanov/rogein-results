@@ -173,23 +173,23 @@ object TestCoursePlan {
     private fun innerControls(controls: List<Int>): List<Int> =
         controls.filter { it != CP_START && it != CP_FINISH }
 
-    private fun innerRandomOrder(controls: List<Int>, randomOrder: List<Boolean>): List<Boolean> {
-        val flags = normalizeRandomOrder(controls.size, randomOrder)
+    private fun innerRandomOrder(controls: List<Int>, randomOrder: List<Int>): List<Int> {
+        val groups = parseClusterGroups(randomOrder, controls.size)
         return controls.mapIndexedNotNull { index, cp ->
-            if (cp == CP_START || cp == CP_FINISH) null else flags[index]
+            if (cp == CP_START || cp == CP_FINISH) null else groups[index]
         }
     }
 
     fun fullSequence(
         controls: List<Int>,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
         random: kotlin.random.Random = kotlin.random.Random.Default,
     ): List<Int> {
         val inner = innerControls(controls)
         require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }
-        val flags = innerRandomOrder(controls, randomOrder)
+        val groups = innerRandomOrder(controls, randomOrder)
         val path = ArrayList<Int>(inner.size)
-        for (seg in courseSegments(inner, flags)) {
+        for (seg in courseSegmentsFromGroups(inner, groups)) {
             when (seg) {
                 is CourseSegment.Fixed -> path += seg.cp
                 is CourseSegment.Cluster -> path += seg.cps.shuffled(random)
@@ -206,13 +206,13 @@ object TestCoursePlan {
      */
     fun wrongSequence(
         controls: List<Int>,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
         random: kotlin.random.Random = kotlin.random.Random.Default,
     ): List<Int> {
         val inner = innerControls(controls)
         require(inner.isNotEmpty()) { "у дистанции нет порядка КП" }
-        val flags = innerRandomOrder(controls, randomOrder)
-        val segments = courseSegments(inner, flags)
+        val groups = innerRandomOrder(controls, randomOrder)
+        val segments = courseSegmentsFromGroups(inner, groups)
         val clusterIdx = segments.indexOfFirst { it is CourseSegment.Cluster && (it as CourseSegment.Cluster).cps.size >= 1 }
         if (clusterIdx >= 0) {
             return wrongClusterSequence(segments, clusterIdx, random)
@@ -291,11 +291,11 @@ object TestCoursePlan {
     }
 
     /** Подпись порядка КП с квадратными скобками вокруг гроздей. */
-    fun formatControlsLabel(controls: List<Int>, randomOrder: List<Boolean> = emptyList()): String {
+    fun formatControlsLabel(controls: List<Int>, randomOrder: List<Int> = emptyList()): String {
         val inner = innerControls(controls)
         if (inner.isEmpty()) return ""
-        val flags = innerRandomOrder(controls, randomOrder)
-        return courseSegments(inner, flags).joinToString(" → ") { seg ->
+        val groups = innerRandomOrder(controls, randomOrder)
+        return courseSegmentsFromGroups(inner, groups).joinToString(" → ") { seg ->
             when (seg) {
                 is CourseSegment.Fixed -> seg.cp.toString()
                 is CourseSegment.Cluster -> "[${seg.cps.joinToString("·")}]"

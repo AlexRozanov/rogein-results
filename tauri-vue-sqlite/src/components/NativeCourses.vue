@@ -4,12 +4,19 @@ import { invoke } from "@tauri-apps/api/core";
 import FilePickerButton from "./FilePickerButton.vue";
 import IconActionButton from "./IconActionButton.vue";
 import ImportExistingDataDialog from "./ImportExistingDataDialog.vue";
+import {
+  mergeClusterWithNext,
+  parseClusterGroups,
+  splitClusterAfter,
+  toggleClusterGroup,
+} from "../courseOrder";
 
 type CourseRow = {
   id: number;
   name: string;
   controls: number[];
-  randomOrder?: boolean[];
+  /** 0 = fixed, >0 = cluster group id */
+  randomOrder?: Array<number | boolean>;
 };
 
 type CourseDraft = {
@@ -17,7 +24,7 @@ type CourseDraft = {
   id: number | null;
   name: string;
   controls: number[];
-  randomOrder: boolean[];
+  randomOrder: number[];
   addText: string;
   editingIndex: number | null;
   editText: string;
@@ -56,8 +63,11 @@ onMounted(() => {
   void refresh();
 });
 
-function normalizeFlags(controls: number[], flags?: boolean[]): boolean[] {
-  return controls.map((_, i) => Boolean(flags?.[i]));
+function normalizeGroups(
+  controls: number[],
+  flags?: Array<number | boolean>,
+): number[] {
+  return parseClusterGroups(flags, controls.length);
 }
 
 function toDraft(row: CourseRow): CourseDraft {
@@ -66,7 +76,7 @@ function toDraft(row: CourseRow): CourseDraft {
     id: row.id,
     name: row.name,
     controls: [...row.controls],
-    randomOrder: normalizeFlags(row.controls, row.randomOrder),
+    randomOrder: normalizeGroups(row.controls, row.randomOrder),
     addText: "",
     editingIndex: null,
     editText: "",
@@ -96,6 +106,33 @@ async function refresh() {
 
 function isRemovedCp(cp: number) {
   return removedCps.value.has(cp);
+}
+
+type CourseDisplaySeg =
+  | { kind: "fixed"; index: number; cp: number }
+  | { kind: "cluster"; start: number; cps: number[]; indices: number[] };
+
+/** Группы для отображения: 71 → 72 → [74 75] → [77 78] → 81 */
+function courseDisplaySegments(draft: CourseDraft): CourseDisplaySeg[] {
+  const out: CourseDisplaySeg[] = [];
+  let i = 0;
+  while (i < draft.controls.length) {
+    const g = draft.randomOrder[i] ?? 0;
+    if (g > 0) {
+      const cps: number[] = [];
+      const indices: number[] = [];
+      while (i < draft.controls.length && draft.randomOrder[i] === g) {
+        cps.push(draft.controls[i]!);
+        indices.push(i);
+        i += 1;
+      }
+      out.push({ kind: "cluster", start: indices[0]!, cps, indices });
+    } else {
+      out.push({ kind: "fixed", index: i, cp: draft.controls[i]! });
+      i += 1;
+    }
+  }
+  return out;
 }
 
 function parseCpList(raw: string): number[] {
@@ -146,12 +183,12 @@ async function persist(draft: CourseDraft) {
       courseId: draft.id,
       name,
       controls: draft.controls,
-      randomOrder: normalizeFlags(draft.controls, draft.randomOrder),
+      randomOrder: normalizeGroups(draft.controls, draft.randomOrder),
     });
     draft.id = saved.id;
     draft.name = saved.name;
     draft.controls = [...saved.controls];
-    draft.randomOrder = normalizeFlags(saved.controls, saved.randomOrder);
+    draft.randomOrder = normalizeGroups(saved.controls, saved.randomOrder);
     draft.key = `id-${saved.id}`;
     emit("status", `Дистанция «${saved.name}» сохранена, результаты пересчитаны.`);
     emit("saved");
@@ -187,7 +224,7 @@ function addFromInput(draft: CourseDraft) {
   const nums = parseCpList(draft.addText);
   if (!nums.length) return;
   draft.controls.push(...nums);
-  draft.randomOrder.push(...nums.map(() => false));
+  draft.randomOrder.push(...nums.map(() => 0));
   draft.addText = "";
   scheduleSave(draft);
 }
@@ -212,7 +249,7 @@ function onAddPaste(draft: CourseDraft, event: ClipboardEvent) {
   if (nums.length <= 1) return;
   event.preventDefault();
   draft.controls.push(...nums);
-  draft.randomOrder.push(...nums.map(() => false));
+  draft.randomOrder.push(...nums.map(() => 0));
   draft.addText = "";
   scheduleSave(draft);
 }
@@ -229,8 +266,36 @@ function removeCp(draft: CourseDraft, index: number) {
 
 function toggleRandom(draft: CourseDraft, index: number) {
   if (index < 0 || index >= draft.randomOrder.length) return;
-  draft.randomOrder[index] = !draft.randomOrder[index];
+  // Alt+клик: в гроздь / из грозди; к предыдущей грозди присоединяется.
+  draft.randomOrder = toggleClusterGroup(draft.randomOrder, index, true);
   scheduleSave(draft);
+}
+
+/** Клик по пробелу внутри [a b c] — разделить на две смежные грозди. */
+function splitClusterAt(draft: CourseDraft, index: number) {
+  const next = splitClusterAfter(draft.randomOrder, index);
+  if (!next) return;
+  draft.randomOrder = next;
+  scheduleSave(draft);
+}
+
+/** Клик по → между двумя гроздями — объединить. */
+function mergeClustersAt(draft: CourseDraft, index: number) {
+  const next = mergeClusterWithNext(draft.randomOrder, index);
+  if (!next) return;
+  draft.randomOrder = next;
+  scheduleSave(draft);
+}
+
+function canSplitAfter(draft: CourseDraft, index: number) {
+  const id = draft.randomOrder[index] ?? 0;
+  return id > 0 && draft.randomOrder[index + 1] === id;
+}
+
+function canMergeAfterSegment(draft: CourseDraft, lastIndex: number) {
+  const left = draft.randomOrder[lastIndex] ?? 0;
+  const right = draft.randomOrder[lastIndex + 1] ?? 0;
+  return left > 0 && right > 0 && left !== right;
 }
 
 function onChipClick(draft: CourseDraft, index: number, event: MouseEvent) {
@@ -294,7 +359,8 @@ function commitEditChip(draft: CourseDraft) {
     removeCp(draft, index);
     return;
   }
-  const flags = nums.map((_, i) => (i === 0 ? Boolean(draft.randomOrder[index]) : false));
+  const keepGroup = draft.randomOrder[index] ?? 0;
+  const flags = nums.map((_, i) => (i === 0 ? keepGroup : 0));
   draft.controls.splice(index, 1, ...nums);
   draft.randomOrder.splice(index, 1, ...flags);
   scheduleSave(draft);
@@ -424,7 +490,10 @@ defineExpose({ refresh });
     <p class="subtitle">
       Порядок КП: <code>1 → 2 → 3</code>. Клик по номеру — изменить, × — удалить из этой дистанции,
       перетаскивание — порядок (полоска показывает, куда встанет КП).
-      ПКМ / Alt+клик по КП — гроздь (свободный порядок, КП в скобках, внутри группы «·»).
+      ПКМ / Alt+клик по КП — гроздь.
+      Клик по <code>·</code> внутри <code>[74 · 75 · 76]</code> — разделить на смежные грозди
+      <code>[74 75] → [76]</code> (сначала первая, потом вторая).
+      Клик по <code>→</code> между двумя гроздями — объединить.
       В поле справа введите номер и Enter / пробел; можно вставить список
       <code>32 51 34</code>. Старт и финиш задаются в настройках.
       CSV: строка на дистанцию, <code>D1;31;32;33</code> или <code>D1;31 32 33</code>.
@@ -478,74 +547,192 @@ defineExpose({ refresh });
               class="course-chip-row"
               @dragleave="onRowDragLeave(draft, $event)"
             >
-              <template v-for="(cp, idx) in draft.controls" :key="`${draft.key}-${idx}-${cp}`">
-                <span
-                  class="course-drop-caret"
-                  :class="{ active: isDropCaret(draft, idx) }"
-                  aria-hidden="true"
-                />
-                <span
-                  class="course-chip"
-                  :class="{
-                    editing: draft.editingIndex === idx,
-                    dragging: dragFrom?.key === draft.key && dragFrom.index === idx,
-                    voided: isRemovedCp(cp),
-                    cluster: draft.randomOrder[idx],
-                  }"
-                  :title="
-                    isRemovedCp(cp)
-                      ? 'Снят в настройках — как будто не было на дистанции'
-                      : draft.randomOrder[idx]
-                        ? 'Гроздь: свободный порядок. Alt+клик или ПКМ — убрать'
-                        : 'Alt+клик или ПКМ — гроздь (свободный порядок)'
-                  "
-                  draggable="true"
-                  @dragstart="onDragStart(draft, idx, $event)"
-                  @dragover="onChipDragOver(draft, idx, $event)"
-                  @drop.prevent="onChipDrop(draft, idx, $event)"
-                  @dragend="onDragEnd"
-                  @contextmenu.prevent="toggleRandom(draft, idx)"
-                >
-                  <input
-                    v-if="draft.editingIndex === idx"
-                    :data-course-edit="`${draft.key}-${idx}`"
-                    v-model="draft.editText"
-                    class="course-chip-edit"
-                    :disabled="isBusy()"
-                    @keydown.enter.prevent="commitEditChip(draft)"
-                    @keydown.escape="draft.editingIndex = null"
-                    @blur="commitEditChip(draft)"
+              <template
+                v-for="(seg, segIdx) in courseDisplaySegments(draft)"
+                :key="`${draft.key}-seg-${segIdx}-${seg.kind === 'fixed' ? seg.cp : seg.cps.join('-')}`"
+              >
+                <template v-if="seg.kind === 'fixed'">
+                  <span
+                    class="course-drop-caret"
+                    :class="{ active: isDropCaret(draft, seg.index) }"
+                    aria-hidden="true"
                   />
-                  <template v-else>
-                    <button
-                      type="button"
-                      class="course-chip-num"
+                  <span
+                    class="course-chip"
+                    :class="{
+                      editing: draft.editingIndex === seg.index,
+                      dragging: dragFrom?.key === draft.key && dragFrom.index === seg.index,
+                      voided: isRemovedCp(seg.cp),
+                    }"
+                    :title="
+                      isRemovedCp(seg.cp)
+                        ? 'Снят в настройках — как будто не было на дистанции'
+                        : 'Alt+клик или ПКМ — гроздь (свободный порядок)'
+                    "
+                    draggable="true"
+                    @dragstart="onDragStart(draft, seg.index, $event)"
+                    @dragover="onChipDragOver(draft, seg.index, $event)"
+                    @drop.prevent="onChipDrop(draft, seg.index, $event)"
+                    @dragend="onDragEnd"
+                    @contextmenu.prevent="toggleRandom(draft, seg.index)"
+                  >
+                    <input
+                      v-if="draft.editingIndex === seg.index"
+                      :data-course-edit="`${draft.key}-${seg.index}`"
+                      v-model="draft.editText"
+                      class="course-chip-edit"
                       :disabled="isBusy()"
-                      @click="onChipClick(draft, idx, $event)"
+                      @keydown.enter.prevent="commitEditChip(draft)"
+                      @keydown.escape="draft.editingIndex = null"
+                      @blur="commitEditChip(draft)"
+                    />
+                    <template v-else>
+                      <button
+                        type="button"
+                        class="course-chip-num"
+                        :disabled="isBusy()"
+                        @click="onChipClick(draft, seg.index, $event)"
+                      >
+                        {{ seg.cp }}
+                      </button>
+                      <button
+                        type="button"
+                        class="course-chip-x"
+                        title="Удалить КП"
+                        :disabled="isBusy()"
+                        @click.stop="removeCp(draft, seg.index)"
+                      >
+                        ×
+                      </button>
+                    </template>
+                  </span>
+                </template>
+                <span v-else class="course-cluster-group">
+                  <span class="course-cluster-bracket" aria-hidden="true">[</span>
+                  <template v-for="(cp, j) in seg.cps" :key="`${draft.key}-c-${seg.indices[j]}-${cp}`">
+                    <span
+                      class="course-drop-caret"
+                      :class="{ active: isDropCaret(draft, seg.indices[j]!) }"
+                      aria-hidden="true"
+                    />
+                    <span
+                      class="course-chip cluster"
+                      :class="{
+                        editing: draft.editingIndex === seg.indices[j],
+                        dragging:
+                          dragFrom?.key === draft.key && dragFrom.index === seg.indices[j],
+                        voided: isRemovedCp(cp),
+                      }"
+                      title="Гроздь: свободный порядок. Alt+клик или ПКМ — убрать"
+                      draggable="true"
+                      @dragstart="onDragStart(draft, seg.indices[j]!, $event)"
+                      @dragover="onChipDragOver(draft, seg.indices[j]!, $event)"
+                      @drop.prevent="onChipDrop(draft, seg.indices[j]!, $event)"
+                      @dragend="onDragEnd"
+                      @contextmenu.prevent="toggleRandom(draft, seg.indices[j]!)"
                     >
-                      {{ draft.randomOrder[idx] ? `[${cp}]` : cp }}
-                    </button>
+                      <input
+                        v-if="draft.editingIndex === seg.indices[j]"
+                        :data-course-edit="`${draft.key}-${seg.indices[j]}`"
+                        v-model="draft.editText"
+                        class="course-chip-edit"
+                        :disabled="isBusy()"
+                        @keydown.enter.prevent="commitEditChip(draft)"
+                        @keydown.escape="draft.editingIndex = null"
+                        @blur="commitEditChip(draft)"
+                      />
+                      <template v-else>
+                        <button
+                          type="button"
+                          class="course-chip-num"
+                          :disabled="isBusy()"
+                          @click="onChipClick(draft, seg.indices[j]!, $event)"
+                        >
+                          {{ cp }}
+                        </button>
+                        <button
+                          type="button"
+                          class="course-chip-x"
+                          title="Удалить КП"
+                          :disabled="isBusy()"
+                          @click.stop="removeCp(draft, seg.indices[j]!)"
+                        >
+                          ×
+                        </button>
+                      </template>
+                    </span>
                     <button
+                      v-if="j < seg.cps.length - 1"
                       type="button"
-                      class="course-chip-x"
-                      title="Удалить КП"
-                      :disabled="isBusy()"
-                      @click.stop="removeCp(draft, idx)"
+                      class="course-cluster-gap"
+                      :class="{
+                        active: isDropCaret(draft, seg.indices[j]! + 1),
+                        split: canSplitAfter(draft, seg.indices[j]!),
+                      }"
+                      :title="
+                        canSplitAfter(draft, seg.indices[j]!)
+                          ? 'Разделить гроздь здесь'
+                          : undefined
+                      "
+                      :disabled="isBusy() || !canSplitAfter(draft, seg.indices[j]!)"
+                      @click.stop.prevent="splitClusterAt(draft, seg.indices[j]!)"
+                      @dragover="setDropSlot(draft, seg.indices[j]! + 1, $event)"
+                      @drop.prevent="onDropAt(draft, seg.indices[j]! + 1)"
                     >
-                      ×
+                      ·
                     </button>
                   </template>
+                  <span class="course-cluster-bracket" aria-hidden="true">]</span>
                 </span>
                 <span
-                  v-if="idx < draft.controls.length - 1"
+                  v-if="
+                    (seg.kind === 'fixed' ? seg.index + 1 : seg.start + seg.cps.length) <
+                    draft.controls.length
+                  "
                   class="course-seq-arrow"
-                  :class="{ active: isDropCaret(draft, idx + 1) }"
-                  @dragover="setDropSlot(draft, idx + 1, $event)"
-                  @drop.prevent="onDropAt(draft, idx + 1)"
+                  :class="{
+                    active: isDropCaret(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index + 1 : seg.start + seg.cps.length,
+                    ),
+                    merge: canMergeAfterSegment(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index : seg.start + seg.cps.length - 1,
+                    ),
+                  }"
+                  :title="
+                    canMergeAfterSegment(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index : seg.start + seg.cps.length - 1,
+                    )
+                      ? 'Объединить грозди'
+                      : undefined
+                  "
+                  @click.stop="
+                    canMergeAfterSegment(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index : seg.start + seg.cps.length - 1,
+                    ) &&
+                      mergeClustersAt(
+                        draft,
+                        seg.kind === 'fixed' ? seg.index : seg.start + seg.cps.length - 1,
+                      )
+                  "
+                  @dragover="
+                    setDropSlot(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index + 1 : seg.start + seg.cps.length,
+                      $event,
+                    )
+                  "
+                  @drop.prevent="
+                    onDropAt(
+                      draft,
+                      seg.kind === 'fixed' ? seg.index + 1 : seg.start + seg.cps.length,
+                    )
+                  "
                 >
-                  {{
-                    draft.randomOrder[idx] && draft.randomOrder[idx + 1] ? "·" : "→"
-                  }}
+                  →
                 </span>
               </template>
               <span

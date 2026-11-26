@@ -111,10 +111,11 @@ pub struct PublishAwardGroup {
     pub min_age: Option<i32>,
     pub max_age: Option<i32>,
     pub sort_order: i32,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub course_cps: Vec<i32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub course_random_order: Vec<bool>,
+    /// Parallel to course_cps: 0=fixed, >0=cluster group id (adjacent clusters need distinct ids).
+    #[serde(default)]
+    pub course_random_order: Vec<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length_meters: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -892,7 +893,7 @@ fn collect_orient_publish(
                 continue;
             }
             course_cps.push(cp as i32);
-            course_random_order.push(course.random_order.get(i).copied().unwrap_or(false));
+            course_random_order.push(course.random_order.get(i).copied().unwrap_or(0));
         }
         award_groups.push(PublishAwardGroup {
             source_id: course.id,

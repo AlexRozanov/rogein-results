@@ -27,7 +27,7 @@ data class SplitReceipt(
     val requiredControls: List<Int> = emptyList(),
     val lengthMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
     val cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
     val metersPerUnit: Double? = null,
 )

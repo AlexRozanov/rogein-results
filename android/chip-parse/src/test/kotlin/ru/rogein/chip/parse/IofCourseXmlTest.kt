@@ -104,7 +104,7 @@ class IofCourseXmlTest {
     fun courseLegMetersClusterEntryAndExit() {
         // start→31, 31→32, 32→33, 33→34, 34→finish
         val controls = listOf(31, 32, 33, 34)
-        val random = listOf(false, true, true, false)
+        val random = listOf(0, 1, 1, 0)
         val legs = listOf(100, 200, 50, 60, 80)
         // Вход в гроздь на 33 (не первый в списке) — метры перегона 31→32.
         assertEquals(200, courseLegMeters(controls, legs, 31, 33, 241, 240, random))
@@ -115,9 +115,38 @@ class IofCourseXmlTest {
     }
 
     @Test
+    fun courseLegMetersFindsSecondOccurrenceOfDuplicateCp() {
+        // Как D2: 45 встречается дважды — поздний перегон 39→45 не должен брать первую 45.
+        val controls = listOf(46, 35, 45, 31, 39, 45)
+        val legs = listOf(120, 92, 195, 79, 178, 210, 108)
+        assertEquals(210, courseLegMeters(controls, legs, 39, 45, 241, 240))
+        assertEquals(108, courseLegMeters(controls, legs, 45, 240, 241, 240))
+        assertEquals(195, courseLegMeters(controls, legs, 35, 45, 241, 240))
+    }
+
+    @Test
+    fun courseLegMetersClusterShuffleUsesMapStraightLine() {
+        val controls = listOf(46, 35, 45, 31)
+        val random = listOf(1, 1, 1, 0)
+        val legs = listOf(120, 92, 195, 79, 178)
+        val positions = mapOf(
+            46 to (0.0 to 0.0),
+            45 to (30.0 to 40.0), // 50 units
+            35 to (0.0 to 40.0),
+        )
+        // Порядок не как в XML: 46→45 — только по координатам.
+        assertEquals(
+            200,
+            courseLegMeters(controls, legs, 46, 45, 241, 240, random, positions, 4.0),
+        )
+        // Вход в гроздь 65 нет; старт→46 — соседство в seq.
+        assertEquals(120, courseLegMeters(controls, legs, 241, 46, 241, 240, random, positions, 4.0))
+    }
+
+    @Test
     fun courseLegMetersFallsBackToMapStraightLine() {
         val controls = listOf(31, 32, 33)
-        val random = listOf(false, true, true)
+        val random = listOf(0, 1, 1)
         val positions = mapOf(
             32 to (0.0 to 0.0),
             33 to (3.0 to 4.0), // 5 units
@@ -150,7 +179,7 @@ class IofCourseXmlTest {
     @Test
     fun buildOrientSplitPrintShowsPaceOnClusterPath() {
         val controls = listOf(31, 32, 33, 34)
-        val random = listOf(false, true, true, false)
+        val random = listOf(0, 1, 1, 0)
         val legs = listOf(100, 200, 50, 60, 80)
         val positions = mapOf(
             32 to (0.0 to 0.0),

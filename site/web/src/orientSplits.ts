@@ -150,24 +150,90 @@ function emitMissed(cp: number): ClassifiedPunch {
   return { kind: "missed", cp, seq: null, mark_time: "" };
 }
 
-function asBoolList(raw: unknown, len: number): boolean[] {
-  if (!Array.isArray(raw) || len <= 0) return Array.from({ length: len }, () => false);
-  return Array.from({ length: len }, (_, i) => Boolean(raw[i]));
+/** 0 = fixed; >0 = cluster group id. Legacy bool/0·1 → numbered runs. */
+export function parseClusterGroups(raw: unknown, controlCount: number): number[] {
+  if (controlCount <= 0) return [];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return Array.from({ length: controlCount }, () => 0);
+  }
+  const nums: number[] = [];
+  let anyAboveOne = false;
+  for (let i = 0; i < controlCount; i += 1) {
+    const value = raw[i];
+    let n = 0;
+    if (typeof value === "boolean") n = value ? 1 : 0;
+    else if (typeof value === "number" && Number.isFinite(value)) n = Math.max(0, Math.trunc(value));
+    else if (typeof value === "string") {
+      if (value === "true" || value === "1") n = 1;
+      else if (value === "false" || value === "0" || value.trim() === "") n = 0;
+      else {
+        const parsed = Number(value);
+        n = Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+      }
+    }
+    if (n > 1) anyAboveOne = true;
+    nums.push(n);
+  }
+  if (anyAboveOne) return nums;
+  const out = Array.from({ length: controlCount }, () => 0);
+  let nextId = 1;
+  let i = 0;
+  while (i < controlCount) {
+    if (!(nums[i] > 0)) {
+      i += 1;
+      continue;
+    }
+    const id = nextId;
+    nextId += 1;
+    while (i < controlCount && nums[i] > 0) {
+      out[i] = id;
+      i += 1;
+    }
+  }
+  return out;
 }
 
 type CourseSeg =
   | { kind: "fixed"; cp: number; index: number }
   | { kind: "cluster"; cps: number[]; indices: number[] };
 
+/** Подпись порядка: `71→72→[74·75·76]→[77·78]→79`. */
+export function formatCourseOrderLabel(
+  courseCps: number[],
+  randomOrder: unknown = [],
+): string {
+  if (!courseCps.length) return "";
+  return courseSegments(courseCps, randomOrder)
+    .map((seg) =>
+      seg.kind === "fixed" ? String(seg.cp) : `[${seg.cps.join("·")}]`,
+    )
+    .join("→");
+}
+
+export function courseSeqSeparator(
+  randomOrder: unknown,
+  index: number,
+  controlCount?: number,
+): "·" | "→" {
+  const len =
+    controlCount ??
+    (Array.isArray(randomOrder) ? randomOrder.length : index + 2);
+  const groups = parseClusterGroups(randomOrder, len);
+  const a = groups[index] ?? 0;
+  const b = groups[index + 1] ?? 0;
+  return a > 0 && a === b ? "·" : "→";
+}
+
 function courseSegments(courseCps: number[], randomOrder: unknown): CourseSeg[] {
-  const flags = asBoolList(randomOrder, courseCps.length);
+  const groups = parseClusterGroups(randomOrder, courseCps.length);
   const out: CourseSeg[] = [];
   let i = 0;
   while (i < courseCps.length) {
-    if (flags[i]) {
+    const g = groups[i];
+    if (g > 0) {
       const cps: number[] = [];
       const indices: number[] = [];
-      while (i < courseCps.length && flags[i]) {
+      while (i < courseCps.length && groups[i] === g) {
         cps.push(courseCps[i]);
         indices.push(i);
         i += 1;
@@ -307,10 +373,10 @@ export function splitColumns(
   finishCp: number | null,
   randomOrder: unknown = [],
 ): SplitCol[] {
-  const flags = asBoolList(randomOrder, courseCps.length);
+  const groups = parseClusterGroups(randomOrder, courseCps.length);
   const cols: SplitCol[] = courseCps.map((cp, index) => ({
     cp,
-    label: flags[index] ? `${index + 1} [${cp}]` : `${index + 1} (${cp})`,
+    label: groups[index] > 0 ? `${index + 1} [${cp}]` : `${index + 1} (${cp})`,
     finish: false,
   }));
   if (finishCp != null) {
@@ -438,15 +504,16 @@ export function courseLegMeters(
 ): number | null {
   if (legMeters.length) {
     const seq = [startCp, ...controls, finishCp];
-    const flags = [false, ...asBoolList(randomOrder, controls.length), false];
-    const fromIdx = seq.indexOf(fromCp);
-    const toIdx = seq.indexOf(toCp);
-    if (fromIdx >= 0 && toIdx === fromIdx + 1) {
-      const meters = Number(legMeters[fromIdx]);
-      if (Number.isFinite(meters) && meters > 0) return meters;
+    const groups = [0, ...parseClusterGroups(randomOrder, controls.length), 0];
+    // Любое соседство в опубликованном порядке (в т.ч. повтор КП на дистанции).
+    for (let i = 0; i < seq.length - 1; i += 1) {
+      if (seq[i] === fromCp && seq[i + 1] === toCp) {
+        const meters = Number(legMeters[i]);
+        if (Number.isFinite(meters) && meters > 0) return meters;
+      }
     }
-    if (fromIdx >= 0 && toIdx >= 0) {
-      const segments = courseSegments(seq, flags);
+    if (seq.includes(fromCp) && seq.includes(toCp)) {
+      const segments = courseSegments(seq, groups);
       let idx = 0;
       for (let i = 0; i < segments.length - 1; i += 1) {
         const a = segments[i];
@@ -465,6 +532,15 @@ export function courseLegMeters(
           b.kind === "fixed" &&
           a.cps.includes(fromCp) &&
           b.cp === toCp
+        ) {
+          const meters = Number(legMeters[idx + a.cps.length - 1]);
+          if (Number.isFinite(meters) && meters > 0) return meters;
+        }
+        if (
+          a.kind === "cluster" &&
+          b.kind === "cluster" &&
+          a.cps.includes(fromCp) &&
+          b.cps.includes(toCp)
         ) {
           const meters = Number(legMeters[idx + a.cps.length - 1]);
           if (Number.isFinite(meters) && meters > 0) return meters;
@@ -570,41 +646,27 @@ export function expandMarksWithAddedCps(
   addCounts: Map<number, number>,
   startCp: number | null,
   finishCp: number | null,
+  randomOrder: unknown = [],
 ): SplitMark[] {
   if (!addCounts.size) {
     return marks.map((mark) => ({ ...mark, added: mark.added === true }));
   }
 
-  const required: number[] = [];
-  if (startCp != null && courseCps[0] !== startCp) required.push(startCp);
-  required.push(...courseCps);
-  if (finishCp != null && required[required.length - 1] !== finishCp) {
-    required.push(finishCp);
+  const remaining = new Map(
+    [...addCounts.entries()].filter(([, n]) => n > 0) as Array<[number, number]>,
+  );
+  if (![...remaining.values()].some((n) => n > 0)) {
+    return marks.map((mark) => ({ ...mark, added: mark.added === true }));
   }
 
-  const remaining = new Map(addCounts);
   const result = marks.map((mark) => ({ ...mark, added: mark.added === true }));
   let p = 0;
-  if (result[0]?.cp_number === startCp && required[0] !== startCp) {
+  if (result[0]?.cp_number === startCp && courseCps[0] !== startCp) {
     p = 1;
   }
 
-  for (const cp of required) {
-    let q = p;
-    while (
-      q < result.length &&
-      (result[q].cp_number !== cp || (result[q].cp_number === finishCp && cp !== finishCp))
-    ) {
-      q += 1;
-    }
-    if (q < result.length) {
-      p = q + 1;
-      continue;
-    }
-    const left = remaining.get(cp) ?? 0;
-    if (left <= 0) break;
-    remaining.set(cp, left - 1);
-    let at = p;
+  const insertAt = (cp: number, atHint: number): number => {
+    let at = atHint;
     let finishAt = -1;
     for (let i = result.length - 1; i >= 0; i -= 1) {
       if (result[i].cp_number === finishCp) {
@@ -618,7 +680,66 @@ export function expandMarksWithAddedCps(
       mark_time: syntheticMarkTime(result[at - 1], result[at]),
       added: true,
     });
-    p = at + 1;
+    return at + 1;
+  };
+
+  const segments = courseSegments(courseCps, randomOrder);
+  for (let segIdx = 0; segIdx < segments.length; segIdx += 1) {
+    const seg = segments[segIdx];
+    const future = futureSegCps(segments, segIdx + 1);
+    if (seg.kind === "fixed") {
+      let q = p;
+      while (
+        q < result.length &&
+        (result[q].cp_number !== seg.cp ||
+          (result[q].cp_number === finishCp && seg.cp !== finishCp))
+      ) {
+        q += 1;
+      }
+      if (q < result.length) {
+        p = q + 1;
+        continue;
+      }
+      const left = remaining.get(seg.cp) ?? 0;
+      if (left <= 0) break;
+      remaining.set(seg.cp, left - 1);
+      p = insertAt(seg.cp, p);
+      continue;
+    }
+    const need = new Map<number, number>();
+    for (const cp of seg.cps) need.set(cp, (need.get(cp) ?? 0) + 1);
+    while ([...need.values()].some((n) => n > 0)) {
+      let foundIdx = -1;
+      let foundCp = 0;
+      let q = p;
+      while (q < result.length) {
+        const cp = result[q].cp_number;
+        if ((need.get(cp) ?? 0) > 0) {
+          foundIdx = q;
+          foundCp = cp;
+          break;
+        }
+        if (future.has(cp)) break;
+        q += 1;
+      }
+      if (foundIdx >= 0) {
+        need.set(foundCp, (need.get(foundCp) ?? 1) - 1);
+        p = foundIdx + 1;
+        continue;
+      }
+      let usedAdd = false;
+      for (const [cp, count] of need) {
+        if (count <= 0) continue;
+        const left = remaining.get(cp) ?? 0;
+        if (left <= 0) continue;
+        remaining.set(cp, left - 1);
+        need.set(cp, count - 1);
+        p = insertAt(cp, p);
+        usedAdd = true;
+        break;
+      }
+      if (!usedAdd) break;
+    }
   }
 
   const flagLeft = new Map(addCounts);

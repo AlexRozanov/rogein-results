@@ -191,7 +191,7 @@ class SfrChipMemoryTest {
     @Test
     fun testCoursePlanClusterCorrectShufflesInsideCluster() {
         val controls = listOf(31, 32, 33, 34, 35)
-        val randomOrder = listOf(false, true, true, true, false)
+        val randomOrder = listOf(0, 1, 1, 1, 0)
         val seq = TestCoursePlan.fullSequence(controls, randomOrder, random = kotlin.random.Random(7))
         assertEquals(CP_START, seq.first())
         assertEquals(CP_FINISH, seq.last())
@@ -199,7 +199,7 @@ class SfrChipMemoryTest {
         assertEquals(35, seq[seq.lastIndex - 1])
         assertEquals(setOf(32, 33, 34), seq.subList(2, 5).toSet())
         assertEquals(
-            controls.size + 2,
+            controls.size,
             courseTakenWithOrder(
                 seq.filter { it != CP_START && it != CP_FINISH },
                 controls,
@@ -211,7 +211,7 @@ class SfrChipMemoryTest {
     @Test
     fun testCoursePlanClusterWrongLeavesClusterEarly() {
         val controls = listOf(31, 32, 33, 34, 35)
-        val randomOrder = listOf(false, true, true, true, false)
+        val randomOrder = listOf(0, 1, 1, 1, 0)
         val seq = TestCoursePlan.wrongSequence(controls, randomOrder, random = kotlin.random.Random(3))
         val punches = seq.filter { it != CP_START && it != CP_FINISH }
         assertTrue(punches.contains(35))
@@ -230,7 +230,7 @@ class SfrChipMemoryTest {
             "31 → [32·33·34] → 35",
             TestCoursePlan.formatControlsLabel(
                 listOf(31, 32, 33, 34, 35),
-                listOf(false, true, true, true, false),
+                listOf(0, 1, 1, 1, 0),
             ),
         )
     }

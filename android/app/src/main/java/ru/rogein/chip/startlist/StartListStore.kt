@@ -19,11 +19,12 @@ import ru.rogein.chip.parse.CourseOrderMismatchException
 import ru.rogein.chip.parse.CsvImport
 import ru.rogein.chip.parse.CourseOrderSnapshot
 import ru.rogein.chip.parse.coursesNeedReplace
-import ru.rogein.chip.parse.normalizeRandomOrder
+import ru.rogein.chip.parse.parseClusterGroups
 import ru.rogein.chip.parse.looksLikeIofCourseXml
 import ru.rogein.chip.parse.mergeCourseGeometry
 import ru.rogein.chip.parse.parseIofCourseData
 import ru.rogein.chip.parse.EventPackCpTypeRuleFile
+import ru.rogein.chip.parse.EventPackExclusionFile
 import ru.rogein.chip.parse.EventPackFile
 import ru.rogein.chip.parse.FormatCsvRow
 import ru.rogein.chip.parse.LegendCsvRow
@@ -50,6 +51,8 @@ class StartListStore(
     private val fieldJournal: FieldJournal? = null,
     private val eventSlug: suspend () -> String = { "" },
     private val chipQueue: ChipQueueDao? = null,
+    private val applyMapGeometry: suspend (Int?, Map<Int, Pair<Double, Double>>) -> Unit = { _, _ -> },
+    private val applyExclusions: suspend (List<EventPackExclusionFile>) -> Unit = {},
 ) {
     val people: Flow<List<StartPerson>> = dao.observePeople().map { rows -> rows.map { it.toPerson() } }
     val courses: Flow<List<StartCourse>> = dao.observeCourses().map { rows ->
@@ -88,6 +91,8 @@ class StartListStore(
         val pack = loaded.pack ?: return loaded.error.orEmpty()
         usbSportMismatch(pack.sport, sport)?.let { return it }
         applyPeople(pack, replace)
+        applyStartPackGeometry(pack)
+        applyStartPackExclusions(pack)
         return "Протокол с компьютера: ${pack.people.size} участников."
     }
 
@@ -132,8 +137,8 @@ class StartListStore(
                 else -> emptyList()
             }
             val nextRandom = when {
-                fromFormat.isNotEmpty() -> normalizeRandomOrder(nextControls.size, format?.randomOrder)
-                existing != null && !replace -> parseBools(existing.randomOrderJson)
+                fromFormat.isNotEmpty() -> parseClusterGroups(format?.randomOrder, nextControls.size)
+                existing != null && !replace -> parseGroups(existing.randomOrderJson)
                 else -> emptyList()
             }
             val entity = StartCourseEntity(
@@ -166,16 +171,36 @@ class StartListStore(
         applyPeople(peoplePack, replace)
     }
 
+    private suspend fun applyStartPackGeometry(pack: StartPack) {
+        if (pack.mapScaleDenominator == null && pack.controlPositionsMm.isEmpty()) return
+        applyMapGeometry(pack.mapScaleDenominator, pack.controlPositionsMm)
+    }
+
+    private suspend fun applyStartPackExclusions(pack: StartPack) {
+        val rules = pack.exclusions ?: return
+        applyExclusions(rules)
+    }
+
     suspend fun loadCoursesFromUsb(replace: Boolean): String {
         val loaded = openUsbPack()
         val pack = loaded.pack ?: return loaded.error.orEmpty()
         applyCourses(pack, replace)
-        return "Дистанции с компьютера: ${pack.courses.size}."
+        applyStartPackGeometry(pack)
+        applyStartPackExclusions(pack)
+        val names = pack.courses.map { it.name }.filter { it.isNotBlank() }
+        val exclNote = pack.exclusions?.let { " исключений перегонов: ${it.size}." } ?: ""
+        return if (names.isEmpty()) {
+            "Дистанции с компьютера: 0.$exclNote"
+        } else {
+            "Дистанции с компьютера: ${names.joinToString(", ")} (${names.size}).$exclNote"
+        }
     }
 
     suspend fun merge(pack: StartPack) {
         applyCourses(pack, replace = true)
         applyPeople(pack, replace = true)
+        applyStartPackGeometry(pack)
+        applyStartPackExclusions(pack)
         val incomingIds = pack.people.map { it.id }.toSet()
         for (local in dao.listPeople()) {
             if (local.origin == ORIGIN_DESKTOP && local.logicalId !in incomingIds) {
@@ -451,7 +476,7 @@ class StartListStore(
                 CourseOrderSnapshot(
                     name = it.name,
                     controls = parseInts(it.controlsJson),
-                    randomOrder = parseBools(it.randomOrderJson),
+                    randomOrder = parseGroups(it.randomOrderJson),
                 )
             }
             if (coursesNeedReplace(pairs, rows)) {
@@ -540,7 +565,7 @@ class StartListStore(
         name: String,
         controls: List<Int>,
         previousName: String? = null,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
     ) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) error("Укажите название дистанции")
@@ -553,10 +578,9 @@ class StartListStore(
         }
         val lookup = if (previous.isNotEmpty()) previous else trimmed
         val existing = dao.listCourses().find { it.name.equals(lookup, true) }
-        val flags = normalizeRandomOrder(controls.size, randomOrder)
-        val sameControls = existing != null &&
-            parseInts(existing.controlsJson) == controls &&
-            parseBools(existing.randomOrderJson) == flags
+        val groups = parseClusterGroups(randomOrder, controls.size)
+        // Длины/перегоны зависят от последовательности КП, не от флагов грозди.
+        val sameControls = existing != null && parseInts(existing.controlsJson) == controls
         dao.upsertCourse(
             StartCourseEntity(
                 name = trimmed,
@@ -564,7 +588,7 @@ class StartListStore(
                 lengthMeters = if (sameControls) existing?.lengthMeters else null,
                 climbMeters = if (sameControls) existing?.climbMeters else null,
                 legsJson = if (sameControls) existing?.legsJson?.ifBlank { "[]" } ?: "[]" else "[]",
-                randomOrderJson = JSONArray(flags).toString(),
+                randomOrderJson = JSONArray(groups).toString(),
             ),
         )
         if (renaming) {
@@ -591,7 +615,7 @@ class StartListStore(
                 lengthMeters = saved.lengthMeters,
                 climbMeters = saved.climbMeters,
                 legsJson = saved.legsJson.ifBlank { "[]" },
-                randomOrder = parseBools(saved.randomOrderJson),
+                randomOrder = parseGroups(saved.randomOrderJson),
             )
         }
     }
@@ -611,7 +635,7 @@ class StartListStore(
             lengthMeters = source.lengthMeters,
             climbMeters = source.climbMeters,
             legsJson = source.legsJson.ifBlank { "[]" },
-            randomOrder = parseBools(source.randomOrderJson),
+            randomOrder = parseGroups(source.randomOrderJson),
         )
         return trimmed
     }
@@ -629,7 +653,7 @@ class StartListStore(
         lengthMeters: Int?,
         climbMeters: Int?,
         legsJson: String,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
     ) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
@@ -642,7 +666,7 @@ class StartListStore(
                 lengthMeters = lengthMeters,
                 climbMeters = climbMeters,
                 legsJson = legsJson.ifBlank { "[]" },
-                randomOrderJson = JSONArray(normalizeRandomOrder(controls.size, randomOrder)).toString(),
+                randomOrderJson = JSONArray(parseClusterGroups(randomOrder, controls.size)).toString(),
             ),
         )
         if (renaming) {
@@ -674,7 +698,7 @@ class StartListStore(
             lengthMeters = entity.lengthMeters,
             climbMeters = entity.climbMeters,
             legsJson = entity.legsJson,
-            randomOrder = parseBools(entity.randomOrderJson),
+            randomOrder = parseGroups(entity.randomOrderJson),
         )
     }
 
@@ -685,7 +709,7 @@ class StartListStore(
         lengthMeters: Int?,
         climbMeters: Int?,
         legsJson: String,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
     ) {
         val journal = fieldJournal ?: return
         runCatching {
@@ -1043,29 +1067,33 @@ class StartListStore(
         return files.toList()
     }
 
+    private data class PackRead(val text: String, val modifiedMs: Long)
+
     /**
-     * Читает start-pack / event-pack: сначала File API, при EACCES в Downloads —
-     * через MediaStore (после media scan), иначе на Android 10+ «Нет доступа…».
+     * Читает start-pack / event-pack из всех доступных мест и берёт самый новый
+     * (иначе устаревший файл в Android/data перекрывает свежий Download/rogein).
      */
     private fun readPackText(name: String): String? {
+        val found = ArrayList<PackRead>()
         var lastAccessError: Exception? = null
         for (file in packFileCandidates(name)) {
             if (!file.isFile || file.length() <= 0L) continue
             try {
-                return file.readText(Charsets.UTF_8)
+                found += PackRead(file.readText(Charsets.UTF_8), file.lastModified().coerceAtLeast(0L))
             } catch (e: Exception) {
                 lastAccessError = e
             }
         }
-        readPackViaMediaStore(name)?.let { return it }
-        if (lastAccessError != null) {
-            throw lastAccessError
-        }
+        found += readPackViaMediaStore(name)
+        val best = found.maxByOrNull { it.modifiedMs }
+        if (best != null) return best.text
+        if (lastAccessError != null) throw lastAccessError
         return null
     }
 
-    private fun readPackViaMediaStore(name: String): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+    private fun readPackViaMediaStore(name: String): List<PackRead> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
+        val out = ArrayList<PackRead>()
         val downloadFile = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "rogein/$name",
@@ -1075,42 +1103,49 @@ class StartListStore(
         }
         val resolver = context.contentResolver
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val projection = arrayOf(
+            MediaStore.Downloads._ID,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.RELATIVE_PATH,
+        )
         val relativePaths = listOf(
             "${Environment.DIRECTORY_DOWNLOADS}/rogein/",
             "${Environment.DIRECTORY_DOWNLOADS}/rogein",
         )
+        fun consume(cursor: android.database.Cursor, requireRogeinPath: Boolean) {
+            while (cursor.moveToNext()) {
+                val relative = cursor.getString(2).orEmpty()
+                if (requireRogeinPath &&
+                    !relative.contains("rogein", ignoreCase = true) &&
+                    relative.isNotEmpty()
+                ) {
+                    continue
+                }
+                val id = cursor.getLong(0)
+                val modifiedSec = cursor.getLong(1).coerceAtLeast(0L)
+                val uri = ContentUris.withAppendedId(collection, id)
+                val text = readUriText(uri) ?: continue
+                out += PackRead(text, modifiedSec * 1000L)
+            }
+        }
         for (relative in relativePaths) {
             resolver.query(
                 collection,
-                arrayOf(MediaStore.Downloads._ID),
+                projection,
                 "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
                 arrayOf(name, relative),
                 "${MediaStore.Downloads._ID} DESC",
-            )?.use { cursor ->
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(0)
-                    val uri = ContentUris.withAppendedId(collection, id)
-                    readUriText(uri)?.let { return it }
-                }
-            }
+            )?.use { consume(it, requireRogeinPath = false) }
         }
         // adb push иногда индексируется без RELATIVE_PATH — ищем по имени.
         resolver.query(
             collection,
-            arrayOf(MediaStore.Downloads._ID, MediaStore.MediaColumns.RELATIVE_PATH),
+            projection,
             "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
             arrayOf(name),
             "${MediaStore.Downloads._ID} DESC",
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                val relative = cursor.getString(1).orEmpty()
-                if (relative.contains("rogein", ignoreCase = true) || relative.isEmpty()) {
-                    val uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
-                    readUriText(uri)?.let { return it }
-                }
-            }
-        }
-        return null
+        )?.use { consume(it, requireRogeinPath = true) }
+        return out
     }
 
     private fun readUriText(uri: Uri): String? {
@@ -1294,13 +1329,13 @@ private fun StartCourseEntity.toStartCourse() = StartCourse(
     lengthMeters = lengthMeters,
     climbMeters = climbMeters,
     legMeters = parseOptionalInts(legsJson),
-    randomOrder = parseBools(randomOrderJson),
+    randomOrder = parseGroups(randomOrderJson),
 )
 
 private fun StartCourseEntity.toCsvRow() = CourseCsvRow(
     name = name,
     controls = parseInts(controlsJson),
-    randomOrder = parseBools(randomOrderJson),
+    randomOrder = parseGroups(randomOrderJson),
     lengthMeters = lengthMeters,
     climbMeters = climbMeters,
     legMeters = parseOptionalInts(legsJson),
@@ -1316,15 +1351,13 @@ private fun StartCourse.toCsvRow() = CourseCsvRow(
 )
 
 private fun courseEntity(row: CourseCsvRow, existing: StartCourseEntity?): StartCourseEntity {
-    val flags = normalizeRandomOrder(row.controls.size, row.randomOrder)
-    val same = existing != null &&
-        parseInts(existing.controlsJson) == row.controls &&
-        parseBools(existing.randomOrderJson) == flags
-    val length = row.lengthMeters ?: if (same) existing?.lengthMeters else null
-    val climb = row.climbMeters ?: if (same) existing?.climbMeters else null
+    val groups = parseClusterGroups(row.randomOrder, row.controls.size)
+    val sameControls = existing != null && parseInts(existing.controlsJson) == row.controls
+    val length = row.lengthMeters ?: if (sameControls) existing?.lengthMeters else null
+    val climb = row.climbMeters ?: if (sameControls) existing?.climbMeters else null
     val legs = if (row.legMeters.any { it != null }) {
         row.legMeters
-    } else if (same) {
+    } else if (sameControls) {
         parseOptionalInts(existing?.legsJson.orEmpty())
     } else {
         emptyList()
@@ -1335,21 +1368,16 @@ private fun courseEntity(row: CourseCsvRow, existing: StartCourseEntity?): Start
         lengthMeters = length,
         climbMeters = climb,
         legsJson = encodeOptionalInts(legs),
-        randomOrderJson = JSONArray(flags).toString(),
+        randomOrderJson = JSONArray(groups).toString(),
     )
 }
 
-private fun parseBools(json: String): List<Boolean> {
+/** Старый JSON из boolean, 0/1 или id групп грозди. */
+private fun parseGroups(json: String): List<Int> {
     if (json.isBlank()) return emptyList()
     return runCatching {
         val array = JSONArray(json)
-        List(array.length()) { index ->
-            when (val value = array.get(index)) {
-                is Boolean -> value
-                is Number -> value.toInt() != 0
-                is String -> value.equals("true", true) || value == "1"
-                else -> false
-            }
-        }
+        val raw = List<Any?>(array.length()) { array.get(it) }
+        parseClusterGroups(raw, raw.size)
     }.getOrDefault(emptyList())
 }

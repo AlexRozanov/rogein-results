@@ -1708,6 +1708,71 @@ button.active {
   font-weight: 600;
 }
 
+.course-cluster-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+}
+
+.course-cluster-bracket {
+  color: #0f766e;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  line-height: 1;
+  padding: 0 1px;
+}
+
+.course-cluster-gap {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  min-height: 1.6rem;
+  margin: 0 1px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #0f766e;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+
+.course-cluster-gap.split {
+  cursor: pointer;
+}
+
+.course-cluster-gap.split:hover:not(:disabled) {
+  background: rgba(15, 118, 110, 0.28);
+  color: #14b8a6;
+}
+
+.course-cluster-gap:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.course-cluster-gap.active {
+  background: #38bdf8;
+  color: #0f172a;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.28);
+}
+
+.course-seq-arrow.merge {
+  cursor: pointer;
+  color: #0f766e;
+}
+
+.course-seq-arrow.merge:hover {
+  color: #14b8a6;
+}
+
 .course-seq-arrow {
   color: #64748b;
   padding: 0 6px;
@@ -1718,6 +1783,11 @@ button.active {
 
 .course-seq-arrow.active {
   color: #38bdf8;
+}
+
+.course-seq-arrow.cluster {
+  color: #0f766e;
+  font-weight: 600;
 }
 
 .course-drop-caret {
@@ -1741,16 +1811,23 @@ button.active {
   background: transparent;
   color: #94a3b8;
   cursor: pointer;
-  width: 22px;
+  width: 18px;
   height: 22px;
   border-radius: 999px;
   line-height: 1;
-  font-size: 16px;
+  font-size: 14px;
+  opacity: 0.35;
+}
+
+.course-chip:hover .course-chip-x,
+.course-chip:focus-within .course-chip-x {
+  opacity: 1;
 }
 
 .course-chip-x:hover:not(:disabled) {
   background: #334155;
   color: #fecaca;
+  opacity: 1;
 }
 
 .course-chip-edit,

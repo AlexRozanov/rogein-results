@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { courseSegments, parseClusterGroups } from "../courseOrder";
 import IconActionButton from "./IconActionButton.vue";
 import CollapsiblePanel from "./CollapsiblePanel.vue";
 
@@ -20,7 +21,7 @@ type CourseRow = {
   id: number;
   name: string;
   controls: number[];
-  randomOrder?: boolean[];
+  randomOrder?: Array<number | boolean>;
 };
 
 type NativeSettings = {
@@ -112,52 +113,32 @@ function formatCp(cp: number): string {
   return String(cp);
 }
 
-type CourseSeg = { kind: "fixed"; cp: number } | { kind: "cluster"; cps: number[] };
-
-function courseSegments(seq: number[], flags: boolean[]): CourseSeg[] {
-  const out: CourseSeg[] = [];
-  let i = 0;
-  while (i < seq.length) {
-    if (flags[i]) {
-      const cps: number[] = [];
-      while (i < seq.length && flags[i]) {
-        cps.push(seq[i]);
-        i += 1;
-      }
-      out.push({ kind: "cluster", cps });
-    } else {
-      out.push({ kind: "fixed", cp: seq[i] });
-      i += 1;
-    }
-  }
-  return out;
-}
-
 function courseLegs(course: CourseRow): { from: number; to: number; label: string }[] {
+  const groups = parseClusterGroups(course.randomOrder, course.controls.length);
   const kept: number[] = [];
-  const keptFlags: boolean[] = [];
+  const keptGroups: number[] = [];
   for (let i = 0; i < course.controls.length; i += 1) {
     const cp = course.controls[i];
     if (removedCps.value.has(cp)) continue;
     kept.push(cp);
-    keptFlags.push(Boolean(course.randomOrder?.[i]));
+    keptGroups.push(groups[i] ?? 0);
   }
   const seq: number[] = [];
-  const seqCluster: boolean[] = [];
+  const seqGroups: number[] = [];
   if (startCp.value != null && kept[0] !== startCp.value) {
     seq.push(startCp.value);
-    seqCluster.push(false);
+    seqGroups.push(0);
   }
   for (let i = 0; i < kept.length; i += 1) {
     seq.push(kept[i]);
-    seqCluster.push(keptFlags[i]);
+    seqGroups.push(keptGroups[i]);
   }
   if (finishCp.value && seq[seq.length - 1] !== finishCp.value) {
     seq.push(finishCp.value);
-    seqCluster.push(false);
+    seqGroups.push(0);
   }
   const legs: { from: number; to: number; label: string }[] = [];
-  const segments = courseSegments(seq, seqCluster);
+  const segments = courseSegments(seq, seqGroups);
   const clusterLabel = (cps: number[]) => `[${cps.join("·")}]`;
   for (let i = 0; i < segments.length - 1; i += 1) {
     const a = segments[i];
@@ -176,6 +157,12 @@ function courseLegs(course: CourseRow): { from: number; to: number; label: strin
         from: a.cps[a.cps.length - 1],
         to: b.cp,
         label: `${clusterLabel(a.cps)} → ${formatCp(b.cp)}`,
+      });
+    } else if (a.kind === "cluster" && b.kind === "cluster") {
+      legs.push({
+        from: a.cps[a.cps.length - 1],
+        to: b.cps[0],
+        label: `${clusterLabel(a.cps)} → ${clusterLabel(b.cps)}`,
       });
     }
   }

@@ -144,7 +144,11 @@ import ru.rogein.chip.parse.addableCourseCps
 import ru.rogein.chip.parse.applyAddedCps
 import ru.rogein.chip.parse.buildOrientSplitPrint
 import ru.rogein.chip.parse.formatOrientLegLabel
-import ru.rogein.chip.parse.normalizeRandomOrder
+import ru.rogein.chip.parse.normalizeClusterGroups
+import ru.rogein.chip.parse.parseClusterGroups
+import ru.rogein.chip.parse.splitClusterAfter
+import ru.rogein.chip.parse.mergeClusterWithNext
+import ru.rogein.chip.parse.toggleClusterGroup
 import ru.rogein.chip.parse.resultStatusLine
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
@@ -800,7 +804,7 @@ fun ProtocolScreen(
     onPickFormats: (Boolean) -> Unit = {},
     onPickGroups: (Boolean) -> Unit = {},
     onPickLegends: (Boolean) -> Unit = {},
-    onSaveCourse: (String, List<Int>, String?, List<Boolean>) -> Unit,
+    onSaveCourse: (String, List<Int>, String?, List<Int>) -> Unit,
     onCopyCourse: (String, String) -> Unit = { _, _ -> },
     onDeleteCourse: (String) -> Unit,
     legendCps: List<Int> = emptyList(),
@@ -1725,7 +1729,7 @@ private fun CoursesPanel(
     query: String,
     requestAdd: Boolean,
     onRequestAddConsumed: () -> Unit,
-    onSave: (String, List<Int>, String?, List<Boolean>) -> Unit,
+    onSave: (String, List<Int>, String?, List<Int>) -> Unit,
     onCopy: (String, String) -> Unit = { _, _ -> },
     onDelete: (String) -> Unit,
     onEditingChange: (Boolean) -> Unit = {},
@@ -2195,7 +2199,7 @@ private fun CourseEditorCard(
     listState: LazyListState,
     listCoordinates: () -> LayoutCoordinates?,
     onToggle: () -> Unit,
-    onSave: (String, List<Int>, String?, List<Boolean>) -> Unit,
+    onSave: (String, List<Int>, String?, List<Int>) -> Unit,
     onCopy: (() -> Unit)? = null,
     onDelete: () -> Unit,
     focusName: Boolean = false,
@@ -2215,8 +2219,8 @@ private fun CourseEditorCard(
         EventStore.legsFor(course, settings, removed)
     }
     val exclusionCount = courseExclusions.size
-    val flags = remember(course.controls, course.randomOrder) {
-        normalizeRandomOrder(course.controls.size, course.randomOrder)
+    val groups = remember(course.controls, course.randomOrder) {
+        parseClusterGroups(course.randomOrder, course.controls.size)
     }
 
     var name by remember(course.name) { mutableStateOf(course.name) }
@@ -2242,65 +2246,77 @@ private fun CourseEditorCard(
                 .focusRequester(nameFocus),
         )
         if (name.trim().isNotEmpty() && !name.trim().equals(course.name, true)) {
-            TextButton(onClick = { onSave(name.trim(), course.controls, course.name, flags) }) {
+            TextButton(onClick = { onSave(name.trim(), course.controls, course.name, groups) }) {
                 Text("Переименовать")
             }
         }
         if (course.controls.isEmpty()) {
             Text(
-                "КП нет. Добавьте номера в порядке дистанции. Долгий тап по КП — гроздь (свободный порядок).",
+                "КП нет. Добавьте номера в порядке дистанции. Долгий тап по КП (или меню ☰) — гроздь: свободный порядок внутри.",
                 color = Muted,
                 style = MaterialTheme.typography.bodySmall,
             )
         } else {
             Text(
-                "Долгий тап по КП — включить/выключить гроздь (свободный порядок внутри группы).",
+                "Долгий тап по КП или меню ☰ — включить/выключить гроздь (свободный порядок внутри). " +
+                    "Смежные грозди вроде [74 75 76]→[77 78]: «Разделить гроздь» и «Объединить со следующей» в меню.",
                 color = Muted,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
         ReorderableCpList(
             cps = course.controls,
-            randomOrder = flags,
+            randomOrder = groups,
             listState = listState,
             listCoordinates = listCoordinates,
             onMove = { from, to ->
                 if (from == to) return@ReorderableCpList
                 val next = course.controls.toMutableList()
-                val nextFlags = flags.toMutableList()
+                val nextGroups = groups.toMutableList()
                 val item = next.removeAt(from)
-                val flag = nextFlags.removeAt(from)
+                val group = nextGroups.removeAt(from)
                 next.add(to, item)
-                nextFlags.add(to, flag)
-                onSave(course.name, next, course.name, nextFlags)
+                nextGroups.add(to, group)
+                onSave(course.name, next, course.name, nextGroups)
             },
             onChange = { index, cp ->
                 if (index !in course.controls.indices || course.controls[index] == cp) return@ReorderableCpList
                 val next = course.controls.toMutableList()
                 next[index] = cp
-                onSave(course.name, next, course.name, flags)
+                onSave(course.name, next, course.name, groups)
             },
             onInsertAfter = { index, cp ->
                 val next = course.controls.toMutableList()
-                val nextFlags = flags.toMutableList()
+                val nextGroups = groups.toMutableList()
                 val at = (index + 1).coerceIn(0, next.size)
                 next.add(at, cp)
-                nextFlags.add(at, false)
-                onSave(course.name, next, course.name, nextFlags)
+                nextGroups.add(at, 0)
+                onSave(course.name, next, course.name, nextGroups)
             },
             onDelete = { index ->
                 onSave(
                     course.name,
                     course.controls.filterIndexed { i, _ -> i != index },
                     course.name,
-                    flags.filterIndexed { i, _ -> i != index },
+                    groups.filterIndexed { i, _ -> i != index },
                 )
             },
             onToggleRandom = { index ->
-                if (index !in flags.indices) return@ReorderableCpList
-                val nextFlags = flags.toMutableList()
-                nextFlags[index] = !nextFlags[index]
-                onSave(course.name, course.controls, course.name, nextFlags)
+                if (index !in groups.indices) return@ReorderableCpList
+                onSave(
+                    course.name,
+                    course.controls,
+                    course.name,
+                    toggleClusterGroup(groups, index, joinPrevious = true),
+                )
+            },
+            onSplitClusterAfter = { index ->
+                val next = splitClusterAfter(groups, index) ?: return@ReorderableCpList
+                onSave(course.name, course.controls, course.name, next)
+            },
+            onMergeClusterWithNext = { index ->
+                val next = mergeClusterWithNext(groups, index) ?: return@ReorderableCpList
+                onSave(course.name, course.controls, course.name, next)
             },
         )
         Row(
@@ -2320,7 +2336,7 @@ private fun CourseEditorCard(
                 keyboardActions = KeyboardActions(
                     onDone = {
                         val cp = addCp.toIntOrNull() ?: return@KeyboardActions
-                        onSave(course.name, course.controls + cp, course.name, flags + false)
+                        onSave(course.name, course.controls + cp, course.name, groups + 0)
                         addCp = ""
                     },
                 ),
@@ -2332,7 +2348,7 @@ private fun CourseEditorCard(
                 enabled = addCp.toIntOrNull()?.let { it > 0 } == true,
                 onClick = {
                     val cp = addCp.toIntOrNull() ?: return@TextButton
-                    onSave(course.name, course.controls + cp, course.name, flags + false)
+                    onSave(course.name, course.controls + cp, course.name, groups + 0)
                     addCp = ""
                     runCatching { addBottomFocus.requestFocus() }
                 },
@@ -2439,7 +2455,7 @@ private fun CourseLegExclusionRow(
 @Composable
 private fun ReorderableCpList(
     cps: List<Int>,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
     listState: LazyListState,
     listCoordinates: () -> LayoutCoordinates?,
     onMove: (Int, Int) -> Unit,
@@ -2447,8 +2463,10 @@ private fun ReorderableCpList(
     onInsertAfter: (Int, Int) -> Unit,
     onDelete: (Int) -> Unit,
     onToggleRandom: (Int) -> Unit = {},
+    onSplitClusterAfter: (Int) -> Unit = {},
+    onMergeClusterWithNext: (Int) -> Unit = {},
 ) {
-    val flags = normalizeRandomOrder(cps.size, randomOrder)
+    val groups = normalizeClusterGroups(cps.size, randomOrder)
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val rowPx = with(density) { 56.dp.toPx() }
@@ -2613,7 +2631,7 @@ private fun ReorderableCpList(
                             },
                     )
                 } else {
-                    val inCluster = flags.getOrElse(index) { false }
+                    val inCluster = groups.getOrElse(index) { 0 } > 0
                     Text(
                         if (inCluster) "[$cp]" else cp.toString(),
                         style = MaterialTheme.typography.titleMedium,
@@ -2631,7 +2649,8 @@ private fun ReorderableCpList(
                     )
                 }
                 if (index < cps.lastIndex) {
-                    val freeLeg = flags.getOrElse(index) { false } && flags.getOrElse(index + 1) { false }
+                    val gHere = groups.getOrElse(index) { 0 }
+                    val freeLeg = gHere > 0 && gHere == groups.getOrElse(index + 1) { 0 }
                     Text(
                         if (freeLeg) " · " else " → ",
                         color = Muted,
@@ -2669,7 +2688,7 @@ private fun ReorderableCpList(
                         DropdownMenuItem(
                             text = {
                                 Text(
-                                    if (flags.getOrElse(index) { false }) {
+                                    if (groups.getOrElse(index) { 0 } > 0) {
                                         "Убрать из грозди"
                                     } else {
                                         "В гроздь (свободный порядок)"
@@ -2681,6 +2700,24 @@ private fun ReorderableCpList(
                                 onToggleRandom(index)
                             },
                         )
+                        if (splitClusterAfter(groups, index) != null) {
+                            DropdownMenuItem(
+                                text = { Text("Разделить гроздь после этого КП") },
+                                onClick = {
+                                    menuFor = null
+                                    onSplitClusterAfter(index)
+                                },
+                            )
+                        }
+                        if (mergeClusterWithNext(groups, index) != null) {
+                            DropdownMenuItem(
+                                text = { Text("Объединить со следующей гроздью") },
+                                onClick = {
+                                    menuFor = null
+                                    onMergeClusterWithNext(index)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Добавить КП") },
                             onClick = {
@@ -3253,7 +3290,15 @@ private fun ResultRowDetails(
     val addTimes = EventStore.addCpTimes(id, row.course, corrections)
     val baseMarks = marksWithAddedStart(row.punches, startCp, addCounts, addTimes)
     val window = orientPunchWindow(baseMarks, startCp, finishCp)
-    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp, addTimes)
+    val expanded = applyAddedCps(
+        window,
+        required,
+        addCounts,
+        startCp,
+        finishCp,
+        addTimes,
+        requiredRandom,
+    )
     val addable = addableCpsFor(row, courses, corrections, removedCps, startCp, finishCp)
     var marksOpen by remember { mutableStateOf(false) }
     var courseChangeOpen by remember { mutableStateOf(false) }
@@ -3609,8 +3654,8 @@ private fun UsedMarksDialog(
     lengthMeters: Int? = null,
     courseControls: List<Int> = emptyList(),
     legMeters: List<Int?> = emptyList(),
-    randomOrder: List<Boolean> = emptyList(),
-    courseRandomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
+    courseRandomOrder: List<Int> = emptyList(),
     cpPositions: Map<Int, Pair<Double, Double>> = emptyMap(),
     metersPerUnit: Double? = null,
 ) {
@@ -4912,7 +4957,15 @@ private fun addableCpsFor(
     val addTimes = EventStore.addCpTimes(id, row.course, corrections)
     val base = marksWithAddedStart(row.punches, startCp, addCounts, addTimes)
     val window = orientPunchWindow(base, startCp, finishCp)
-    val expanded = applyAddedCps(window, required, addCounts, startCp, finishCp, addTimes)
+    val expanded = applyAddedCps(
+        window,
+        required,
+        addCounts,
+        startCp,
+        finishCp,
+        addTimes,
+        randomOrder,
+    )
     val fromCourse = addableCourseCps(
         courseProgress(expanded.map { it.cp }, required, randomOrder = randomOrder),
     )

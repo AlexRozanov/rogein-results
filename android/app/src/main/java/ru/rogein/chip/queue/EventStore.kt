@@ -205,6 +205,9 @@ class EventStore(
             eventDao.upsertSetting(SettingEntity("map_scale_denominator", mapScaleDenominator.toString()))
         }
         if (controlPositionsMm.isEmpty()) return
+        // мм IOF нельзя класть в легенду, если уже есть растровая карта (там 0…1 / пиксели).
+        if (current.metersPerPixel != null && current.metersPerPixel > 0) return
+        if ((current.mapWidth ?: 0) > 0) return
         val array = try {
             JSONArray(current.legendsJson.ifBlank { "[]" })
         } catch (_: Exception) {
@@ -774,6 +777,11 @@ class EventStore(
                 mapPointsJson = mapPointsPayload,
             )
         }
+        replaceExclusions(pack.exclusions)
+    }
+
+    /** Полная замена глобальных исключений перегонов (USB start-pack / пакет с сайта). */
+    suspend fun replaceExclusions(rules: List<ru.rogein.chip.parse.EventPackExclusionFile>) {
         val previousExclusions = eventDao.listExclusions()
         for (row in previousExclusions) {
             rememberExclusionDelete(
@@ -784,7 +792,7 @@ class EventStore(
             )
         }
         eventDao.clearExclusions()
-        for (rule in pack.exclusions) {
+        for (rule in rules) {
             val exclusionId = UUID.randomUUID().toString()
             eventDao.insertExclusion(
                 ExclusionEntity(
@@ -1703,7 +1711,7 @@ class EventStore(
             val maxAge: Int? = null,
             val sortOrder: Int,
             val controls: List<Int>,
-            val randomOrder: List<Boolean> = emptyList(),
+            val randomOrder: List<Int> = emptyList(),
             val rows: List<ScoredResult>,
             val lengthMeters: Int? = null,
             val climbMeters: Int? = null,
@@ -2050,22 +2058,36 @@ class EventStore(
             val adds = addCpCounts(row.logicalId, row.course, corrections)
             val addTimes = addCpTimes(row.logicalId, row.course, corrections)
             if (adds.isEmpty()) return row.punches
-            val courseControls = filterCourseCps(
-                courses.find { it.name.equals(row.course, true) }?.controls.orEmpty(),
+            val course = courses.find { it.name.equals(row.course, true) }
+            val (courseControls, courseGroups) = filterCourseWithOrder(
+                course?.controls.orEmpty(),
+                course?.randomOrder.orEmpty(),
                 removed,
             )
             // В required нужны старт/финиш, иначе корректировки станций не попадут в marks.
             val required = ArrayList<Int>()
+            val groups = ArrayList<Int>()
             if (settings.startCp > 0 && courseControls.firstOrNull() != settings.startCp) {
                 required += settings.startCp
+                groups += 0
             }
             required += courseControls
+            groups += courseGroups
             if (settings.finishCp > 0 && required.lastOrNull() != settings.finishCp) {
                 required += settings.finishCp
+                groups += 0
             }
             val base = marksWithAddedStart(row.punches, settings.startCp, adds, addTimes)
             val window = orientPunchWindow(base, settings.startCp, settings.finishCp)
-            return applyAddedCps(window, required, adds, settings.startCp, settings.finishCp, addTimes)
+            return applyAddedCps(
+                window,
+                required,
+                adds,
+                settings.startCp,
+                settings.finishCp,
+                addTimes,
+                groups,
+            )
         }
 
         private fun publishAddedCpsJson(

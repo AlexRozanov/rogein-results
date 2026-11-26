@@ -310,14 +310,61 @@ pub struct PublishAwardGroup {
     pub sort_order: Option<i32>,
     #[serde(default)]
     pub course_cps: Vec<i32>,
-    #[serde(default)]
-    pub course_random_order: Vec<bool>,
+    /// Accepts ints (group ids) or legacy bool/0·1; adjacent clusters need ids >1.
+    #[serde(default, deserialize_with = "deserialize_cluster_groups")]
+    pub course_random_order: Vec<i32>,
     #[serde(default)]
     pub length_meters: Option<i32>,
     #[serde(default)]
     pub climb_meters: Option<i32>,
     #[serde(default)]
     pub leg_meters: Vec<Option<i32>>,
+}
+
+fn deserialize_cluster_groups<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut nums = Vec::with_capacity(raw.len());
+    let mut any_above_one = false;
+    for value in raw {
+        let n = match value {
+            serde_json::Value::Bool(true) => 1,
+            serde_json::Value::Bool(false) => 0,
+            serde_json::Value::Number(num) => num.as_i64().unwrap_or(0).max(0) as i32,
+            serde_json::Value::String(s) => match s.trim() {
+                "true" | "1" => 1,
+                "false" | "0" | "" => 0,
+                other => other.parse::<i32>().unwrap_or(0).max(0),
+            },
+            _ => 0,
+        };
+        if n > 1 {
+            any_above_one = true;
+        }
+        nums.push(n);
+    }
+    if any_above_one || nums.is_empty() {
+        return Ok(nums);
+    }
+    // Legacy bool/0·1: number each contiguous true-run.
+    let mut out = vec![0; nums.len()];
+    let mut next_id = 1i32;
+    let mut i = 0usize;
+    while i < nums.len() {
+        if nums[i] <= 0 {
+            i += 1;
+            continue;
+        }
+        let id = next_id;
+        next_id += 1;
+        while i < nums.len() && nums[i] > 0 {
+            out[i] = id;
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize, Serialize)]

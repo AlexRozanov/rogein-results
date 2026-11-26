@@ -19,6 +19,9 @@ import {
   asAddedCpCounts,
   expandMarksWithAddedCps,
   formatCpParen,
+  formatCourseOrderLabel,
+  courseSeqSeparator,
+  parseClusterGroups,
 } from "../orientSplits";
 import {
   buildRouteStats,
@@ -57,7 +60,7 @@ type AwardGroup = {
   id: number;
   name: string;
   course_cps?: number[] | null;
-  course_random_order?: boolean[] | null;
+  course_random_order?: Array<number | boolean> | null;
   length_meters?: number | null;
   lengthMeters?: number | null;
   climb_meters?: number | null;
@@ -100,6 +103,8 @@ type CourseProgressItem = {
   taken: boolean;
   punched: boolean;
   blocker: boolean;
+  cluster?: boolean;
+  clusterGroup?: number;
 };
 
 const route = useRoute();
@@ -204,6 +209,7 @@ const personMarks = computed(() => {
     asAddedCpCounts(person.value?.added_cps),
     startCp.value,
     finishCp.value,
+    selectedGroup.value?.course_random_order ?? [],
   ).map((mark, index) => ({
     seq: mark.seq && mark.seq > 0 ? mark.seq : index + 1,
     cp_number: mark.cp_number,
@@ -241,6 +247,10 @@ const classifiedPunches = computed(() => {
 const courseProgress = computed(() => {
   const required = courseControls.value;
   if (!required.length) return [] as CourseProgressItem[];
+  const groups = parseClusterGroups(
+    selectedGroup.value?.course_random_order ?? [],
+    required.length,
+  );
   const actual = new Set(
     classifiedPunches.value
       .filter((row) => row.kind !== "missed")
@@ -250,12 +260,20 @@ const courseProgress = computed(() => {
     classifiedPunches.value.filter((row) => row.kind === "ok").map((row) => row.cp),
   );
   let firstMiss = true;
-  return required.map((cp) => {
+  return required.map((cp, index) => {
     const isTaken = taken.has(cp);
     const punched = actual.has(cp);
     const blocker = !isTaken && !punched && firstMiss;
     if (!isTaken) firstMiss = false;
-    return { cp, taken: isTaken, punched, blocker };
+    const clusterGroup = groups[index] ?? 0;
+    return {
+      cp,
+      taken: isTaken,
+      punched,
+      blocker,
+      cluster: clusterGroup > 0,
+      clusterGroup,
+    };
   });
 });
 
@@ -327,6 +345,10 @@ const courseError = computed(() => {
     firstMissedCp: firstMissedCp.value,
     missingMore: missingCourseCps.value.length > 1,
     progress: courseProgress.value,
+    orderLabel: formatCourseOrderLabel(
+      courseControls.value,
+      selectedGroup.value?.course_random_order ?? [],
+    ),
     actual: actualOrder.value,
     showCourse: courseProgress.value.length > 0,
     showActual: actualOrder.value.length > 0,
@@ -902,6 +924,7 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
       <p class="course-error-diag">{{ courseError.diagnosticsText }}</p>
       <div v-if="courseError.showCourse" class="course-order">
         <p class="course-order-label">Правильный порядок</p>
+        <p class="course-order-summary">{{ courseError.orderLabel }}</p>
         <div class="course-chip-row">
           <template v-for="(item, idx) in courseError.progress" :key="`c-${idx}-${item.cp}`">
             <span
@@ -910,12 +933,32 @@ watch(() => [route.params.slug, route.params.sourceId, isLive.value], () => {
                 muted: !item.taken && !item.punched,
                 'out-of-order': !item.taken && item.punched,
                 blocker: item.blocker,
+                cluster: item.cluster,
               }"
               :title="courseCpTitle(item)"
             >
-              <span class="course-chip-num">{{ item.cp }}</span>
+              <span class="course-chip-num">{{
+                item.cluster ? `[${item.cp}]` : item.cp
+              }}</span>
             </span>
-            <span v-if="idx < courseError.progress.length - 1" class="course-seq-arrow">→</span>
+            <span
+              v-if="idx < courseError.progress.length - 1"
+              class="course-seq-arrow"
+              :class="{
+                cluster:
+                  courseSeqSeparator(
+                    selectedGroup?.course_random_order ?? [],
+                    idx,
+                    courseError.progress.length,
+                  ) === '·',
+              }"
+            >{{
+              courseSeqSeparator(
+                selectedGroup?.course_random_order ?? [],
+                idx,
+                courseError.progress.length,
+              )
+            }}</span>
           </template>
         </div>
       </div>

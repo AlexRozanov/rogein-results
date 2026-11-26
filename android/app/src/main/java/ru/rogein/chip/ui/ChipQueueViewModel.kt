@@ -867,7 +867,7 @@ class ChipQueueViewModel(
         name: String,
         controls: List<Int>,
         previousName: String? = null,
-        randomOrder: List<Boolean> = emptyList(),
+        randomOrder: List<Int> = emptyList(),
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -2811,7 +2811,7 @@ class ChipQueueViewModel(
                 course = row.course,
                 bib = row.logicalId?.toString().orEmpty(),
                 name = row.name,
-                marks = receiptMarks(row, settings, required),
+                marks = receiptMarks(row, settings, required, requiredRandom),
                 startCp = settings.startCp,
                 elapsedSeconds = row.calc.elapsedSeconds,
                 status = row.calc.status,
@@ -2840,6 +2840,7 @@ class ChipQueueViewModel(
         row: ScoredResult,
         settings: EventSettings,
         required: List<Int>,
+        randomOrder: List<Int> = emptyList(),
     ): List<ReceiptMark> {
         val addCounts = EventStore.addCpCounts(row.logicalId, row.course, corrections.value)
         val addTimes = EventStore.addCpTimes(row.logicalId, row.course, corrections.value)
@@ -2857,6 +2858,7 @@ class ChipQueueViewModel(
             settings.startCp,
             settings.finishCp,
             addTimes,
+            randomOrder,
         )
         return expanded.map { ReceiptMark(it.cp, it.seconds, it.added) }
     }

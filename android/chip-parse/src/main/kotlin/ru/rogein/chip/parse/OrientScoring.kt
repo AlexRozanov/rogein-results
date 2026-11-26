@@ -166,7 +166,7 @@ fun courseProgress(
     punches: List<Int>,
     required: List<Int>,
     addCounts: Map<Int, Int> = emptyMap(),
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): List<CourseCpProgress> {
     if (required.isEmpty()) return emptyList()
     val punched = punches.toSet()
@@ -285,6 +285,7 @@ fun applyAddedCps(
     startCp: Int = CP_START,
     finishCp: Int = CP_FINISH,
     addTimes: Map<Int, Int> = emptyMap(),
+    randomOrder: List<Int> = emptyList(),
 ): List<OrientMark> {
     if (required.isEmpty() || addCounts.values.all { it <= 0 }) return marks
     val remaining = addCounts.filterValues { it > 0 }.toMutableMap()
@@ -294,19 +295,8 @@ fun applyAddedCps(
     if (result.firstOrNull()?.cp == startCp && required.firstOrNull() != startCp) {
         p = 1
     }
-    for (cp in required) {
-        var q = p
-        while (q < result.size && (result[q].cp != cp || (result[q].cp == finishCp && cp != finishCp))) {
-            q += 1
-        }
-        if (q < result.size) {
-            p = q + 1
-            continue
-        }
-        val left = remaining[cp] ?: 0
-        if (left <= 0) break
-        remaining[cp] = left - 1
-        var at = p
+    fun insertAt(cp: Int, atHint: Int): Int {
+        var at = atHint
         val finishAt = result.indexOfLast { it.cp == finishCp }
         if (finishAt >= 0 && at >= finishAt && cp != finishCp) at = finishAt
         result.add(
@@ -318,7 +308,71 @@ fun applyAddedCps(
                 addTimes[cp],
             ),
         )
-        p = at + 1
+        return at + 1
+    }
+    val segments = courseSegments(required, randomOrder)
+    for ((segIdx, seg) in segments.withIndex()) {
+        val future = HashSet<Int>()
+        for (j in (segIdx + 1) until segments.size) {
+            when (val next = segments[j]) {
+                is CourseSegment.Fixed -> future += next.cp
+                is CourseSegment.Cluster -> future += next.cps
+            }
+        }
+        when (seg) {
+            is CourseSegment.Fixed -> {
+                var q = p
+                while (q < result.size &&
+                    (result[q].cp != seg.cp || (result[q].cp == finishCp && seg.cp != finishCp))
+                ) {
+                    q += 1
+                }
+                if (q < result.size) {
+                    p = q + 1
+                    continue
+                }
+                val left = remaining[seg.cp] ?: 0
+                if (left <= 0) break
+                remaining[seg.cp] = left - 1
+                p = insertAt(seg.cp, p)
+            }
+            is CourseSegment.Cluster -> {
+                val need = LinkedHashMap<Int, Int>()
+                for (cp in seg.cps) need[cp] = (need[cp] ?: 0) + 1
+                while (need.values.any { it > 0 }) {
+                    var foundIdx = -1
+                    var foundCp = 0
+                    var q = p
+                    while (q < result.size) {
+                        val cp = result[q].cp
+                        if ((need[cp] ?: 0) > 0) {
+                            foundIdx = q
+                            foundCp = cp
+                            break
+                        }
+                        if (cp in future) break
+                        q += 1
+                    }
+                    if (foundIdx >= 0) {
+                        need[foundCp] = (need[foundCp] ?: 1) - 1
+                        p = foundIdx + 1
+                        continue
+                    }
+                    var usedAdd = false
+                    for ((cp, count) in need) {
+                        if (count <= 0) continue
+                        val left = remaining[cp] ?: 0
+                        if (left <= 0) continue
+                        remaining[cp] = left - 1
+                        need[cp] = count - 1
+                        p = insertAt(cp, p)
+                        usedAdd = true
+                        break
+                    }
+                    if (!usedAdd) break
+                }
+            }
+        }
     }
     return result
 }
@@ -363,7 +417,7 @@ fun classifyActualPunches(
     courseCps: List<Int>,
     startCp: Int,
     finishCp: Int,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): List<ClassifiedPunch> {
     val sorted = orientMarkOrder(marks)
     if (sorted.isEmpty()) return emptyList()
@@ -480,7 +534,7 @@ fun courseSubsequenceTaken(
     punches: List<Int>,
     required: List<Int>,
     addCounts: Map<Int, Int> = emptyMap(),
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): Int = courseTakenWithOrder(punches, required, randomOrder, addCounts)
 
 fun orientCourseSequence(
@@ -488,36 +542,37 @@ fun orientCourseSequence(
     startCp: Int,
     finishCp: Int,
     removed: Set<Int>,
-    randomOrder: List<Boolean> = emptyList(),
-): Pair<List<Int>, List<Boolean>> {
-    val flags = normalizeRandomOrder(controls.size, randomOrder)
+    randomOrder: List<Int> = emptyList(),
+): Pair<List<Int>, List<Int>> {
+    val groups = parseClusterGroups(randomOrder, controls.size)
     val kept = ArrayList<Int>()
-    val keptFlags = ArrayList<Boolean>()
+    val keptGroups = ArrayList<Int>()
     for (i in controls.indices) {
         if (controls[i] in removed) continue
         kept += controls[i]
-        keptFlags += flags[i]
+        keptGroups += groups[i]
     }
     val seq = ArrayList<Int>()
-    val seqCluster = ArrayList<Boolean>()
+    val seqGroups = ArrayList<Int>()
     if (kept.firstOrNull() != startCp) {
         seq += startCp
-        seqCluster += false
+        seqGroups += 0
     }
     for (i in kept.indices) {
         seq += kept[i]
-        seqCluster += keptFlags[i]
+        seqGroups += keptGroups[i]
     }
     if (seq.lastOrNull() != finishCp && finishCp > 0) {
         seq += finishCp
-        seqCluster += false
+        seqGroups += 0
     }
-    return seq to seqCluster
+    return seq to seqGroups
 }
 
 /**
  * Перегоны для исключения времени.
- * Внутри грозди перегонов нет; вход (заданный КП → гроздь) и выход (гроздь → заданный КП) остаются.
+ * Внутри грозди перегонов нет; вход (заданный КП → гроздь), выход (гроздь → заданный КП)
+ * и переход между смежными упорядоченными гроздьями (последний КП первой → первый КП второй) остаются.
  * Для грозди в паре хранится первый/последний КП списка как представитель.
  */
 fun orientCourseLegs(
@@ -525,11 +580,11 @@ fun orientCourseLegs(
     startCp: Int,
     finishCp: Int,
     removed: Set<Int>,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): List<Pair<Int, Int>> {
-    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val (seq, seqGroups) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
     val out = ArrayList<Pair<Int, Int>>()
-    val segments = courseSegments(seq, seqCluster)
+    val segments = courseSegments(seq, seqGroups)
     for (i in 0 until segments.lastIndex) {
         val a = segments[i]
         val b = segments[i + 1]
@@ -543,7 +598,9 @@ fun orientCourseLegs(
             a is CourseSegment.Cluster && b is CourseSegment.Fixed -> {
                 out += a.cps.last() to b.cp
             }
-            // Cluster → Cluster: свободный порядок, исключать нечего.
+            a is CourseSegment.Cluster && b is CourseSegment.Cluster -> {
+                out += a.cps.last() to b.cps.first()
+            }
         }
     }
     return out
@@ -556,11 +613,11 @@ fun exclusionEndpointSets(
     controls: List<Int>,
     startCp: Int,
     finishCp: Int,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
     removed: Set<Int> = emptySet(),
 ): Pair<Set<Int>, Set<Int>> {
-    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
-    val segments = courseSegments(seq, seqCluster)
+    val (seq, seqGroups) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val segments = courseSegments(seq, seqGroups)
     for (i in 0 until segments.lastIndex) {
         val a = segments[i]
         val b = segments[i + 1]
@@ -569,6 +626,8 @@ fun exclusionEndpointSets(
                 a.cp == fromCp && toCp in b.cps -> return setOf(fromCp) to b.cps.toSet()
             a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
                 fromCp in a.cps && b.cp == toCp -> return a.cps.toSet() to setOf(toCp)
+            a is CourseSegment.Cluster && b is CourseSegment.Cluster &&
+                fromCp in a.cps && toCp in b.cps -> return a.cps.toSet() to b.cps.toSet()
         }
     }
     return setOf(fromCp) to setOf(toCp)
@@ -580,12 +639,12 @@ fun formatOrientLegLabel(
     controls: List<Int>,
     startCp: Int,
     finishCp: Int,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
     removed: Set<Int> = emptySet(),
     formatCp: (Int) -> String = { it.toString() },
 ): String {
-    val (seq, seqCluster) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
-    val segments = courseSegments(seq, seqCluster)
+    val (seq, seqGroups) = orientCourseSequence(controls, startCp, finishCp, removed, randomOrder)
+    val segments = courseSegments(seq, seqGroups)
     fun clusterLabel(cps: List<Int>) = "[${cps.joinToString("·")}]"
     for (i in 0 until segments.lastIndex) {
         val a = segments[i]
@@ -597,6 +656,9 @@ fun formatOrientLegLabel(
             a is CourseSegment.Cluster && b is CourseSegment.Fixed &&
                 fromCp == a.cps.last() && b.cp == toCp ->
                 return "${clusterLabel(a.cps)} → ${formatCp(toCp)}"
+            a is CourseSegment.Cluster && b is CourseSegment.Cluster &&
+                fromCp == a.cps.last() && toCp == b.cps.first() ->
+                return "${clusterLabel(a.cps)} → ${clusterLabel(b.cps)}"
         }
     }
     return "${formatCp(fromCp)} → ${formatCp(toCp)}"
@@ -617,7 +679,7 @@ fun applyOrientExclusionRules(
     courseKey: String?,
     rules: List<OrientExclusion>,
     elapsedSeconds: Int,
-    randomOrder: List<Boolean> = emptyList(),
+    randomOrder: List<Int> = emptyList(),
 ): Int {
     if (window.size < 2 || rules.isEmpty()) return elapsedSeconds
     var adjusted = elapsedSeconds
@@ -670,12 +732,12 @@ fun calculateOrientResult(
     exclusions: List<OrientExclusion>,
     addCpCounts: Map<Int, Int>,
     addCpTimes: Map<Int, Int> = emptyMap(),
-    courseRandomOrder: Map<String, List<Boolean>> = emptyMap(),
+    courseRandomOrder: Map<String, List<Int>> = emptyMap(),
 ): OrientCalc {
     val diagnostics = mutableListOf<String>()
     val name = courseName.trim()
     val key = courseKey(name)
-    val requiredPair: Pair<List<Int>, List<Boolean>>? = when {
+    val requiredPair: Pair<List<Int>, List<Int>>? = when {
         name.isEmpty() -> {
             diagnostics += "missing_course"
             null
@@ -711,7 +773,7 @@ private fun calculateOrientResultInner(
     marks: List<OrientMark>,
     settings: OrientSettings,
     required: List<Int>?,
-    requiredRandomOrder: List<Boolean>,
+    requiredRandomOrder: List<Int>,
     key: String,
     diagnostics: MutableList<String>,
     exclusions: List<OrientExclusion>,
@@ -740,14 +802,18 @@ private fun calculateOrientResultInner(
     if (finishIdx == null) diagnostics += "finish_missing"
     val windowEnd = finishIdx ?: (sorted.lastIndex)
     val window = sorted.subList(startIdx, windowEnd + 1).toList()
+    // Как на десктопе: addCounts закрывают слоты в матчере гроздей без опоры на порядок вставки.
+    val windowPunches = window.map { it.cp }
+    val taken = required?.let {
+        courseSubsequenceTaken(windowPunches, it, addCpCounts, requiredRandomOrder)
+    } ?: 0
     val expanded = required?.let {
-        applyAddedCps(window, it, addCpCounts, startCp, settings.finishCp, addCpTimes)
+        applyAddedCps(window, it, addCpCounts, startCp, settings.finishCp, addCpTimes, requiredRandomOrder)
     } ?: window
-    val punches = expanded.map { it.cp }
-    val taken = required?.let { courseSubsequenceTaken(punches, it, randomOrder = requiredRandomOrder) } ?: 0
     val orderBroken = required != null &&
         classifyActualPunches(expanded, required, startCp, settings.finishCp, requiredRandomOrder)
             .any { it.wrong }
+    // Матчер уже останавливается на раннем КП следующего сегмента; orderBroken — доп. страховка.
     val complete = required != null && taken == required.size && !orderBroken
     if (required != null && !complete) diagnostics += "course_incomplete"
     var elapsed = window.last().seconds - window.first().seconds

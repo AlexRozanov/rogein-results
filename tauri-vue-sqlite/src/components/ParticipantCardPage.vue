@@ -10,6 +10,11 @@ import AddToStartProtocolDialog, {
   type AddToStartProtocolDraft,
 } from "./AddToStartProtocolDialog.vue";
 import IconActionButton from "./IconActionButton.vue";
+import {
+  courseProgress as matchCourseProgress,
+  courseSeqSeparator,
+  filterCourseWithOrder,
+} from "../courseOrder";
 
 const props = defineProps<{
   resultId: number | null;
@@ -130,6 +135,7 @@ const sportKind = ref<"rogaine" | "orient">("rogaine");
 const startCp = ref<number | null>(null);
 const finishCp = ref<number>(0);
 const courseControls = ref<number[]>([]);
+const courseRandomOrder = ref<number[]>([]);
 
 const isOrient = computed(() => sportKind.value === "orient");
 
@@ -184,7 +190,9 @@ const startPunchAnomaly = computed(() => {
   );
 });
 const startMarkDraft = ref("");
-const courseList = ref<{ id: number; name: string; controls: number[] }[]>([]);
+const courseList = ref<{ id: number; name: string; controls: number[]; randomOrder?: Array<number | boolean> }[]>(
+  [],
+);
 const courseDraft = ref("");
 
 function toDatetimeLocal(sql: string) {
@@ -294,27 +302,7 @@ const courseProgress = computed(() => {
   }
   const end = finishIdx >= 0 ? finishIdx : marks.length - 1;
   const punches = marks.slice(startIdx, end + 1).map((m) => m.cp_number);
-  const punched = new Set(punches);
-  const remaining = new Map(addCpCounts.value);
-  let i = 0;
-  let firstMiss = true;
-  return required.map((cp) => {
-    let q = i;
-    while (q < punches.length && punches[q] !== cp) q += 1;
-    let taken = false;
-    let added = false;
-    if (q < punches.length && punches[q] === cp) {
-      taken = true;
-      i = q + 1;
-    } else if ((remaining.get(cp) ?? 0) > 0) {
-      remaining.set(cp, (remaining.get(cp) ?? 1) - 1);
-      taken = true;
-      added = true;
-    }
-    const blocker = !taken && firstMiss;
-    if (!taken) firstMiss = false;
-    return { cp, taken, punched: punched.has(cp), added, blocker };
-  });
+  return matchCourseProgress(punches, required, addCpCounts.value, courseRandomOrder.value);
 });
 
 const missingCourseCps = computed(() => courseProgress.value.filter((item) => !item.taken));
@@ -328,12 +316,24 @@ const addableCourseCps = computed(() => {
 });
 const firstMissedCp = computed(() => courseProgress.value.find((item) => item.blocker)?.cp ?? null);
 
-function courseCpTitle(item: { taken: boolean; punched: boolean; added?: boolean; blocker: boolean }) {
+function courseCpTitle(item: {
+  taken: boolean;
+  punched: boolean;
+  added?: boolean;
+  blocker: boolean;
+  cluster?: boolean;
+}) {
   if (item.added) return "взято корректировкой «Добавить КП», без времени чипа";
-  if (item.taken) return "взято в порядке дистанции";
+  if (item.taken) {
+    return item.cluster ? "взято (гроздь, свободный порядок)" : "взято в порядке дистанции";
+  }
   if (item.punched) return "есть отметка, но не в зачёт: предыдущий КП не взят";
   if (item.blocker) return "не взято — с этого КП дистанция не засчитана";
   return "не взято";
+}
+
+function courseChipLabel(item: { cp: number; cluster?: boolean }) {
+  return item.cluster ? `[${item.cp}]` : String(item.cp);
 }
 
 const addToProtocolDraft = computed<AddToStartProtocolDraft | null>(() => {
@@ -528,10 +528,13 @@ async function loadDetails() {
       sportKind.value = "rogaine";
     }
     courseControls.value = [];
+    courseRandomOrder.value = [];
     if (sportKind.value === "orient") {
       try {
         const [courses, corrections] = await Promise.all([
-          invoke<{ id: number; name: string; controls: number[] }[]>("get_courses"),
+          invoke<{ id: number; name: string; controls: number[]; randomOrder?: Array<number | boolean> }[]>(
+            "get_courses",
+          ),
           invoke<{ correction_type: string; payload: Record<string, unknown> }[]>(
             "get_manual_corrections",
             { participantId: null },
@@ -546,11 +549,17 @@ async function loadDetails() {
         );
         const name = String(response.result?.format_name || "").trim();
         courseDraft.value = name;
-        courseControls.value = (courses.find((c) => c.name === name)?.controls ?? []).filter(
-          (cp) => !removed.has(cp),
+        const course = courses.find((c) => c.name === name);
+        const filtered = filterCourseWithOrder(
+          course?.controls ?? [],
+          course?.randomOrder,
+          removed,
         );
+        courseControls.value = filtered.controls;
+        courseRandomOrder.value = filtered.randomOrder;
       } catch {
         courseControls.value = [];
+        courseRandomOrder.value = [];
       }
     }
     try {
@@ -1160,12 +1169,17 @@ async function openPathWindow() {
                       'out-of-order': !item.taken && item.punched,
                       added: item.added,
                       blocker: item.blocker,
+                      cluster: item.cluster,
                     }"
                     :title="courseCpTitle(item)"
                   >
-                    <span class="course-chip-num">{{ item.cp }}</span>
+                    <span class="course-chip-num">{{ courseChipLabel(item) }}</span>
                   </span>
-                  <span v-if="idx < courseProgress.length - 1" class="course-seq-arrow">→</span>
+                  <span
+                    v-if="idx < courseProgress.length - 1"
+                    class="course-seq-arrow"
+                    :class="{ cluster: courseSeqSeparator(courseRandomOrder, idx) === '·' }"
+                  >{{ courseSeqSeparator(courseRandomOrder, idx) }}</span>
                 </template>
               </div>
               <p v-if="firstMissedCp != null" class="subtitle">

@@ -373,7 +373,7 @@ export function buildRouteStats(opts: {
   totalMeters?: number | null;
   courseControls?: number[];
   legMeters?: Array<number | null>;
-  randomOrder?: boolean[];
+  randomOrder?: Array<number | boolean>;
 }): RouteStats | null {
   const timed = timedWindow(opts.selfMarks, opts.startCp, opts.finishCp);
   const pairs = collectPairs(timed);

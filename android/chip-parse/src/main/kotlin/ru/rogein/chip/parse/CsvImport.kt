@@ -17,7 +17,7 @@ data class RogaineProtocolCsvRow(
 data class CourseCsvRow(
     val name: String,
     val controls: List<Int>,
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),

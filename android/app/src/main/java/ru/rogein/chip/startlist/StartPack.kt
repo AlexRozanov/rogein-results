@@ -1,5 +1,6 @@
 package ru.rogein.chip.startlist
 
+import ru.rogein.chip.parse.EventPackExclusionFile
 import ru.rogein.chip.parse.parseStartPackJson
 
 data class StartPack(
@@ -7,6 +8,10 @@ data class StartPack(
     val sport: String,
     val courses: List<StartCourse>,
     val people: List<StartPerson>,
+    val mapScaleDenominator: Int? = null,
+    val controlPositionsMm: Map<Int, Pair<Double, Double>> = emptyMap(),
+    /** null = старый пакет без поля — исключения не меняем. */
+    val exclusions: List<EventPackExclusionFile>? = null,
 )
 
 data class StartCourse(
@@ -15,7 +20,7 @@ data class StartCourse(
     val lengthMeters: Int? = null,
     val climbMeters: Int? = null,
     val legMeters: List<Int?> = emptyList(),
-    val randomOrder: List<Boolean> = emptyList(),
+    val randomOrder: List<Int> = emptyList(),
 )
 
 data class StartPerson(
@@ -57,5 +62,8 @@ fun parseStartPack(json: String): StartPack {
                 currentCourse = person.currentCourse,
             )
         },
+        mapScaleDenominator = file.mapScaleDenominator,
+        controlPositionsMm = file.controlPositionsMm,
+        exclusions = file.exclusions,
     )
 }
