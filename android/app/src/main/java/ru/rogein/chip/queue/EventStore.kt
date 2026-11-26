@@ -744,6 +744,7 @@ class EventStore(
                 competitionStartTime = pack.settings.competitionStartTime,
                 competitionDate = pack.settings.competitionDate.ifBlank { current.competitionDate },
                 title = pack.title.ifBlank { current.title },
+                slug = current.slug.ifBlank { pack.slug.trim() },
                 metersPerPixel = pack.metersPerPixel ?: current.metersPerPixel,
                 mapWidth = pack.mapWidth ?: current.mapWidth,
                 mapHeight = pack.mapHeight ?: current.mapHeight,

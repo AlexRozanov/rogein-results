@@ -6,6 +6,7 @@ import org.json.JSONObject
 data class EventPackFile(
     val revision: Long,
     val sport: String,
+    val slug: String = "",
     val title: String,
     val settings: EventPackSettingsFile,
     val formats: List<EventPackFormatFile>,
@@ -189,6 +190,7 @@ fun parseEventPackJson(text: String): EventPackFile {
             val raw = root.optString("sport").trim()
             if (raw.isEmpty()) SPORT_ROGAINE else normalizeSportKind(raw)
         },
+        slug = root.optString("slug").trim(),
         title = root.optString("title").trim(),
         settings = EventPackSettingsFile(
             controlMinutes = objInt(settingsObj, "controlMinutes", "control_minutes") ?: 120,

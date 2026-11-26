@@ -75,6 +75,21 @@ class RogaineScoringTest {
     }
 
     @Test
+    fun timeModeIgnoresConfiguredStartStationNumber() {
+        val calc = calculateRogaineResult(
+            listOf(
+                OrientMark(31, 10 * 3600 + 120),
+                OrientMark(240, 10 * 3600 + 600),
+            ),
+            settings.copy(startMode = "time", startCp = 241, competitionStartTime = "10:00:00"),
+        )
+        assertEquals(STATUS_OK, calc.status)
+        assertEquals(600, calc.elapsedSeconds)
+        assertEquals(3, calc.pointsRaw)
+        assertTrue(calc.diagnostics.none { it == "start_missing" })
+    }
+
+    @Test
     fun missingStartIsError() {
         val calc = calculateRogaineResult(
             listOf(OrientMark(31, 100), OrientMark(240, 200)),

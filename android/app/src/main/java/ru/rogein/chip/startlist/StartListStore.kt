@@ -36,6 +36,7 @@ import ru.rogein.chip.parse.isRogaine
 import ru.rogein.chip.parse.normalizeSportKind
 import ru.rogein.chip.parse.StartProtocolSnapshotPerson
 import ru.rogein.chip.parse.buildStartProtocolSnapshotJson
+import ru.rogein.chip.parse.packSlugConflict
 import ru.rogein.chip.parse.parseEventPackJson
 import ru.rogein.chip.field.FieldJournal
 import ru.rogein.chip.queue.ChipQueueDao
@@ -50,6 +51,7 @@ class StartListStore(
     private val dao: StartListDao,
     private val fieldJournal: FieldJournal? = null,
     private val eventSlug: suspend () -> String = { "" },
+    private val adoptEventSlug: suspend (String) -> Unit = {},
     private val chipQueue: ChipQueueDao? = null,
     private val applyMapGeometry: suspend (Int?, Map<Int, Pair<Double, Double>>) -> Unit = { _, _ -> },
     private val applyExclusions: suspend (List<EventPackExclusionFile>) -> Unit = {},
@@ -73,12 +75,14 @@ class StartListStore(
             val loaded = openUsbEventPack()
             val pack = loaded.pack ?: return if (quiet) null else loaded.error
             usbSportMismatch(pack.sport, sport)?.let { return if (quiet) null else it }
+            rejectPackSlug(pack.slug)?.let { return if (quiet) null else it }
             applyEventPack(pack, replace = true)
             return eventPackLoadedMessage(pack)
         }
         val loaded = openUsbPack()
         val pack = loaded.pack ?: return if (quiet) null else loaded.error
         usbSportMismatch(pack.sport, sport)?.let { return if (quiet) null else it }
+        rejectPackSlug(pack.slug)?.let { return if (quiet) null else it }
         merge(pack)
         return "Протокол обновлён: ${pack.people.size} участников, ${pack.courses.size} дистанций."
     }
@@ -90,9 +94,11 @@ class StartListStore(
         val loaded = openUsbPack()
         val pack = loaded.pack ?: return loaded.error.orEmpty()
         usbSportMismatch(pack.sport, sport)?.let { return it }
+        rejectPackSlug(pack.slug)?.let { return it }
         applyPeople(pack, replace)
         applyStartPackGeometry(pack)
         applyStartPackExclusions(pack)
+        adoptPackSlugIfNeeded(pack.slug)
         return "Протокол с компьютера: ${pack.people.size} участников."
     }
 
@@ -100,6 +106,7 @@ class StartListStore(
         val loaded = openUsbEventPack()
         val pack = loaded.pack ?: return loaded.error.orEmpty()
         usbSportMismatch(pack.sport, sport)?.let { return it }
+        rejectPackSlug(pack.slug)?.let { return it }
         applyEventPack(pack, replace)
         return eventPackLoadedMessage(pack)
     }
@@ -112,6 +119,7 @@ class StartListStore(
     fun readEventPackJson(text: String): EventPackFile = parseEventPackJson(text)
 
     suspend fun applyEventPack(pack: EventPackFile, replace: Boolean) {
+        rejectPackSlug(pack.slug)?.let { error(it) }
         val formatNames = linkedSetOf<String>()
         pack.formats.forEach { formatNames += it.name }
         pack.people.map { it.format.trim() }.filter { it.isNotEmpty() }.forEach { formatNames += it }
@@ -155,6 +163,7 @@ class StartListStore(
         val peoplePack = StartPack(
             revision = pack.revision,
             sport = pack.sport,
+            slug = pack.slug,
             courses = emptyList(),
             people = pack.people.map { person ->
                 StartPerson(
@@ -169,6 +178,7 @@ class StartListStore(
             },
         )
         applyPeople(peoplePack, replace)
+        adoptPackSlugIfNeeded(pack.slug)
     }
 
     private suspend fun applyStartPackGeometry(pack: StartPack) {
@@ -184,9 +194,11 @@ class StartListStore(
     suspend fun loadCoursesFromUsb(replace: Boolean): String {
         val loaded = openUsbPack()
         val pack = loaded.pack ?: return loaded.error.orEmpty()
+        rejectPackSlug(pack.slug)?.let { return it }
         applyCourses(pack, replace)
         applyStartPackGeometry(pack)
         applyStartPackExclusions(pack)
+        adoptPackSlugIfNeeded(pack.slug)
         val names = pack.courses.map { it.name }.filter { it.isNotBlank() }
         val exclNote = pack.exclusions?.let { " исключений перегонов: ${it.size}." } ?: ""
         return if (names.isEmpty()) {
@@ -197,16 +209,28 @@ class StartListStore(
     }
 
     suspend fun merge(pack: StartPack) {
+        rejectPackSlug(pack.slug)?.let { error(it) }
         applyCourses(pack, replace = true)
         applyPeople(pack, replace = true)
         applyStartPackGeometry(pack)
         applyStartPackExclusions(pack)
+        adoptPackSlugIfNeeded(pack.slug)
         val incomingIds = pack.people.map { it.id }.toSet()
         for (local in dao.listPeople()) {
             if (local.origin == ORIGIN_DESKTOP && local.logicalId !in incomingIds) {
                 dao.deletePerson(local.logicalId)
             }
         }
+    }
+
+    private suspend fun rejectPackSlug(packSlug: String): String? =
+        packSlugConflict(eventSlug(), packSlug)
+
+    private suspend fun adoptPackSlugIfNeeded(packSlug: String) {
+        val pack = packSlug.trim()
+        if (pack.isEmpty()) return
+        if (eventSlug().trim().isNotEmpty()) return
+        adoptEventSlug(pack)
     }
 
     fun sportMismatch(packSport: String, localSport: String): String? = usbSportMismatch(packSport, localSport)

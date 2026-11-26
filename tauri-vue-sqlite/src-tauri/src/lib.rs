@@ -576,8 +576,17 @@ fn empty_phone_poll() -> PhonePollResult {
     }
 }
 
-fn push_start_pack_if_needed(state: &AppState, force: bool) -> Result<Option<String>, String> {
+fn push_start_pack_if_needed(
+    state: &AppState,
+    force: bool,
+    phone_slug: &str,
+) -> Result<Option<String>, String> {
     let conn = domain::open_and_init_db(&state.db_path)?;
+    match domain::gate_phone_usb_pack_push(&conn, phone_slug)? {
+        domain::PhoneImportGate::Allow => {}
+        domain::PhoneImportGate::SkipSilent => return Ok(None),
+        domain::PhoneImportGate::Block(reason) => return Err(reason),
+    }
     let settings = domain::get_settings(&conn)?;
     if settings.sport_kind == "orient" {
         let pack = domain::build_start_pack(&conn)?;
@@ -743,6 +752,7 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
     let mut conn = domain::open_and_init_db(&state.db_path)?;
     let protocol_body = protocol.as_ref().map(|read| read.body.as_str());
     let queue_body = queue.as_ref().map(|read| read.body.as_str());
+    let phone_slug = domain::phone_slug_from_usb_bodies(protocol_body, queue_body);
 
     let mut blocked_reason = String::new();
     let mut read_summary = phone_read_from_import(
@@ -777,18 +787,24 @@ fn poll_phone_usb(state: State<'_, AppState>) -> Result<PhonePollResult, String>
                     read_summary = phone_read_from_import(summary, deleted);
                 }
                 Err(err) => {
-                    // Импорт сломан — всё равно пушим пакет ПК → телефон.
+                    // Импорт сломан — пакет ПК → телефон всё равно пробуем (если slug ок).
                     blocked_reason = format!("Снимок с телефона пропущен: {err}");
                 }
             }
         }
     }
 
-    let (pack_pushed, pack_error) = match push_start_pack_if_needed(&state, false) {
-        Ok(Some(_)) => (true, String::new()),
-        Ok(None) => (false, String::new()),
-        Err(err) => (false, err),
-    };
+    // При уже известном расхождении slug пакет не пушим и не дублируем ту же ошибку.
+    let (pack_pushed, pack_error) =
+        if blocked_reason.contains("Slug не совпадает") {
+            (false, String::new())
+        } else {
+            match push_start_pack_if_needed(&state, false, &phone_slug) {
+                Ok(Some(_)) => (true, String::new()),
+                Ok(None) => (false, String::new()),
+                Err(err) => (false, err),
+            }
+        };
     if blocked_reason.is_empty() && !pack_error.is_empty() {
         blocked_reason = pack_error;
     } else if !pack_error.is_empty() {
@@ -825,7 +841,13 @@ fn push_start_pack_to_phone(state: State<'_, AppState>) -> Result<String, String
         .db_lock
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
-    push_start_pack_if_needed(&state, true)?.ok_or_else(|| {
+    let protocol = phone_sync::try_read_phone_protocol()?;
+    let queue = phone_sync::try_read_phone_snapshot()?;
+    let phone_slug = domain::phone_slug_from_usb_bodies(
+        protocol.as_ref().map(|read| read.body.as_str()),
+        queue.as_ref().map(|read| read.body.as_str()),
+    );
+    push_start_pack_if_needed(&state, true, &phone_slug)?.ok_or_else(|| {
         "Стартовый протокол пуст — нечего отправлять.".to_string()
     })
 }

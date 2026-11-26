@@ -33,7 +33,7 @@ const form = ref<NativeSettings>({
   dq_minutes: 15,
   finish_cp: 240,
   start_mode: "station",
-  start_cp: null,
+  start_cp: 241,
   competition_date: "",
   competition_start_time: "",
   sport_kind: "rogaine",

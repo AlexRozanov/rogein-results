@@ -1169,7 +1169,7 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
         ("dq_minutes", "15".to_string()),
         ("finish_cp", "240".to_string()),
         ("start_mode", "station".to_string()),
-        ("start_cp", "".to_string()),
+        ("start_cp", "241".to_string()),
         ("competition_date", "".to_string()),
         ("competition_start_time", "".to_string()),
         ("sport_kind", "rogaine".to_string()),
@@ -2262,6 +2262,18 @@ fn json_top_level_slug(body: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Slug из снимка протокола или очереди на телефоне (если есть).
+pub fn phone_slug_from_usb_bodies(
+    protocol_body: Option<&str>,
+    queue_body: Option<&str>,
+) -> String {
+    protocol_body
+        .map(json_top_level_slug)
+        .filter(|s| !s.is_empty())
+        .or_else(|| queue_body.map(json_top_level_slug).filter(|s| !s.is_empty()))
+        .unwrap_or_default()
+}
+
 pub fn desktop_publish_slug(conn: &Connection) -> Result<String, String> {
     Ok(get_setting_value(conn, "publish_slug")?
         .unwrap_or_default()
@@ -2281,20 +2293,13 @@ pub fn gate_phone_usb_import(
     }
     let has_data = working_start_has_data(conn)?;
     let desktop_slug = desktop_publish_slug(conn)?;
-    let phone_slug = protocol_body
-        .map(json_top_level_slug)
-        .filter(|s| !s.is_empty())
-        .or_else(|| queue_body.map(json_top_level_slug).filter(|s| !s.is_empty()))
-        .unwrap_or_default();
+    let phone_slug = phone_slug_from_usb_bodies(protocol_body, queue_body);
 
     if !desktop_slug.is_empty() && !phone_slug.is_empty() && desktop_slug != phone_slug {
         let msg = format!(
             "Slug не совпадает: на ПК «{desktop_slug}», на телефоне «{phone_slug}». Данные с телефона не приняты."
         );
-        return Ok(match mode {
-            PhoneImportMode::Auto => PhoneImportGate::Block(msg),
-            PhoneImportMode::Manual => PhoneImportGate::Block(msg),
-        });
+        return Ok(PhoneImportGate::Block(msg));
     }
 
     if mode == PhoneImportMode::Auto && !has_data {
@@ -2302,6 +2307,27 @@ pub fn gate_phone_usb_import(
         return Ok(PhoneImportGate::SkipSilent);
     }
 
+    Ok(PhoneImportGate::Allow)
+}
+
+/// Можно ли пушить start/event-pack на телефон.
+/// Пустой slug на ПК — не пушим; известный чужой slug на телефоне — не пушим.
+pub fn gate_phone_usb_pack_push(
+    conn: &Connection,
+    phone_slug: &str,
+) -> Result<PhoneImportGate, String> {
+    let desktop_slug = desktop_publish_slug(conn)?;
+    if desktop_slug.is_empty() {
+        return Ok(PhoneImportGate::Block(
+            "На ПК не задан slug — пакет на телефон не отправлен.".to_string(),
+        ));
+    }
+    let phone = phone_slug.trim();
+    if !phone.is_empty() && desktop_slug != phone {
+        return Ok(PhoneImportGate::Block(format!(
+            "Slug не совпадает: на ПК «{desktop_slug}», на телефоне «{phone}». Пакет на телефон не отправлен."
+        )));
+    }
     Ok(PhoneImportGate::Allow)
 }
 
@@ -3773,19 +3799,21 @@ fn calculate_result(
     let dq_seconds = (settings.control_minutes + settings.dq_minutes) * 60;
     let mut adjusted_elapsed = 0_i64;
 
+    // В режиме «старт по времени» номер стартовой станции не режет отметки
+    // (значение может оставаться в настройках по умолчанию, например 241).
     let effective_marks: &[Mark] = match (settings.start_mode.as_str(), settings.start_cp) {
         ("station", None) => {
             diagnostics.push("start_cp_not_configured".to_string());
             &[]
         }
-        (_, Some(start_cp)) => match marks.iter().position(|m| m.cp_number == start_cp) {
+        ("station", Some(start_cp)) => match marks.iter().position(|m| m.cp_number == start_cp) {
             Some(idx) => &marks[idx..],
             None => {
                 diagnostics.push("start_missing".to_string());
                 &[]
             }
         },
-        (_, None) => marks,
+        _ => marks,
     };
 
     if effective_marks.is_empty() {
@@ -10267,6 +10295,9 @@ pub fn add_start_protocol_course(
 pub struct StartPack {
     pub revision: i64,
     pub sport: String,
+    /// Идентификатор старта (publish slug); телефон сверяет со своим.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub slug: String,
     pub courses: Vec<StartPackCourse>,
     pub people: Vec<StartPackPerson>,
     /// IOF Map/Scale — для темпа внутри грозди по прямой (мм × scale/1000).
@@ -10347,9 +10378,11 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
     let map_scale_denominator = get_map_scale_denominator(conn)?;
     let control_positions_mm = load_iof_control_positions_mm(conn)?;
     let exclusions = query_event_pack_exclusions(conn)?;
+    let slug = desktop_publish_slug(conn)?;
     Ok(StartPack {
         revision: start_pack_revision(
             settings.sport_kind.as_str(),
+            &slug,
             &courses,
             &people,
             map_scale_denominator,
@@ -10357,6 +10390,7 @@ pub fn build_start_pack(conn: &Connection) -> Result<StartPack, String> {
             &exclusions,
         ),
         sport: settings.sport_kind,
+        slug,
         courses,
         people,
         map_scale_denominator,
@@ -10402,6 +10436,7 @@ fn load_iof_control_positions_mm(
 
 fn start_pack_revision(
     sport: &str,
+    slug: &str,
     courses: &[StartPackCourse],
     people: &[StartPackPerson],
     map_scale_denominator: Option<i64>,
@@ -10410,6 +10445,7 @@ fn start_pack_revision(
 ) -> i64 {
     let mut hasher = DefaultHasher::new();
     sport.hash(&mut hasher);
+    slug.hash(&mut hasher);
     for course in courses {
         course.name.hash(&mut hasher);
         course.controls.hash(&mut hasher);
@@ -10444,6 +10480,9 @@ fn start_pack_revision(
 pub struct EventPack {
     pub revision: i64,
     pub sport: String,
+    /// Идентификатор старта (publish slug); телефон сверяет со своим.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub slug: String,
     pub title: String,
     pub settings: EventPackSettings,
     pub formats: Vec<EventPackFormat>,
@@ -10682,9 +10721,11 @@ pub fn build_event_pack(conn: &Connection, title: &str) -> Result<EventPack, Str
         .unwrap_or_default()
         .trim()
         .to_string();
+    let slug = desktop_publish_slug(conn)?;
     let pack = EventPack {
         revision: 0,
         sport: settings.sport_kind.clone(),
+        slug,
         title: title.trim().to_string(),
         settings: EventPackSettings {
             control_minutes: settings.control_minutes,
@@ -10767,6 +10808,7 @@ fn event_pack_format_cps(
 fn event_pack_revision(pack: &EventPack) -> i64 {
     let mut hasher = DefaultHasher::new();
     pack.sport.hash(&mut hasher);
+    pack.slug.hash(&mut hasher);
     pack.title.hash(&mut hasher);
     pack.settings.control_minutes.hash(&mut hasher);
     pack.settings.penalty_per_minute.hash(&mut hasher);
@@ -13068,7 +13110,8 @@ mod tests {
         import_courses_content, import_csv_content, import_phone_snapshot, import_phone_protocol,
         import_start_protocol_content, import_cp_legends_content, init_db, build_event_pack,
         delete_finish_participant, copy_team_punches, mark_did_not_finish, team_punch_copy_options,
-        build_start_pack, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
+        build_start_pack, calculate_result, merge_start_protocol_team, set_format_cp_type_rules, upsert_award_group, EventPack,
+        gate_phone_usb_pack_push, get_settings, PhoneImportGate, Participant,
         FormatCpTypeRuleInput,
         list_courses, orient_course_legs, orient_start_punch_kind, parse_logical_bib, parse_time,
         query_participant_details, query_results, query_start_protocol, recalculate, register_search_functions, resolve_orient_leg_to,
@@ -13572,6 +13615,107 @@ mod tests {
         let b = build_start_pack(&conn).unwrap();
         assert_eq!(a.revision, b.revision);
         assert_eq!(a.people.len(), 1);
+    }
+
+    #[test]
+    fn new_db_defaults_start_cp_to_241() {
+        let conn = memory_db();
+        let settings = get_settings(&conn).unwrap();
+        assert_eq!(settings.start_cp, Some(241));
+        assert_eq!(settings.finish_cp, 240);
+    }
+
+    #[test]
+    fn rogaine_time_mode_ignores_start_station_number() {
+        let participant = Participant {
+            id: 1,
+            participant_id: "1".to_string(),
+            chip_raw_id: None,
+            name: "Test".to_string(),
+            course_name: String::new(),
+            start_station_id: 0,
+            start_time: String::new(),
+        };
+        let marks = vec![
+            Mark {
+                cp_number: 31,
+                mark_time: parse_time("2026-08-02 10:02:00").unwrap(),
+                seq: 0,
+            },
+            Mark {
+                cp_number: 240,
+                mark_time: parse_time("2026-08-02 10:10:00").unwrap(),
+                seq: 1,
+            },
+        ];
+        let settings = Settings {
+            control_minutes: 240,
+            penalty_per_minute: 1,
+            dq_minutes: 15,
+            finish_cp: 240,
+            start_mode: "time".to_string(),
+            start_cp: Some(241),
+            competition_date: "2026-08-02".to_string(),
+            competition_start_time: "10:00:00".to_string(),
+            sport_kind: "rogaine".to_string(),
+        };
+        let result = calculate_result(
+            &participant,
+            &marks,
+            &[],
+            &[],
+            &settings,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.status, STATUS_OK);
+        assert_eq!(result.elapsed_seconds, 600);
+        assert_eq!(result.points_raw, 3);
+        assert!(!result.diagnostics.iter().any(|d| d == "start_missing"));
+    }
+
+    #[test]
+    fn gate_phone_usb_pack_push_requires_desktop_slug_and_match() {
+        let conn = memory_db();
+        match gate_phone_usb_pack_push(&conn, "").unwrap() {
+            PhoneImportGate::Block(msg) => assert!(msg.contains("не задан slug")),
+            other => panic!("expected Block for empty desktop slug, got {other:?}"),
+        }
+        set_setting_value(&conn, "publish_slug", "event-a").unwrap();
+        assert_eq!(
+            gate_phone_usb_pack_push(&conn, "").unwrap(),
+            PhoneImportGate::Allow
+        );
+        assert_eq!(
+            gate_phone_usb_pack_push(&conn, "event-a").unwrap(),
+            PhoneImportGate::Allow
+        );
+        match gate_phone_usb_pack_push(&conn, "event-b").unwrap() {
+            PhoneImportGate::Block(msg) => {
+                assert!(msg.contains("event-a"));
+                assert!(msg.contains("event-b"));
+                assert!(msg.contains("не отправлен"));
+            }
+            other => panic!("expected Block for mismatched phone slug, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_start_pack_includes_publish_slug() {
+        let conn = memory_db();
+        set_setting_value(&conn, "sport_kind", "orient").unwrap();
+        set_setting_value(&conn, "publish_slug", "forest-2026").unwrap();
+        import_start_protocol_content(
+            &conn,
+            "номер;фио;дистанция\n8;Иванов Иван;D1\n",
+            true,
+        )
+        .unwrap();
+        let pack = build_start_pack(&conn).unwrap();
+        assert_eq!(pack.slug, "forest-2026");
+        let json = serde_json::to_string(&pack).unwrap();
+        assert!(json.contains("\"slug\":\"forest-2026\""));
     }
 
     fn finish_csv_duplicate_bib() -> &'static str {
@@ -14625,6 +14769,7 @@ mod tests {
         let body = include_str!("../../../testdata/orient/start-pack.json");
         let pack: super::StartPack = serde_json::from_str(body).unwrap();
         assert_eq!(pack.sport, "orient");
+        assert_eq!(pack.slug, "orient-demo");
         assert_eq!(pack.courses.len(), 2);
         assert_eq!(pack.people.len(), 2);
         assert_eq!(pack.people[0].id, 8);
@@ -14673,6 +14818,7 @@ mod tests {
         let body = include_str!("../../../testdata/rogaine/event-pack.json");
         let pack: super::EventPack = serde_json::from_str(body).unwrap();
         assert_eq!(pack.sport, "rogaine");
+        assert_eq!(pack.slug, "rogaine-demo");
         assert_eq!(pack.title, "Тестовый рогейн");
         assert_eq!(pack.settings.control_minutes, 240);
         assert_eq!(pack.formats.len(), 1);

@@ -6,6 +6,7 @@ import org.json.JSONObject
 data class StartPackFile(
     val revision: Long,
     val sport: String,
+    val slug: String = "",
     val courses: List<StartPackCourseFile>,
     val people: List<StartPackPersonFile>,
     val mapScaleDenominator: Int? = null,
@@ -123,6 +124,7 @@ fun parseStartPackJson(text: String): StartPackFile {
     return StartPackFile(
         revision = root.optLong("revision"),
         sport = normalizeSportKind(root.optString("sport")),
+        slug = root.optString("slug").trim(),
         courses = courses,
         people = people,
         mapScaleDenominator = mapScale,

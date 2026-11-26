@@ -54,12 +54,13 @@ fun calculateRogaineResult(
     val startCp = settings.startCp.takeIf { it > 0 }
     val finishCp = settings.finishCp
     val sorted = orientMarkOrder(marks)
+    // При старте по времени номер станции в настройках не режет отметки.
     val effective = when {
         !timeStart && startCp == null -> {
             diagnostics += "start_cp_not_configured"
             emptyList()
         }
-        startCp != null -> {
+        !timeStart && startCp != null -> {
             val idx = sorted.indexOfFirst { it.cp == startCp }
             if (idx < 0) {
                 diagnostics += "start_missing"

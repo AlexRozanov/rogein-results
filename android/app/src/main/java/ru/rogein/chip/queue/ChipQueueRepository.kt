@@ -20,6 +20,7 @@ import ru.rogein.chip.parse.isSyntheticFinishUid
 import ru.rogein.chip.parse.isTeamCopyUid
 import ru.rogein.chip.parse.normalizeChipUid
 import ru.rogein.chip.parse.numberConflictIds
+import ru.rogein.chip.parse.packSlugConflict
 import ru.rogein.chip.parse.teamCopyUid
 import ru.rogein.chip.parse.toChipDump
 import ru.rogein.chip.printer.PrinterStore
@@ -70,6 +71,7 @@ class ChipQueueRepository(
     fun observeStarts() = archive.observe()
 
     suspend fun applyRogaineEventPack(pack: EventPackFile, replace: Boolean): String {
+        packSlugConflict(event.settingsNow().slug, pack.slug)?.let { error(it) }
         startList.applyEventPack(pack, replace)
         event.applyPackMeta(pack)
         publishProtocolSnapshot()
@@ -624,6 +626,12 @@ class ChipQueueRepository(
                 db.startListDao(),
                 fieldJournal,
                 eventSlug = { event.settingsNow().slug },
+                adoptEventSlug = { slug ->
+                    val cur = event.settingsNow()
+                    if (cur.slug.isBlank()) {
+                        event.saveSettings(cur.copy(slug = slug.trim()))
+                    }
+                },
                 chipQueue = db.dao(),
                 applyMapGeometry = { scale, positions ->
                     event.applyIofMapGeometry(scale, positions)

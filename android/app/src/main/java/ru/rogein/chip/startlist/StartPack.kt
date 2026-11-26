@@ -6,6 +6,7 @@ import ru.rogein.chip.parse.parseStartPackJson
 data class StartPack(
     val revision: Long,
     val sport: String,
+    val slug: String = "",
     val courses: List<StartCourse>,
     val people: List<StartPerson>,
     val mapScaleDenominator: Int? = null,
@@ -44,6 +45,7 @@ fun parseStartPack(json: String): StartPack {
     return StartPack(
         revision = file.revision,
         sport = file.sport,
+        slug = file.slug,
         courses = file.courses.map {
             StartCourse(
                 it.name,
