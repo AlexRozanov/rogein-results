@@ -322,6 +322,8 @@ export function classifyCoursePunches(
     }
     const seg = segments[segIdx];
     const future = futureSegCps(segments, segIdx + 1);
+    const laterSame = () =>
+      marks.slice(i + 1, endIdx + 1).some((m) => m.cp_number === cp);
     if (seg.kind === "fixed") {
       if (cp === seg.cp) {
         taken.add(seg.index);
@@ -329,7 +331,12 @@ export function classifyCoursePunches(
         out.push(emitPunch(mark, "ok"));
         continue;
       }
-      if (future.has(cp) || courseCps.includes(cp)) {
+      if (future.has(cp)) {
+        // Early later-segment punch: ignore if corrected later (same as fixed-order).
+        out.push(emitPunch(mark, laterSame() ? "extra" : "out_of_order"));
+        continue;
+      }
+      if (courseCps.includes(cp)) {
         out.push(emitPunch(mark, "out_of_order"));
         continue;
       }
@@ -344,7 +351,7 @@ export function classifyCoursePunches(
       continue;
     }
     if (future.has(cp)) {
-      out.push(emitPunch(mark, "out_of_order"));
+      out.push(emitPunch(mark, laterSame() ? "extra" : "out_of_order"));
       continue;
     }
     out.push(emitPunch(mark, courseCps.includes(cp) ? "ok" : "extra"));
@@ -686,7 +693,6 @@ export function expandMarksWithAddedCps(
   const segments = courseSegments(courseCps, randomOrder);
   for (let segIdx = 0; segIdx < segments.length; segIdx += 1) {
     const seg = segments[segIdx];
-    const future = futureSegCps(segments, segIdx + 1);
     if (seg.kind === "fixed") {
       let q = p;
       while (
@@ -719,7 +725,6 @@ export function expandMarksWithAddedCps(
           foundCp = cp;
           break;
         }
-        if (future.has(cp)) break;
         q += 1;
       }
       if (foundIdx >= 0) {

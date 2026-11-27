@@ -158,16 +158,6 @@ export function courseSegments(
   return out;
 }
 
-function futureRequired(segments: CourseSegment[], from: number): Set<number> {
-  const out = new Set<number>();
-  for (let j = from; j < segments.length; j += 1) {
-    const seg = segments[j];
-    if (seg.kind === "fixed") out.add(seg.cp);
-    else for (const cp of seg.cps) out.add(cp);
-  }
-  return out;
-}
-
 export function courseProgress(
   punches: number[],
   required: number[],
@@ -184,9 +174,9 @@ export function courseProgress(
   let punchAt = 0;
   let controlAt = 0;
 
+  // Like fixed-order subsequence: skip intervening punches (including early later-segment CPs).
   for (let segIdx = 0; segIdx < segments.length; segIdx += 1) {
     const seg = segments[segIdx];
-    const future = futureRequired(segments, segIdx + 1);
     if (seg.kind === "fixed") {
       let q = punchAt;
       while (q < punches.length && punches[q] !== seg.cp) q += 1;
@@ -225,7 +215,6 @@ export function courseProgress(
           foundCp = cp;
           break;
         }
-        if (future.has(cp)) break;
         q += 1;
       }
       if (foundIdx >= 0) {

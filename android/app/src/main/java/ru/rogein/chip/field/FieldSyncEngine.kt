@@ -581,7 +581,7 @@ class FieldSyncEngine(
 
     private suspend fun postOwnCloud(): Int {
         val after = lastPostedSeq.get()
-        val ops = journal.ownOpsAfter(after)
+        val ops = journal.ownOpsAfter(after, eventSlug().trim().ifBlank { cachedSlug })
         if (ops.isEmpty()) return 0
         val base = cloudFieldBase()
         val conn = open(base, "/ops", "POST", bearer = true)
@@ -737,7 +737,7 @@ class FieldSyncEngine(
 
     private suspend fun pushOwnOverWs(webSocket: WebSocket) {
         val after = lastPostedSeq.get()
-        val ops = journal.ownOpsAfter(after)
+        val ops = journal.ownOpsAfter(after, eventSlug().trim().ifBlank { cachedSlug })
         if (ops.isEmpty()) return
         val arr = JSONArray()
         ops.forEach { arr.put(fieldOpEnvelopeToJson(it)) }
@@ -874,7 +874,7 @@ class FieldSyncEngine(
 
     private suspend fun postOwn(base: String): Int {
         val after = lastPostedSeq.get()
-        val ops = journal.ownOpsAfter(after)
+        val ops = journal.ownOpsAfter(after, eventSlug().trim().ifBlank { cachedSlug })
         if (ops.isEmpty()) return 0
         val conn = open(base, "/field/ops", "POST")
         try {

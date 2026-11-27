@@ -2843,7 +2843,7 @@ fun ResultsScreen(
     onSendLive: () -> Unit,
     onAddCp: (Int, String, Int, String?) -> Unit,
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
-    onAssignCourse: (Int, String, String) -> Unit,
+    onAssignCourse: (String, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
     canPrint: Boolean = false,
     onPrint: (ScoredResult) -> Unit = {},
@@ -3263,7 +3263,7 @@ private fun ResultRowDetails(
     onClose: () -> Unit,
     onAddCp: (Int, String, Int, String?) -> Unit,
     onRemoveCp: (Int?, Int, String) -> Unit = { _, _, _ -> },
-    onAssignCourse: (Int, String, String) -> Unit,
+    onAssignCourse: (String, String, String) -> Unit,
     onDeleteCorrection: (Long) -> Unit,
     onDeleteFinish: () -> Unit = {},
     canChangeNumber: Boolean = false,
@@ -3362,7 +3362,7 @@ private fun ResultRowDetails(
         }
         if (row.numberConflict) {
             Text(
-                "Один логический номер на разных чипах. Смените номер у одной из записей, иначе правки КП затронут обоих.",
+                "Один логический номер на разных чипах одной дистанции. Смените номер или дистанцию у одной из записей.",
                 color = Warn,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -3477,12 +3477,12 @@ private fun ResultRowDetails(
                     }
                 }
             }
-            val personal = corrections.filter {
-                it.logicalId == id && (
-                    it.type == "add_cp" ||
-                        it.type == "assign_course" ||
-                        (rogaine && it.type == "remove_cp")
-                    ) && it.type != COPY_PUNCHES
+            val personal = corrections.filter { item ->
+                item.logicalId == id && (
+                    item.type == "add_cp" ||
+                        (item.type == "assign_course" && assignCourseMatchesFinish(item, row.queueId)) ||
+                        (rogaine && item.type == "remove_cp")
+                    ) && item.type != COPY_PUNCHES
             }
             if (personal.isNotEmpty()) {
                 Text("Персональные корректировки", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -3535,7 +3535,7 @@ private fun ResultRowDetails(
             courses = courses.map { it.name },
             onDismiss = { courseChangeOpen = false },
             onConfirm = { next ->
-                onAssignCourse(id, row.course, next)
+                onAssignCourse(row.queueId, row.course, next)
                 courseChangeOpen = false
             },
         )
@@ -5040,6 +5040,12 @@ private fun formatCp(cp: Int, settings: EventSettings): String = when (cp) {
     settings.startCp -> "$cp старт"
     settings.finishCp -> "$cp финиш"
     else -> cp.toString()
+}
+
+private fun assignCourseMatchesFinish(row: CorrectionEntity, queueId: String): Boolean {
+    if (row.type != "assign_course") return false
+    val bound = runCatching { org.json.JSONObject(row.payloadJson).optString("queue_id").trim() }.getOrDefault("")
+    return bound.isEmpty() || bound == queueId
 }
 
 internal fun correctionLabel(row: CorrectionEntity, rogaine: Boolean = false): String = when (row.type) {

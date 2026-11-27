@@ -14,6 +14,7 @@ import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.MAX_LOGICAL_ID
 import ru.rogein.chip.parse.canChangeFinishNumber
 import ru.rogein.chip.parse.classifyFinishEnqueue
+import ru.rogein.chip.parse.courseKey
 import ru.rogein.chip.parse.dnfUid
 import ru.rogein.chip.parse.isDnfUid
 import ru.rogein.chip.parse.isSyntheticFinishUid
@@ -178,6 +179,49 @@ class ChipQueueRepository(
                 overwrite = overwrite,
             )
         }
+    }
+
+    /**
+     * Changes the course of one finish row. The start-list person may still carry a single distance; each finish keeps
+     * its own course so two chips of one bib can land on two distances.
+     */
+    suspend fun assignFinishCourse(queueId: String, toCourse: String) {
+        val next = toCourse.trim()
+        if (next.isEmpty()) error("Выберите дистанцию")
+        val item = dao.byId(queueId) ?: error("Запись финиша не найдена")
+        val logicalId = item.logicalId ?: error("Нет номера в протоколе — персональные корректировки недоступны")
+        val from = item.courseName.trim()
+        if (courseKey(from) == courseKey(next)) return
+        val courses = startList.coursesNow()
+        val canonical = courses.find { courseKey(it.name) == courseKey(next) }?.name
+            ?: error("Дистанция «$next» не найдена")
+        val clash = dao.listAll().find { row ->
+            row.id != queueId &&
+                row.logicalId == logicalId &&
+                courseKey(row.courseName) == courseKey(canonical)
+        }
+        if (clash != null) {
+            error(
+                "У номера $logicalId уже есть финиш на дистанции «$canonical». " +
+                    "Оставьте оба результата или сначала разберите дубль.",
+            )
+        }
+        event.assignCourse(queueId, logicalId, from, canonical)
+        dao.updateFinishCourse(queueId, canonical)
+        event.markLivePending()
+    }
+
+    suspend fun deleteFinishCorrection(id: Long) {
+        val row = event.takeCorrection(id) ?: return
+        if (row.type == "assign_course") {
+            val queueId = org.json.JSONObject(row.payloadJson).optString("queue_id").trim()
+            val from = row.courseName.trim()
+                .ifBlank { org.json.JSONObject(row.payloadJson).optString("from_course").trim() }
+            if (queueId.isNotBlank() && from.isNotBlank()) {
+                dao.updateFinishCourse(queueId, from)
+            }
+        }
+        event.markLivePending()
     }
 
     suspend fun reassignFinishNumber(queueId: String, newLogicalId: Int): String? {
@@ -648,6 +692,7 @@ class ChipQueueRepository(
                 siteBaseUrl = { event.settingsNow().apiBaseUrl },
                 publishToken = { event.settingsNow().publishToken },
             )
+            event.onFieldJournalCleared = { fieldSync.onJournalCleared() }
             return ChipQueueRepository(
                 db.dao(),
                 ChipQueueSnapshotWriter(appContext),

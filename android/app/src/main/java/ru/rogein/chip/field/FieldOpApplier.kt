@@ -96,7 +96,16 @@ class FieldOpApplier(
             }
             FieldOpType.CORRECTION_ASSIGN_COURSE -> {
                 val p = parseCorrectionAssignCoursePayload(op.payloadJson)
-                event.applyCorrectionAssignCourse(p.correctionId, p.logicalId, p.fromCourse, p.toCourse)
+                event.applyCorrectionAssignCourse(
+                    p.correctionId,
+                    p.logicalId,
+                    p.fromCourse,
+                    p.toCourse,
+                    p.queueId,
+                )
+                if (p.queueId.isNotBlank() && p.toCourse.isNotBlank()) {
+                    queueDao.updateFinishCourse(p.queueId, p.toCourse)
+                }
             }
             FieldOpType.CORRECTION_DELETE -> {
                 val p = parseCorrectionDeletePayload(op.payloadJson)

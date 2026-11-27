@@ -124,17 +124,19 @@ class FieldHostServer(
                 }
                 request.method == "GET" && path == "/field/ops" -> {
                     val cursors = parseCursorsJson(request.query["cursors"])
-                    writeResponse(output, 200, opsBundleJson(journal.opsAfter(cursors)))
+                    val slug = eventSlug()
+                    writeResponse(output, 200, opsBundleJson(journal.opsAfter(cursors, slug)))
                 }
                 request.method == "GET" && path == "/field/snapshot" -> {
-                    val ops = journal.opsAfter(emptyMap())
+                    val slug = eventSlug()
+                    val ops = journal.opsAfter(emptyMap(), slug)
                     val body = JSONObject()
                         .put("ops", JSONArray().also { arr ->
                             ops.forEach { arr.put(fieldOpEnvelopeToJson(it)) }
                         })
                         .put("cursors", JSONObject(cursorsToJson(journal.cursors())))
-                        .put("op_count", journal.opCount())
-                        .put("event_slug", eventSlug())
+                        .put("op_count", ops.size)
+                        .put("event_slug", slug)
                         .toString()
                     writeResponse(output, 200, body)
                 }
@@ -234,7 +236,7 @@ class FieldHostServer(
             "sync" -> {
                 val cursors = parseCursorsJson(obj.optJSONObject("cursors")?.toString() ?: "{}")
                 session.cursors = cursors
-                val ops = journal.opsAfter(cursors)
+                val ops = journal.opsAfter(cursors, eventSlug())
                 session.sendText(opsPushJson(ops))
                 session.cursors = mergeCursors(cursors, ops)
             }

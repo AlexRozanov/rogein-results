@@ -120,3 +120,40 @@ fun canChangeFinishNumber(
     val chip = normalizeChipUid(uid)
     return bound.isNotEmpty() && chip.isNotEmpty() && bound != chip
 }
+
+/** One assign_course correction, as scoring needs it. */
+data class AssignCourseCorrection(
+    val logicalId: Int?,
+    val fromCourse: String,
+    val toCourse: String,
+    val queueId: String = "",
+)
+
+/**
+ * Course override for one finish row.
+ *
+ * Prefer a correction that names this [queueId]. Legacy corrections without a queue id only apply when this finish
+ * still sits on the correction's from-course (or already shows the target) — so a bib with two finishes on different
+ * chips no longer shares one override.
+ */
+fun effectiveAssignedCourse(
+    queueId: String,
+    logicalId: Int?,
+    itemCourseName: String,
+    corrections: List<AssignCourseCorrection>,
+): String {
+    if (logicalId == null) return ""
+    val forNumber = corrections.filter { it.logicalId == logicalId && it.toCourse.isNotBlank() }
+    forNumber.lastOrNull { it.queueId.isNotBlank() && it.queueId == queueId }?.let { return it.toCourse.trim() }
+    val itemKey = courseKey(itemCourseName)
+    return forNumber
+        .lastOrNull { row ->
+            row.queueId.isBlank() &&
+                (itemKey.isEmpty() ||
+                    itemKey == courseKey(row.fromCourse) ||
+                    itemKey == courseKey(row.toCourse))
+        }
+        ?.toCourse
+        ?.trim()
+        .orEmpty()
+}

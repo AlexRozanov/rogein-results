@@ -353,9 +353,10 @@ class FieldJournal(
         fromCourse: String,
         toCourse: String,
         eventSlug: String,
+        queueId: String = "",
     ): FieldOpEnvelope = append(
         type = FieldOpType.CORRECTION_ASSIGN_COURSE,
-        payloadJson = correctionAssignCoursePayloadJson(correctionId, logicalId, fromCourse, toCourse),
+        payloadJson = correctionAssignCoursePayloadJson(correctionId, logicalId, fromCourse, toCourse, queueId),
         eventSlug = eventSlug,
     )
 
@@ -497,22 +498,33 @@ class FieldJournal(
         return out
     }
 
-    suspend fun opsAfter(cursors: Map<String, Long>): List<FieldOpEnvelope> {
+    suspend fun opsAfter(
+        cursors: Map<String, Long>,
+        eventSlug: String = "",
+    ): List<FieldOpEnvelope> {
+        val want = eventSlug.trim()
         return dao.listAll()
             .asSequence()
             .filter { row ->
                 val seen = cursors[row.deviceId] ?: 0L
                 row.deviceSeq > seen
             }
+            .filter { row -> want.isEmpty() || row.eventSlug.equals(want, ignoreCase = true) }
             .map { it.toEnvelope() }
             .toList()
     }
 
-    suspend fun ownOpsAfter(afterSeq: Long): List<FieldOpEnvelope> {
+    /**
+     * Свои ops после [afterSeq]. Если [eventSlug] не пуст — только этого старта
+     * (иначе после смены slug в POST уезжают старые ops и сайт отвечает 400).
+     */
+    suspend fun ownOpsAfter(afterSeq: Long, eventSlug: String = ""): List<FieldOpEnvelope> {
         val id = device.deviceId
+        val want = eventSlug.trim()
         return dao.listAll()
             .asSequence()
             .filter { it.deviceId == id && it.deviceSeq > afterSeq }
+            .filter { row -> want.isEmpty() || row.eventSlug.equals(want, ignoreCase = true) }
             .map { it.toEnvelope() }
             .toList()
     }

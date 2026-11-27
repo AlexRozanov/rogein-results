@@ -40,8 +40,10 @@ import ru.rogein.chip.parse.ROGAINE_REMOVE_LEGS
 import ru.rogein.chip.parse.ROGAINE_REMOVE_POINTS
 import ru.rogein.chip.parse.STATUS_DNF
 import ru.rogein.chip.parse.calculateRogaineResult
+import ru.rogein.chip.parse.AssignCourseCorrection
 import ru.rogein.chip.parse.FinishQueueRef
 import ru.rogein.chip.parse.courseKey
+import ru.rogein.chip.parse.effectiveAssignedCourse
 import ru.rogein.chip.parse.numberConflictIds
 import ru.rogein.chip.parse.filterCourseCps
 import ru.rogein.chip.parse.filterCourseWithOrder
@@ -156,6 +158,8 @@ class EventStore(
     private val eventDao: EventDao,
     private val fieldJournal: FieldJournal? = null,
 ) {
+    /** После очистки журнала из‑за смены slug (сбросить lastPostedSeq и т.п.). */
+    var onFieldJournalCleared: (() -> Unit)? = null
     private val liveSending = AtomicBoolean(false)
     val settings: Flow<EventSettings> = eventDao.observeSettings().map { it.toSettings() }
     val corrections: Flow<List<CorrectionEntity>> = eventDao.observeCorrections()
@@ -169,6 +173,8 @@ class EventStore(
 
     suspend fun saveSettings(next: EventSettings) {
         val prev = settingsNow()
+        val prevSlug = prev.slug.trim()
+        val nextSlug = next.slug.trim()
         eventDao.upsertSetting(SettingEntity("start_cp", next.startCp.toString()))
         eventDao.upsertSetting(SettingEntity("finish_cp", next.finishCp.toString()))
         eventDao.upsertSetting(SettingEntity("control_minutes", next.controlMinutes.toString()))
@@ -179,7 +185,7 @@ class EventStore(
         eventDao.upsertSetting(SettingEntity("competition_date", next.competitionDate.trim()))
         eventDao.upsertSetting(SettingEntity("api_base_url", next.apiBaseUrl.trim()))
         eventDao.upsertSetting(SettingEntity("publish_token", next.publishToken.trim()))
-        eventDao.upsertSetting(SettingEntity("slug", next.slug.trim()))
+        eventDao.upsertSetting(SettingEntity("slug", nextSlug))
         eventDao.upsertSetting(SettingEntity("title", next.title.trim()))
         eventDao.upsertSetting(
             SettingEntity("live_publish", if (next.livePublishEnabled) "1" else "0"),
@@ -191,6 +197,13 @@ class EventStore(
         )
         eventDao.upsertSetting(SettingEntity("map_image_width", next.mapWidth?.toString().orEmpty()))
         eventDao.upsertSetting(SettingEntity("map_image_height", next.mapHeight?.toString().orEmpty()))
+        // Смена slug без очистки журнала → POST ops со старым event_slug на новый путь → HTTP 400.
+        if (prevSlug.isNotEmpty() && nextSlug.isNotEmpty() &&
+            !prevSlug.equals(nextSlug, ignoreCase = true)
+        ) {
+            fieldJournal?.clearAll()
+            onFieldJournalCleared?.invoke()
+        }
         rememberEventConfigIfChanged(prev, next)
     }
 
@@ -398,27 +411,41 @@ class EventStore(
         rememberCopyPunches(correctionId, logicalId, fromLogicalId)
     }
 
-    suspend fun assignCourse(logicalId: Int, fromCourse: String, toCourse: String) {
+    suspend fun assignCourse(
+        queueId: String,
+        logicalId: Int,
+        fromCourse: String,
+        toCourse: String,
+    ) {
         val correctionId = newCorrectionId()
+        val payload = JSONObject()
+            .put("correction_id", correctionId)
+            .put("course", toCourse)
+            .put("to_course", toCourse)
+            .put("from_course", fromCourse)
+        if (queueId.isNotBlank()) payload.put("queue_id", queueId)
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "assign_course",
                 logicalId = logicalId,
                 courseName = fromCourse,
-                payloadJson = JSONObject()
-                    .put("correction_id", correctionId)
-                    .put("course", toCourse)
-                    .toString(),
+                payloadJson = payload.toString(),
             ),
         )
-        rememberAssignCourse(correctionId, logicalId, fromCourse, toCourse)
+        rememberAssignCourse(correctionId, logicalId, fromCourse, toCourse, queueId)
     }
 
-    suspend fun deleteCorrection(id: Long) {
-        val row = eventDao.listCorrections().find { it.id == id } ?: return
+    /** Drops one correction and returns it, so the caller can undo side effects (e.g. restore a finish course). */
+    suspend fun takeCorrection(id: Long): CorrectionEntity? {
+        val row = eventDao.listCorrections().find { it.id == id } ?: return null
         val syncId = correctionIdFromLocalPayload(row.payloadJson).ifBlank { "local-$id" }
         eventDao.deleteCorrection(id)
         rememberDeleteCorrection(syncId)
+        return row
+    }
+
+    suspend fun deleteCorrection(id: Long) {
+        takeCorrection(id)
     }
 
     suspend fun applyCorrectionAddCp(
@@ -504,17 +531,21 @@ class EventStore(
         logicalId: Int,
         fromCourse: String,
         toCourse: String,
+        queueId: String = "",
     ) {
         if (correctionId.isNotBlank() && findByCorrectionId(correctionId) != null) return
+        val payload = JSONObject()
+            .put("correction_id", correctionId)
+            .put("course", toCourse)
+            .put("to_course", toCourse)
+            .put("from_course", fromCourse)
+        if (queueId.isNotBlank()) payload.put("queue_id", queueId)
         eventDao.insertCorrection(
             CorrectionEntity(
                 type = "assign_course",
                 logicalId = logicalId,
                 courseName = fromCourse,
-                payloadJson = JSONObject()
-                    .put("correction_id", correctionId)
-                    .put("course", toCourse)
-                    .toString(),
+                payloadJson = payload.toString(),
             ),
         )
     }
@@ -576,10 +607,11 @@ class EventStore(
         logicalId: Int,
         fromCourse: String,
         toCourse: String,
+        queueId: String,
     ) {
         val journal = fieldJournal ?: return
         runCatching {
-            journal.recordCorrectionAssignCourse(correctionId, logicalId, fromCourse, toCourse, slug())
+            journal.recordCorrectionAssignCourse(correctionId, logicalId, fromCourse, toCourse, slug(), queueId)
         }
     }
 
@@ -1125,7 +1157,7 @@ class EventStore(
             )
             val raw = items.map { item ->
                 val person = item.logicalId?.let { id -> people.find { it.id == id } }
-                val assigned = assignedCourse(item.logicalId, corrections)
+                val assigned = assignedCourse(item.id, item.logicalId, item.courseName, corrections)
                 val course = assigned.ifBlank { item.courseName.ifBlank { person?.currentCourse.orEmpty() } }
                 val punches = parsePunches(item.punchesJson)
                 val adds = addCpCounts(item.logicalId, course, corrections)
@@ -1271,12 +1303,27 @@ class EventStore(
                 }
             }.toSet()
 
-        private fun assignedCourse(logicalId: Int?, corrections: List<CorrectionEntity>): String {
-            if (logicalId == null) return ""
-            return corrections.lastOrNull { it.type == "assign_course" && it.logicalId == logicalId }
-                ?.let { payloadString(it.payloadJson, "course") }
-                .orEmpty()
-        }
+        private fun assignedCourse(
+            queueId: String,
+            logicalId: Int?,
+            itemCourseName: String,
+            corrections: List<CorrectionEntity>,
+        ): String =
+            effectiveAssignedCourse(
+                queueId = queueId,
+                logicalId = logicalId,
+                itemCourseName = itemCourseName,
+                corrections = corrections.mapNotNull { row ->
+                    if (row.type != "assign_course") return@mapNotNull null
+                    AssignCourseCorrection(
+                        logicalId = row.logicalId,
+                        fromCourse = row.courseName.ifBlank { payloadString(row.payloadJson, "from_course") },
+                        toCourse = payloadString(row.payloadJson, "course")
+                            .ifBlank { payloadString(row.payloadJson, "to_course") },
+                        queueId = payloadString(row.payloadJson, "queue_id"),
+                    )
+                },
+            )
 
         fun addCpCounts(logicalId: Int?, courseName: String, corrections: List<CorrectionEntity>): Map<Int, Int> {
             if (logicalId == null) return emptyMap()

@@ -79,8 +79,9 @@ class OrientScoringTest {
             .mapIndexed { i, cp -> mark(cp, 10, i) }
         val kinds = classifyActualPunches(early, controls, 241, 240, groups)
         assertTrue(kinds.first { it.mark.cp == 77 }.wrong)
+        // Early 77 skipped for matching; first cluster finishes; no fresh 77 → 7/9.
         assertEquals(
-            5,
+            7,
             courseSubsequenceTaken(early.map { it.cp }.filter { it != 241 && it != 240 }, controls, randomOrder = groups),
         )
     }

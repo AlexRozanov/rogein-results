@@ -176,14 +176,7 @@ fun courseProgress(
     val addedFlags = BooleanArray(required.size)
     var punchAt = 0
     var controlAt = 0
-    for ((segIdx, seg) in segments.withIndex()) {
-        val future = HashSet<Int>()
-        for (j in (segIdx + 1) until segments.size) {
-            when (val next = segments[j]) {
-                is CourseSegment.Fixed -> future += next.cp
-                is CourseSegment.Cluster -> future += next.cps
-            }
-        }
+    for (seg in segments) {
         when (seg) {
             is CourseSegment.Fixed -> {
                 var q = punchAt
@@ -220,7 +213,6 @@ fun courseProgress(
                             foundCp = cp
                             break
                         }
-                        if (cp in future) break
                         q += 1
                     }
                     if (foundIdx >= 0) {
@@ -311,14 +303,7 @@ fun applyAddedCps(
         return at + 1
     }
     val segments = courseSegments(required, randomOrder)
-    for ((segIdx, seg) in segments.withIndex()) {
-        val future = HashSet<Int>()
-        for (j in (segIdx + 1) until segments.size) {
-            when (val next = segments[j]) {
-                is CourseSegment.Fixed -> future += next.cp
-                is CourseSegment.Cluster -> future += next.cps
-            }
-        }
+    for (seg in segments) {
         when (seg) {
             is CourseSegment.Fixed -> {
                 var q = p
@@ -350,7 +335,6 @@ fun applyAddedCps(
                             foundCp = cp
                             break
                         }
-                        if (cp in future) break
                         q += 1
                     }
                     if (foundIdx >= 0) {

@@ -193,23 +193,11 @@ fun filterCourseWithGroups(
     return cps to outGroups
 }
 
-private fun segmentCps(seg: CourseSegment): List<Int> = when (seg) {
-    is CourseSegment.Fixed -> listOf(seg.cp)
-    is CourseSegment.Cluster -> seg.cps
-}
-
-private fun futureRequired(segments: List<CourseSegment>, from: Int): Set<Int> {
-    val out = HashSet<Int>()
-    for (i in from until segments.size) {
-        out += segmentCps(segments[i])
-    }
-    return out
-}
-
 /**
  * How many required CPs are satisfied under fixed/cluster rules.
- * Punching a later-segment CP before the current segment is done stops matching.
- * Adjacent clusters are ordered: first cluster must be completed before the next.
+ * Like fixed-order subsequence: intervening punches (including early punches of later
+ * segments) are skipped. Adjacent clusters stay ordered; an early next-cluster punch
+ * does not count toward that cluster until the current segment is done.
  */
 fun courseTakenWithOrder(
     punches: List<Int>,
@@ -234,8 +222,7 @@ fun courseTakenWithGroups(
     val remainingAdds = addCounts.toMutableMap()
     var p = 0
     var taken = 0
-    for ((segIdx, seg) in segments.withIndex()) {
-        val future = futureRequired(segments, segIdx + 1)
+    for (seg in segments) {
         when (seg) {
             is CourseSegment.Fixed -> {
                 var q = p
@@ -269,7 +256,6 @@ fun courseTakenWithGroups(
                             foundCp = cp
                             break
                         }
-                        if (cp in future) break
                         q += 1
                     }
                     if (foundIdx >= 0) {

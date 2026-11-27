@@ -962,22 +962,27 @@ class ChipQueueViewModel(
         }
     }
 
-    fun assignCourse(logicalId: Int, fromCourse: String, toCourse: String) {
+    fun assignCourse(queueId: String, fromCourse: String, toCourse: String) {
         val next = toCourse.trim()
         if (next.isEmpty()) {
             _status.value = "Выберите дистанцию"
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            repository.event.assignCourse(logicalId, fromCourse, next)
-            repository.requestLiveSend()
-            _status.value = "№ $logicalId: дистанция «$next», результат пересчитан"
+            try {
+                repository.assignFinishCourse(queueId, next)
+                repository.requestLiveSend()
+                _status.value = "Дистанция «$next», результат пересчитан"
+            } catch (e: Exception) {
+                _status.value = e.message ?: "Не удалось сменить дистанцию"
+                signalError()
+            }
         }
     }
 
     fun deleteCorrection(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.event.deleteCorrection(id)
+            repository.deleteFinishCorrection(id)
             repository.requestLiveSend()
             _status.value = "Корректировка отменена, результат пересчитан"
         }

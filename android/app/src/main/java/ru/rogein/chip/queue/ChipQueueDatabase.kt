@@ -109,6 +109,15 @@ interface ChipQueueDao {
     @Query(
         """
         UPDATE chip_queue
+        SET courseName = :courseName
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateFinishCourse(id: String, courseName: String)
+
+    @Query(
+        """
+        UPDATE chip_queue
         SET personName = :personName
         WHERE logicalId = :logicalId
         """,

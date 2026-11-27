@@ -55,6 +55,8 @@ data class CorrectionAssignCoursePayload(
     val logicalId: Int,
     val fromCourse: String,
     val toCourse: String,
+    /** Finish queue id this assignment belongs to; empty on legacy ops that targeted the bib alone. */
+    val queueId: String = "",
 )
 
 data class CorrectionDeletePayload(
@@ -132,12 +134,16 @@ fun correctionAssignCoursePayloadJson(
     logicalId: Int,
     fromCourse: String,
     toCourse: String,
-): String = JSONObject()
-    .put("correction_id", correctionId)
-    .put("logical_id", logicalId)
-    .put("from_course", fromCourse)
-    .put("to_course", toCourse)
-    .toString()
+    queueId: String = "",
+): String {
+    val obj = JSONObject()
+        .put("correction_id", correctionId)
+        .put("logical_id", logicalId)
+        .put("from_course", fromCourse)
+        .put("to_course", toCourse)
+    if (queueId.isNotBlank()) obj.put("queue_id", queueId)
+    return obj.toString()
+}
 
 fun correctionDeletePayloadJson(correctionId: String): String =
     JSONObject().put("correction_id", correctionId).toString()
@@ -210,6 +216,7 @@ fun parseCorrectionAssignCoursePayload(payloadJson: String): CorrectionAssignCou
         logicalId = obj.getInt("logical_id"),
         fromCourse = obj.optString("from_course"),
         toCourse = obj.optString("to_course").ifBlank { obj.optString("course") },
+        queueId = obj.optString("queue_id"),
     )
 }
 

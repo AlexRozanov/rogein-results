@@ -142,6 +142,36 @@ class ChipIdentityTest {
         assertFalse(canChangeFinishNumber(null, "04AA", 1, "04AA"))
     }
 
+    @Test
+    fun assignedCourseFollowsQueueIdNotTheWholeBib() {
+        val corrections = listOf(
+            AssignCourseCorrection(10, fromCourse = "спринт", toCourse = "лес", queueId = "q-forest"),
+            AssignCourseCorrection(10, fromCourse = "спринт", toCourse = "спринт-2", queueId = "q-sprint"),
+        )
+        assertEquals(
+            "лес",
+            effectiveAssignedCourse("q-forest", 10, "спринт", corrections),
+        )
+        assertEquals(
+            "спринт-2",
+            effectiveAssignedCourse("q-sprint", 10, "спринт", corrections),
+        )
+        assertEquals(
+            "",
+            effectiveAssignedCourse("q-other", 10, "спринт", corrections),
+        )
+    }
+
+    @Test
+    fun legacyAssignWithoutQueueIdOnlyHitsMatchingFromCourse() {
+        val corrections = listOf(
+            AssignCourseCorrection(10, fromCourse = "спринт", toCourse = "лес", queueId = ""),
+        )
+        assertEquals("лес", effectiveAssignedCourse("q1", 10, "спринт", corrections))
+        assertEquals("лес", effectiveAssignedCourse("q2", 10, "лес", corrections))
+        assertEquals("", effectiveAssignedCourse("q3", 10, "длинная", corrections))
+    }
+
     private fun ref(id: String, uid: String, logicalId: Int, course: String) =
         FinishQueueRef(id, uid, logicalId, course)
 }
